@@ -1,0 +1,45 @@
+[build-system]
+# >=77 for PEP 639 `license` / `license-files`.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bgtdecomp"
+version = "0.2.0"
+description = "Recover code and assets from games built with BGT (BlastBay Gaming Toolkit)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE.md"]
+authors = [{ name = "KamiKitsune420 (Adel Spence)" }]
+dependencies = ["pycryptodome>=3.15"]
+
+[project.urls]
+Homepage = "https://github.com/KamiKitsune420/bgt-decomp-tools"
+
+[project.optional-dependencies]
+# Only needed to disassemble the x86 runtime. AngelScript bytecode does not need
+# it -- as_opcodes reads the engine's own opcode table and decodes directly.
+x86 = ["capstone>=5.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+bgt = "bgtdecomp.cli:main"
+# The single-purpose entry points predate `bgt` and still work; scripts and
+# notes in other folders call them by name.
+bgt-unpack = "bgtdecomp.bgt_unpack:main"
+bgt-repack = "bgtdecomp.bgt_repack:main"
+bgt-disasm = "bgtdecomp.as_disasm:main"
+bgt-crack = "bgtdecomp.bgt_crack:main"
+bgt-validate = "bgtdecomp.bgt_validate:main"
+bgt-ghidra = "bgtdecomp.bgt_ghidra:main"
+bgt-lift = "bgtdecomp.as_lift:main"
+
+[tool.setuptools]
+# The modules live in tools/ and are also runnable as plain scripts from there;
+# this maps that directory onto an importable package without moving anything.
+package-dir = { bgtdecomp = "tools" }
+packages = ["bgtdecomp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

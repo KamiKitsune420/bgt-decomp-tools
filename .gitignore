@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors and OS
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# This repo ships no game files, no extracted binaries and no per-title
+# findings. Scratch output belongs outside the checkout -- these are a
+# backstop for when it lands here by accident.
+*.exe
+*.dat
+*.bin
+*.asm
+*.as
+*.ogg
+*.wav
+work/
+out/
+scratch/
