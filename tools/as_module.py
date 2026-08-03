@@ -869,25 +869,79 @@ def _try_parse_enums(data: bytes, dialect: str, start: int,
     return enums, r
 
 
+def _probe_classes(data: bytes, dialect: str, start: int,
+                   enums: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+    """Score a candidate head by how far the class declarations get.
+
+    The enum section alone cannot settle the head -- a module with no enums has
+    nothing to count, and a wrong candidate can still yield one plausible-looking
+    record. What follows the enums can settle it: an encoded class count, then
+    exactly that many phase-1 declarations, each of which has to carry an
+    identifier-shaped name. Only the right head parses all of them.
+
+    Returns (all_declared_parsed, parsed, end_offset), ordered so that a
+    complete class section outranks a longer partial one.
+    """
+    r = Reader(data, dialect, start)
+    parsed = 0
+    declared = 0
+    try:
+        for _ in range(len(enums)):
+            r.enum()
+        declared = r.eu()
+        if declared < 0 or declared > 1 << 20:
+            return (0, 0, start)
+        for _ in range(declared):
+            r.type_decl_phase1()
+            parsed += 1
+    except (ParseError, IndexError, struct.error):
+        pass
+    return (1 if parsed and parsed == declared else 0, parsed, r.p)
+
+
 def detect(data: bytes) -> Tuple[str, int, List[Dict[str, Any]]]:
     """Return (dialect, start_offset, enums).
 
-    The head is `u8 noDebugInfo` then an encoded enum count, but which byte the
-    count actually sits at has varied between builds -- so rather than assume,
-    try each plausible start under each dialect and keep whichever parses the
-    most enum records. A wrong guess dies within one or two records because an
-    enum name has to be a valid identifier.
+    The head is `eu(noDebugInfo)` then `eu(enumCount)`, so the enums start at a
+    computed offset rather than a fixed one -- a module with 64 or more enums
+    spends two bytes on the count. Read that header, then confirm the reading by
+    parsing what it implies: the enum records, the class count, and every class
+    declaration the count promises.
+
+    Candidates from a scan of plausible start offsets are kept alongside the
+    header-derived one and scored the same way, so a build whose header is not
+    shaped as expected still has a route in. The ranking never rewards "parsed
+    the most enums" on its own: a module can legitimately declare zero enums --
+    Tomb Hunter does -- and then the only enum record any candidate finds is a
+    misparse. What decides it is the class section landing whole.
     """
-    best_dialect, best_start = TAGGED, 1
-    best_enums: List[Dict[str, Any]] = []
+    candidates = []                          # (dialect, start, enums)
     for dialect in (TAGGED, LEN2):
+        # The header-derived head. eu() is dialect-independent, so both dialects
+        # get the same start; which one is right is settled by the probe.
+        try:
+            _, p = read_encoded_uint(data, 0)          # noDebugInfo
+            n_enums, start = read_encoded_uint(data, p)
+            if 0 <= n_enums <= 4096:
+                r = Reader(data, dialect, start)
+                enums = [r.enum() for _ in range(n_enums)]
+                candidates.append((dialect, start, enums))
+        except (ParseError, IndexError, struct.error):
+            pass
         for start in range(1, 6):
             enums, _ = _try_parse_enums(data, dialect, start)
-            if len(enums) > len(best_enums):
-                best_dialect, best_start, best_enums = dialect, start, enums
-    if not best_enums:
-        raise ParseError("neither dialect parses an enum section")
-    return best_dialect, best_start, best_enums
+            if enums:
+                candidates.append((dialect, start, enums))
+
+    best = None
+    best_score = None
+    for dialect, start, enums in candidates:
+        score = _probe_classes(data, dialect, start, enums) + (len(enums),)
+        if best_score is None or score > best_score:
+            best, best_score = (dialect, start, enums), score
+    if best is None or best_score[1] == 0:
+        raise ParseError("neither dialect parses a coherent module head")
+    return best
 
 
 def module_strings(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
