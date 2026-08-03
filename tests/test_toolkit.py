@@ -827,6 +827,44 @@ def test_harvest_runs_respects_max_join():
     assert max(r.count(NUL) for r in runs) == 2      # 3 pieces => 2 separators
 
 
+def test_harvest_keeps_literals_containing_nul():
+    """A BGT literal may carry NUL, and the KDF is handed a pointer and a length
+    rather than a C string -- so those NULs are part of the password. Requiring
+    every byte to be printable discarded exactly the literals worth finding:
+    Tomb Hunter's keys are written `"\\0" * 19 + "melhesday" + "\\0" * 53` for
+    that reason, and no printable-run harvest can represent one."""
+    padded = NUL * 3 + b"melhesday" + NUL * 4      # _len2 encodes 2*len in a byte
+    lits = as_module.module_strings(_len2(padded), as_module.LEN2)
+    assert padded in lits
+
+
+def test_harvest_rejects_a_literal_that_is_not_text_shaped():
+    """The scan is blind, so loosening the filter must not admit everything --
+    a run of NULs alone is not a literal, and neither is binary."""
+    assert as_module.module_strings(_len2(NUL * 12), as_module.LEN2) == []
+    assert as_module.module_strings(_len2(b"\x01\x02\xff\xfe"), as_module.LEN2) == []
+
+
+def test_harvest_cores_offers_both_readings_of_a_padded_literal():
+    """Whether the password is the padded literal or the word inside it is not
+    something the harvester can know, so both have to be candidates."""
+    padded = NUL * 3 + b"melhesday" + NUL * 4
+    cores = bgt_crack.harvest_cores([padded])
+    assert b"melhesday" in cores
+    assert bgt_crack.harvest_cores([b"no_nuls_here"]) == []
+
+
+def test_module_strings_detects_the_dialect_when_not_told():
+    """Defaulting to the len2 rule harvested a tagged module under the wrong
+    encoding and returned coincidence rather than its literals."""
+    #     noDebugInfo, 0 enums, 1 class, then that class's phase-1 record
+    module = (b"\x01\x00\x01"
+              + _tagged_str(b"cls") + b"\x00\x10\x00\x01" + b"\x01" + NUL
+              + _tagged_str(b"password_here"))
+    assert as_module.detect(module)[0] == as_module.TAGGED
+    assert b"password_here" in as_module.module_strings(module)
+
+
 def test_build_candidates_deduplicates_across_harvesters():
     module = _len2(b"repeated") + _len2(b"repeated") + _len2(b"unique")
     cands, counts = bgt_crack.build_candidates(module, ["strings"])

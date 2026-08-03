@@ -944,12 +944,44 @@ def detect(data: bytes) -> Tuple[str, int, List[Dict[str, Any]]]:
     return best
 
 
+def _literal_is_plausible(s: bytes) -> bool:
+    """Accept a scanned literal, NUL bytes and all.
+
+    A BGT literal may contain NUL: `"\\0\\0...melhesday\\0\\0..."` is a real
+    password from a shipped title, written that way precisely so that a harvest
+    looking for printable runs cannot represent it. The KDF is handed a pointer
+    and a length rather than a C string, so those interior NULs are part of the
+    password and the literal has to survive whole.
+
+    Requiring every byte to be printable therefore discards exactly the literals
+    worth finding. What is kept instead is text-shaped: printable ASCII, NUL or
+    ordinary whitespace, with at least one printable byte so that a run of NULs
+    -- which this blind scan finds by the thousand -- is not mistaken for one.
+    """
+    printable = 0
+    for c in s:
+        if 0x20 <= c <= 0x7E:
+            printable += 1
+        elif c not in (0x00, 0x09, 0x0A, 0x0D):
+            return False
+    return printable > 0
+
+
 def module_strings(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
     """Harvest every literal the string encoding actually yields.
 
     Unlike a printable-run sweep this respects the encoding, so the boundaries
     are exact -- which matters when a literal is being used as a password.
+
+    The dialect is detected when not given. It used to default to the `len2`
+    rule, which silently harvested a `tagged` module under the wrong encoding
+    and returned whatever coincidence produced rather than its literals.
     """
+    if dialect is None:
+        try:
+            dialect = detect(data)[0]
+        except (ParseError, IndexError, struct.error):
+            dialect = LEN2
     out = []
     seen = set()
     n = len(data)
@@ -972,7 +1004,7 @@ def module_strings(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
             break
         if 1 <= length <= 512 and q + length <= n:
             s = data[q:q + length]
-            if all(0x20 <= c <= 0x7E for c in s) and s not in seen:
+            if s not in seen and _literal_is_plausible(s):
                 seen.add(s)
                 out.append(s)
         p += 1

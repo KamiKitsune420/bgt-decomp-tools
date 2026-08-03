@@ -380,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("crack", help="search a module for a pack password")
     p.add_argument("pack")
     p.add_argument("--dict", dest="dictionary", required=True)
-    p.add_argument("--harvest", default="strings,runs")
+    p.add_argument("--harvest", default="strings,runs,cores")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--extra", action="append")
     p.add_argument("--quiet", action="store_true")

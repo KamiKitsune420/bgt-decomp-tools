@@ -22,15 +22,21 @@ tried. The report prints how many that was and where they came from, because
 "tested 800k candidates, 0 hits" and "tested the 12 strings I remembered to
 harvest, 0 hits" are very different claims and look identical otherwise.
 
-Two harvesters are provided because BGT passwords have been found in both shapes:
+Several harvesters are provided because BGT passwords turn up in several shapes:
 
   * `strings`  -- every length-prefixed string the module's own encoding yields.
-    Exact boundaries, so a literal is recovered as the script wrote it.
+    Exact boundaries, so a literal is recovered as the script wrote it. NUL bytes
+    inside a literal are kept: the KDF takes a pointer and a length, not a C
+    string, so they are part of the password.
   * `runs`     -- consecutive literals joined with NUL. Real passwords have this
     shape: a pointer into the string block plus an over-long length reads several
     NUL-terminated strings as one value. Manamon 2's confirmed DRM password
     `al ba` and three others are all slices of this kind, so a search over whole
     literals alone would have missed every one.
+  * `cores`    -- the readable part of a NUL-padded literal. Tomb Hunter writes
+    its keys as `"\\0" * 19 + "melhesday" + "\\0" * 53`, and whether the password
+    is the literal or the word inside it is not knowable here, so both are tried.
+  * `printable` -- plain printable runs, the crude fallback.
 """
 
 import argparse
@@ -73,6 +79,29 @@ def harvest_runs(literals: Sequence[bytes], max_join: int = 4) -> List[bytes]:
     return out
 
 
+def harvest_cores(literals: Sequence[bytes]) -> List[bytes]:
+    """The readable parts of literals that carry NUL bytes.
+
+    A NUL-padded literal has two readings and only one of them can be right, so
+    both are tried: the whole thing, which `strings` already yields, and what is
+    left once the padding is taken off. Tomb Hunter ships
+    `"\\0" * 19 + "melhesday" + "\\0" * 53` and installs it as a decoy key --
+    whether the password is that literal or the word inside it is not something
+    the harvester can know.
+
+    Yields the NUL-trimmed literal, the NUL-free concatenation, and each
+    NUL-separated piece; `build_candidates` de-duplicates the overlap.
+    """
+    out: List[bytes] = []
+    for lit in literals:
+        if b"\x00" not in lit:
+            continue
+        out.append(lit.strip(b"\x00"))
+        out.append(lit.replace(b"\x00", b""))
+        out.extend(piece for piece in lit.split(b"\x00") if piece)
+    return out
+
+
 def harvest_printable(data: bytes, minimum: int = 4) -> List[bytes]:
     """Plain printable runs -- the crude sweep, kept as a fallback.
 
@@ -93,7 +122,7 @@ def harvest_printable(data: bytes, minimum: int = 4) -> List[bytes]:
     return out
 
 
-HARVESTERS = ("strings", "runs", "printable")
+HARVESTERS = ("strings", "runs", "cores", "printable")
 
 
 def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], Dict[str, int]]:
@@ -108,6 +137,8 @@ def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], 
             produced = literals = harvest_strings(module)
         elif name == "runs":
             produced = harvest_runs(literals or harvest_strings(module))
+        elif name == "cores":
+            produced = harvest_cores(literals or harvest_strings(module))
         elif name == "printable":
             produced = harvest_printable(module)
         else:
@@ -211,8 +242,8 @@ def main() -> int:
     ap.add_argument("pack", help="the encrypted SFPv1 pack (e.g. sounds.dat)")
     ap.add_argument("--dict", dest="dictionary", required=True,
                     help="recovered module bytecode to harvest candidates from")
-    ap.add_argument("--harvest", default="strings,runs",
-                    help="comma-separated: %s (default: strings,runs)"
+    ap.add_argument("--harvest", default="strings,runs,cores",
+                    help="comma-separated: %s (default: strings,runs,cores)"
                          % ", ".join(HARVESTERS))
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel workers (default 1; 0 = os.cpu_count())")
