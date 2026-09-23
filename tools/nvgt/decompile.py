@@ -530,6 +530,11 @@ class FuncDecompiler:
             self.events.append(Event("stmt", pos, (dt.format(), f"{local} = {calltxt};")))
             for a in holders:
                 a.text = a.text.replace(calltxt, local)
+            # The call has been emitted here; if its own return value was never
+            # consumed it is still pending as a bare statement, and flushing that
+            # would emit the call a second time (`d.get(...)` twice).
+            if self.pending_value_call == calltxt:
+                self.pending_value_call = None
 
     # -- main loop ------------------------------------------------------------
 
