@@ -1066,19 +1066,22 @@ library builds recompile. But only `test_roundtrip_behavior`'s two fixtures are
 *run* and compared, and NVGT decompiler bugs compile cleanly while computing
 something else. A new construct belongs in a fixture, not only in the corpus.
 
-**One NVGT construct still decompiles wrong**, of the compiles-and-lies kind
-(repro in `docs/nvgt.md`): a `&&`/`||` whose result is *stored* in a bool and
-used later loses its first operand (`bool b = (x>0)&&(x<10); return b?100:200`
-becomes `(x<10)?100:200`). The value is recovered only where the merge loads it
-straight into the value register (a return or a condition); a stored result
-reaches its use by another path. A naive skip-the-`SUSPEND` fix makes the
-ternary case right but silently breaks `bool b = A || B; if (b) ...` and cut the
-corpus to 50/52, so it is left open -- a wrong value that compiles is worse than
-a known gap. Two siblings are fixed: a ternary used *inside* a larger expression
-(`10 + (c ? 3 : 7)` no longer becomes `10 + 7` -- the value-merge derives the
-ternary's slot from its arms when the merge is an arithmetic op), and a `for`
-variable reused across sibling scopes (hoisting now takes scalar names from
-every debug variable, not just the last per slot).
+**Two narrow NVGT constructs still decompile wrong** (repros in `docs/nvgt.md`),
+both pre-existing and found while fixing the three below: a `? :` over the
+constants 0 and 1 *added inside an expression* (`(x>0 ? 1:0) + ...` -- the `0/1`
+arms make `_begin_bool_merge` claim it before `_begin_value_merge` can, and its
+`ADDi` merge produces an empty `if`), and a guarded increment in a stripped
+build (`if (f()) total += 10;` sometimes hoists the `+= 10` out of the `if`).
+
+**Three compiles-and-lies bugs found with the control-flow fixture are fixed:**
+a ternary used *inside* a larger expression (`10 + (c ? 3 : 7)` no longer
+becomes `10 + 7` -- the value-merge derives the ternary's slot from its arms
+when the merge is arithmetic); a `for` variable reused across sibling scopes
+(hoisting takes scalar names from every debug variable, not just the last per
+slot); and a `&&`/`||` whose result is *stored* in a bool and used later (the
+merge folds `(A op B)` into the stored slot at its `CpyVtoV4`, so an `if`, a
+ternary or an expression reading it later sees the whole value -- guarded to a
+bool destination so a uint ternary still goes to the value-merge).
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified

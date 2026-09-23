@@ -723,7 +723,16 @@ class FuncDecompiler:
             self.pending_value_call = None
             return
         if name in ("CpyVtoV4", "CpyVtoV8"):
-            self._bind(_s16(ins.w_arg), self._slot_atom(_s16(ins.w_arg2)))
+            src = _s16(ins.w_arg2)
+            value = self._slot_atom(src)
+            # A stored short-circuit result: `bool b = A && B` copies the merged
+            # slot into b here. Fold (A op B) into b so its later reads -- in an
+            # if, a ternary or an expression -- get the whole value, not just B.
+            while self.bool_merges and self.bool_merges[-1]["dest"] == src \
+                    and ins.pos >= self.bool_merges[-1]["merge"]:
+                merge = self.bool_merges.pop()
+                value = Atom("call", f"({merge['first'].text} {merge['op']} {value.text})")
+            self._bind(_s16(ins.w_arg), value)
             return
         if name in ("SetV4", "SetV8", "SetV2", "SetV1"):
             if ins.string_const is not None:
@@ -1818,13 +1827,18 @@ class FuncDecompiler:
                 return False
         finish_pos = merge_pos
         if merge_ins.name == "CpyVtoV4" and _s16(merge_ins.w_arg2) == result_dest:
-            if merge_idx + 1 >= len(self.instrs):
+            # The result is stored into another slot and read later -- a named
+            # `bool b = A && B` used in an `if`, a ternary or an expression, not
+            # a value fed straight to the register. The CpyVtoV4 at the merge
+            # folds (A op B) into the stored slot (see the CpyVtoV4 handler), and
+            # every later read of that slot sees the whole value, however far.
+            # Only when the stored slot is a bool: the same shape storing a uint
+            # is a ternary over values, which _begin_value_merge handles -- and
+            # folding it as `A op uint` gave "No conversion from 'uint' to
+            # 'bool'". A short-circuit's value is always a bool.
+            b_type = self.var_types.get(_s16(merge_ins.w_arg))
+            if b_type is None or b_type.format() != "bool":
                 return False
-            load = self.instrs[merge_idx + 1]
-            if load.name != "CpyVtoR4" or _s16(load.w_arg) != _s16(merge_ins.w_arg):
-                return False
-            result_dest = _s16(merge_ins.w_arg)
-            finish_pos = load.pos
         elif merge_ins.name != "CpyVtoR4" or _s16(merge_ins.w_arg) != result_dest:
             return False
         taken = self._taken_condition(ins)

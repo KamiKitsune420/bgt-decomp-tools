@@ -1,0 +1,35 @@
+// A regression fixture for the stored-short-circuit bug. `&&`/`||` used
+// directly in a return or a condition always decompiled correctly; one whose
+// result is STORED in a bool and used later lost its first operand --
+// `bool b = (x>0) && (x<10); return b ? 100 : 200;` came back as
+// `(x<10) ? 100 : 200`, and `bool b = A||B; if (b) ...` dropped A. Every bool
+// below is stored, then used in a different context.
+int in_ternary(int x) {
+	bool b = (x > 0) && (x < 10);
+	return b ? 100 : 200;
+}
+
+int in_if(int x, int y) {
+	bool b = (x > 0) || (y > 0);
+	int r = 0;
+	if (b) r += 1;
+	return r;
+}
+
+int in_expression(int x) {
+	bool hot = (x > 100) || (x < -100);
+	return 1000 + (hot ? 1 : 0) * 7;
+}
+
+void main() {
+	// Plain arithmetic over int-returning functions -- each stores a `&&`/`||`
+	// result and uses it in a ternary, an if or an expression. main itself uses
+	// no if or ternary, to keep the check on the stored-short-circuit bug.
+	int total = 0;
+	total += in_ternary(5) + in_ternary(-5) * 1000;         // 100 + 200000
+	total += in_if(-1, -1) + in_if(1, -1) * 10;             // 0 + 10
+	total += in_expression(200) + in_expression(0) * 100;   // 1007 + 100000
+	file_put_contents("result.txt", "" + total);
+	file_put_contents("debug.bin", script_get_module("nvgt_game", 0).get_bytecode(false));
+	file_put_contents("strip.bin", script_get_module("nvgt_game", 0).get_bytecode(true));
+}

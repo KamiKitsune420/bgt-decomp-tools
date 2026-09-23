@@ -165,19 +165,21 @@ fix rather than shipped in a failing test. Each has a one-line repro.
   purpose: a diamond producing a handle or a short-circuit bool is an ordinary
   branch, and folding those as a value ternary put a `bool` where a handle or
   double was wanted -- it briefly cut the corpus to 35/52 before the guard.)
-- **A stored short-circuit result.** `bool b = (x > 0) && (x < 10); return b ?
-  100 : 200;` decompiles to an empty `if (x <= 0) {}` and `return ((x < 10) ?
-  100 : 200);` -- the first operand is lost and only the second survives. The
-  `&&`/`||` value is recovered (`_begin_bool_merge`) only where the merge loads
-  the result straight into the value register (`CpyVtoR4`), i.e. a return or a
-  condition. When the result is stored into a slot (`CpyVtoV4` into `b`, then a
-  `SUSPEND`, then a later load) it is not. A naive fix -- skip the `SUSPEND` and
-  treat the later load as the merge -- makes `b ? 100 : 200` come out right but
-  silently breaks `bool b = A || B; if (b) ...`, where `b` reaches its use by a
-  different path, and it cut the corpus to 50/52. The real fix has to bind the
-  short-circuit *value* to the stored slot and honour every later read of it,
-  not just the first; it is left open rather than shipped half-right, because a
-  wrong value that compiles is worse than a known gap.
+- **A stored short-circuit result** (*fixed*). `bool b = (x > 0) && (x < 10);
+  return b ? 100 : 200;` decompiled to an empty `if (x <= 0) {}` and `return ((x
+  < 10) ? 100 : 200);` -- the first operand lost, only the second surviving. The
+  `&&`/`||` value was recovered (`_begin_bool_merge`) only where the merge loads
+  the result straight into the value register (`CpyVtoR4`), a return or a
+  condition. When it is stored into a slot (`CpyVtoV4` into `b`) and read later,
+  it was not. The merge now folds `(A op B)` into the stored slot at that
+  `CpyVtoV4`, so every later read -- in an `if`, a ternary or an expression,
+  however far away -- sees the whole value; the `CpyVtoR4` and `CpyVtoV4`
+  handlers share one consumption path. Restricted to a **bool** destination:
+  the same shape storing a uint is a ternary over values (`_begin_value_merge`
+  handles it), and folding it as `A op uint` gave "No conversion from 'uint' to
+  'bool'" and cut the corpus to 28/52 before the guard. With it the corpus is
+  52/52, and `bool b = A && B` used in a ternary, an `if` and an expression all
+  round-trip. `fixtures/short_circuit.nvgt` guards it.
 - **A loop variable reused in sibling scopes** (*fixed*). `for (int i ...) {}
   for (uint i ...) {}` is legal -- two scopes -- and the compiler reuses each
   counter's slot for a later local (`i` then `total`, `i` then `v`). The
@@ -188,9 +190,21 @@ fix rather than shipped in a failing test. Each has a one-line repro.
   variable, not just the survivors. `fixtures/reused_loop_variable.nvgt` guards
   it: its debug build must recompile and declare the counter once.
 
-The stored-short-circuit bug is value recovery, not reading: the bytecode is
-understood, but the source shape put around it is wrong. It remains open in
-`CLAUDE.md`.
+All three found with the control-flow fixture are now fixed. Two narrower,
+pre-existing cousins surfaced while testing them and stay open (they are value
+recovery, not reading -- the bytecode is understood, the shape around it is
+wrong):
+
+- **A `? :` over the constants 0 and 1, added inside an expression.** `(x > 0 ?
+  1 : 0) + (x > 5 ? 1 : 0) * 10` decompiles with the first term as an empty
+  `if` and `0 +` in its place. The `0/1` arms make `_begin_bool_merge` claim it
+  before `_begin_value_merge` can, but the merge is an `ADDi`, not a register
+  load, so it produces nothing. (`(x > 5 ? 1 : 0) * 10`, whose merge is `MULi`,
+  is fine.)
+- **A guarded increment in a stripped build.** `if (f()) total += 10;`
+  sometimes decompiles with the `total += 10` hoisted out of the `if` and run
+  unconditionally. The guard's diamond is mis-structured when the body is a
+  single compound assignment.
 
 What had to change, grouped by what it broke:
 

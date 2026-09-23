@@ -154,6 +154,19 @@ class TernaryExpressionTests(_BehaviourFixture):
         self.assertRegex(source, r"\+ \(.*\? .* : .*\)")
 
 
+class ShortCircuitTests(_BehaviourFixture):
+    FIXTURE = "short_circuit.nvgt"
+
+    def test_stripped_build_keeps_both_operands_of_a_stored_short_circuit(self):
+        # The bug: `bool b = (x>0) && (x<10)` used later dropped the first
+        # operand -- `(x<10) ? ...`. Both operands must survive.
+        project = self._decompiled("strip")
+        source = "\n".join(p.read_text(encoding="utf-8")
+                           for p in project.rglob("*.nvgt"))
+        self.assertRegex(source, r"\(arg0 > 0\) && \(arg0 < 10\)")   # in_ternary
+        self.assertRegex(source, r"\(arg0 > 0\) \|\| \(arg1 > 0\)")  # in_if
+
+
 class ReusedLoopVariableTests(_BehaviourFixture):
     FIXTURE = "reused_loop_variable.nvgt"
 
