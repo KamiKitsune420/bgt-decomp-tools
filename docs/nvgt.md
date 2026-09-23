@@ -250,9 +250,40 @@ bgt nvgt disasm game.exe -o game.asm
 bgt nvgt extract game.exe game.bin --packs packs/
 bgt nvgt inspect game.exe --output report.json
 bgt nvgt pack list packs/sounds.dat --key "..."
-bgt nvgt library game.exe --compiler nvgt.exe --include-root include --include form.nvgt ...
+bgt nvgt library game.exe --compiler nvgt.exe --include-root include [--auto]
 ```
 
 Recovery never runs the target. `--check-with`, `library` and `probe` run the
 NVGT *compiler* or an owned harness in a disposable folder, and say so in their
 reports.
+
+### Reusing the standard library, detected automatically
+
+`bgt nvgt library` replaces a shipped library file the game was built with by an
+`#include`, once it has confirmed **every one of that file's declarations by
+exact bytecode** against a freshly compiled reference (a name match is never
+enough; a changed copy is rejected). `--include` used to be mandatory. With no
+`--include` it now auto-detects them with the same logic as `bgt files`, so
+
+```bash
+bgt nvgt library game.exe --compiler C:/nvgt/nvgt.exe --include-root C:/nvgt/include \
+    --build-dir work/build --output work/recovered.nvgt --reference-mode runtime
+```
+
+finds which library files a stripped module used, confirms them, and emits
+`#include` lines for the ones that verify. On the installed 0.90.0-dev, whose
+payload profile is unverified, use `--reference-mode runtime` (the reference is
+exported with `get_bytecode`, sidestepping the payload format).
+
+**A false negative that hid for a while.** The exact-bytecode comparison
+resolves operands to names so that two builds of the same source match despite
+different function/type tables. Five opcodes were missed: `LoadThisR`,
+`LoadRObjR`, `LoadVObjR`, `ADDSi` and `ADDProp` carry the accessed property's
+type as a `usedTypeIds` index in `dw_arg`, and `RefCpyV` carries the assigned
+handle's type as a `usedTypes` index in `qw_arg`. Left raw, those indices differ
+between any two independent builds, so **every class with a `this`-property load,
+a member access or a handle assignment was rejected** -- almost all of them.
+`asreader` now resolves each to its type (the decompiler reads none of these
+fields, so its output is unchanged and the corpus still recompiles 52/52), and
+the comparison normalizes them. A form-including module now reuses `form.nvgt`
+and recompiles to identical behaviour.

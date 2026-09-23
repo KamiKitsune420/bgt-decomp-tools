@@ -70,13 +70,18 @@ def normalized_function(f: Function):
                 dw = target
         if i.type_ref is not None:
             target = ("type", type_key(i.type_ref))
-            if i.name in ("ALLOC", "FREE", "REFCPY", "OBJTYPE"):
+            if i.name in ("ALLOC", "FREE", "REFCPY", "RefCpyV", "OBJTYPE"):
                 qw = target
             elif i.name == "TYPEID":
                 dw = target
         if i.data_type is not None:
             target = ("datatype", datatype_key(i.data_type))
-            if i.name in ("TYPEID", "Cast"):
+            if i.name in ("TYPEID", "Cast", "LoadThisR", "LoadRObjR", "LoadVObjR",
+                          "ADDSi", "ADDProp"):
+                # These carry the property's type as a usedTypeIds index in
+                # dw_arg. Raw, it differs between two builds of the same source
+                # (different type tables) and rejected every class with a
+                # this-property load or member access -- almost all of them.
                 dw = target
             elif i.name == "SetListType":
                 qw = target
@@ -219,6 +224,32 @@ def render_reused(target: Module, plan: ReusePlan, comments=False):
     return "".join(lines[:split]) + prefix + "".join(lines[split:])
 
 
+def detect_includes(target: Module, include_root) -> list[str]:
+    """The shipped library files this module was built with, by name.
+
+    Reuses script_files' attribution -- a declaration match, not just a name --
+    so a game's own class that happens to share a library name is not offered
+    for reuse. Only the top-level includes are returned; each pulls its own
+    sub-includes when the reference is compiled, and plan_reuse confirms every
+    declaration by bytecode regardless of nesting. The names are what a game's
+    own code would `#include`, so a game that shipped an edited copy still
+    surfaces here and is then rejected by the exact-bytecode check, not hidden.
+    """
+    try:                      # installed as a package
+        from .. import script_files
+    except ImportError:       # run directly from a checkout
+        try:
+            import script_files
+        except ImportError:   # only tools/nvgt on the path (nvgt test context)
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            import script_files
+    library = script_files.library_index([str(include_root)], ("*.nvgt",))
+    entities = script_files.nvgt_entities(target)
+    attribution = script_files.attribute(entities, library)
+    return script_files.top_level_includes(attribution, library)
+
+
 def compile_reference(compiler, includes, include_root, build_dir, nvgt_info=None,
                       reference_mode="packaged"):
     """Compile a fresh, isolated include-only probe and capture source hashes."""
@@ -297,7 +328,12 @@ def main():
     parser.add_argument("target")
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--include-root", required=True)
-    parser.add_argument("--include", action="append", required=True)
+    parser.add_argument("--include", action="append",
+                        help="a library file to try reusing; repeatable. Omit "
+                             "to auto-detect from the target (see --auto)")
+    parser.add_argument("--auto", action="store_true",
+                        help="detect the includes from the target with bgt files "
+                             "(the default when no --include is given)")
     parser.add_argument("--build-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--bundle", action="store_true",
@@ -306,10 +342,18 @@ def main():
                         help="runtime exports bytecode from an owned include-only harness; works with randomized CI encryption")
     args = parser.parse_args()
     target = load_any(args.target)
+    includes = args.include
+    if not includes or args.auto:
+        detected = detect_includes(target, args.include_root)
+        includes = sorted(set((includes or []) + detected))
+        print("auto-detected includes: %s" % (", ".join(includes) or "(none)"))
+        if not includes:
+            raise SystemExit("No shipped library file was detected in the target; "
+                             "pass --include explicitly if you know one")
     reference, hashes, harness = compile_reference(
-        args.compiler, args.include, args.include_root, args.build_dir,
+        args.compiler, includes, args.include_root, args.build_dir,
         getattr(target, "nvgt_info", None), args.reference_mode)
-    plan = plan_reuse(target, reference, args.include, args.include_root,
+    plan = plan_reuse(target, reference, includes, args.include_root,
                       hashes, [harness])
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -1047,9 +1047,11 @@ class _Reader:
         bc_sizes = [i.size for i in f.bytecode]
         for bc_num, ins in enumerate(f.bytecode):
             n = ins.name
-            if n in ("ALLOC", "FREE", "REFCPY", "OBJTYPE"):
-                # All four carry a usedTypes index in their pointer-sized
-                # arg (asBCTYPE_*_QW on x64).
+            if n in ("ALLOC", "FREE", "REFCPY", "RefCpyV", "OBJTYPE"):
+                # All carry a usedTypes index in their pointer-sized arg
+                # (asBCTYPE_*_QW on x64). RefCpyV is PSF+REFCPY fused and
+                # carries the same handle type -- module-relative, so it too
+                # made a matching handle copy read differently across builds.
                 idx = ins.qw_arg
                 if 0 <= idx < len(m.used_types):
                     ins.type_ref = m.used_types[idx]
@@ -1079,6 +1081,15 @@ class _Reader:
                 if idx < len(used_obj_props):
                     ti, pname = used_obj_props[idx]
                     ins.prop_name = f"{ti.name}.{pname}" if ti else pname
+                # LoadThisR/LoadRObjR/LoadVObjR also carry the property's type as
+                # a usedTypeIds index in dw_arg -- module-relative, so a raw
+                # index makes the same property read differently across two
+                # builds. Resolve it (the decompiler reads only prop_name;
+                # library_recovery's bytecode comparison reads this).
+                if n in ("LoadThisR", "LoadRObjR", "LoadVObjR", "ADDSi", "ADDProp") \
+                        and 0 <= ins.dw_arg < len(m.used_type_ids):
+                    ins.type_id = ins.dw_arg
+                    ins.data_type = m.used_type_ids[ins.dw_arg]
             elif n in ("TYPEID", "Cast", "ADDi", "ADDIf"):
                 ins.type_id = ins.dw_arg
                 if n in ("TYPEID", "Cast") and 0 <= ins.dw_arg < len(m.used_type_ids):
