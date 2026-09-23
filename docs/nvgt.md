@@ -109,10 +109,12 @@ which is how the two halves' `?&in` rules line up.
 `x = (x + y)` is written `x += y` (and `x = (x + 1)` as `x++`), for a simple
 lvalue with no call in it so nothing is evaluated twice. A counted `while` whose
 last statement increments the variable its condition tests is then folded back
-into a `for` -- `for (i = 0; (i < n); i++)` rather than an `i = 0;` and a
+into a `for` -- `for (i = 0; i < n; i++)` rather than an `i = 0;` and a
 `while` -- but only where that is behaviour-preserving: a loop containing
 `continue` is left as a `while`, because `continue` skips the increment in a
-`while` and runs it in a `for`. `recover` wraps it into a project, and
+`while` and runs it in a `for`. A single paren pair that encloses a whole return
+value or condition is dropped (`return (x);` -> `return x;`), string-aware so a
+paren inside a literal is never touched. `recover` wraps it into a project, and
 `source_evidence.json` separates what the bytecode retained from what was
 synthesised.
 

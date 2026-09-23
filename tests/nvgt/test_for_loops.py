@@ -5,10 +5,43 @@ import unittest
 
 from decompile import _reconstruct_for_loops as fold
 from decompile import _use_compound_assignment as compound
+from decompile import _drop_redundant_parens as unparen
+from decompile import _encloses
 
 
 def run(*lines):
     return fold(list(lines))
+
+
+class RedundantParenTests(unittest.TestCase):
+    def test_encloses_only_a_single_outer_pair(self):
+        self.assertTrue(_encloses("(a + b)"))
+        self.assertTrue(_encloses("(f(x))"))
+        self.assertFalse(_encloses("(a) + (b)"))     # first ( closes mid-way
+        self.assertFalse(_encloses("a + b"))
+        self.assertTrue(_encloses('("x)y")'))        # the ) is inside a string
+
+    def one(self, line):
+        return unparen([line])[0].strip()
+
+    def test_return_value(self):
+        self.assertEqual(self.one("    return (x);"), "return x;")
+        self.assertEqual(self.one("    return (sound_play((a + b), c));"),
+                         "return sound_play((a + b), c);")
+        self.assertEqual(self.one("    return (a) + (b);"), "return (a) + (b);")
+
+    def test_branch_and_loop_conditions(self):
+        self.assertEqual(self.one("    if ((x < 6)) {"), "if (x < 6) {")
+        self.assertEqual(self.one("    if ((a) && (b)) {"), "if ((a) && (b)) {")
+        self.assertEqual(self.one("    while ((m())) {"), "while (m()) {")
+        self.assertEqual(self.one("    } while ((k < 3));"), "} while (k < 3);")
+
+    def test_for_condition(self):
+        self.assertEqual(self.one("    for (i = 0; (i < 6); i++) {"),
+                         "for (i = 0; i < 6; i++) {")
+
+    def test_a_paren_inside_a_string_is_never_removed(self):
+        self.assertEqual(self.one('    return ")";'), 'return ")";')
 
 
 class CompoundAssignmentTests(unittest.TestCase):

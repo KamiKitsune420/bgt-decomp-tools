@@ -2364,6 +2364,60 @@ class Structurer:
 # module rendering
 # --------------------------------------------------------------------------
 
+def _encloses(s):
+    """True if s is `(...)` where the first paren matches the last -- one pair
+    enclosing the whole expression, so removing it changes nothing. String
+    literals are skipped so a paren inside one never counts."""
+    if len(s) < 2 or s[0] != "(" or s[-1] != ")":
+        return False
+    depth = 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == '"' or c == "'":
+            i += 1
+            while i < len(s) and s[i] != c:
+                i += 2 if s[i] == "\\" else 1
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0 and i != len(s) - 1:
+                return False
+        i += 1
+    return depth == 0
+
+
+def _strip(s):
+    return s[1:-1] if _encloses(s) else s
+
+
+_RET = re.compile(r"^(\s*return )(.+)(;)$")
+_HEAD = re.compile(r"^(\s*(?:\} )?(?:if|while) )\((.+)\)( \{| ?;)$")
+_FOR = re.compile(r"^(\s*for \(.*?; )(.+?)(; .*\) \{)$")
+
+
+def _drop_redundant_parens(lines):
+    """Drop one fully-enclosing paren pair from a return value or a loop/branch
+    condition -- `return (x);` -> `return x;`, `if ((a)) {` -> `if (a) {`."""
+    out = []
+    for line in lines:
+        m = _RET.match(line)
+        if m:
+            out.append(m.group(1) + _strip(m.group(2)) + m.group(3))
+            continue
+        m = _HEAD.match(line)
+        if m:
+            out.append(m.group(1) + "(" + _strip(m.group(2)) + ")" + m.group(3))
+            continue
+        m = _FOR.match(line)
+        if m:
+            out.append(m.group(1) + _strip(m.group(2)) + m.group(3))
+            continue
+        out.append(line)
+    return out
+
+
 _COMPOUND = re.compile(r"^(\s*)([\w.\[\]]+) = \((.+)\);$")
 
 
@@ -2670,8 +2724,8 @@ class ModuleDecompiler:
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
             scopes = _recover_plain_scopes(ev, f, self.m.classes)
             st = Structurer(ev, f, scopes)
-            return _reconstruct_for_loops(
-                _use_compound_assignment(declarations + st.render(indent)))
+            return _drop_redundant_parens(_reconstruct_for_loops(
+                _use_compound_assignment(declarations + st.render(indent))))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
 
