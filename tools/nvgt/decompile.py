@@ -1860,10 +1860,25 @@ class FuncDecompiler:
             return False
         load = self.instrs[merge_idx]
         stack_merge = load.name == "RDSPtr"
-        if load.name not in ("CpyVtoR4", "CpyVtoR8", "PSF", "VAR", "PshV4", "PshV8", "LOADOBJ") and load.name not in CONV_OPS and not stack_merge:
-            return False
-        off = None if stack_merge else _s16(load.w_arg2 if load.name in CONV_OPS and load.bc_type != "asBCTYPE_rW_ARG" else load.w_arg)
-        if off is not None and self.is_named(off):
+        recognized = (load.name in ("CpyVtoR4", "CpyVtoR8", "PSF", "VAR",
+                                    "PshV4", "PshV8", "LOADOBJ")
+                      or load.name in CONV_OPS)
+        if recognized:
+            off = _s16(load.w_arg2 if load.name in CONV_OPS and load.bc_type != "asBCTYPE_rW_ARG" else load.w_arg)
+            if self.is_named(off):
+                return False
+        elif load.name in BINARY or load.name in IMM_BINARY or load.name in (
+                "CMPi", "CMPi64", "CMPu", "CMPu64", "CMPf", "CMPd"):
+            # The ternary's value is not pushed or returned but read straight
+            # into a numeric operand -- `ADDi slot = 10 + <ternary slot>`. Its
+            # slot is derived from the arms below (the one slot both wrote), and
+            # the arithmetic instruction that reads it runs normally. Restricted
+            # to arithmetic and comparison merges: a diamond that produces a
+            # handle or a short-circuit bool is an ordinary branch, or belongs
+            # to `_begin_bool_merge`, and folding it as a value ternary put a
+            # `bool` where a handle, float or double was expected.
+            off = None
+        else:
             return False
 
         def simulate(lo, hi):
@@ -1898,6 +1913,18 @@ class FuncDecompiler:
         if stack_merge and (len(yes.stack) != len(self.stack) + 1
                             or yes.stack[:-1] != self.stack or no.stack[:-1] != self.stack):
             return False
+        if off is None and not stack_merge:
+            # Both arms must write exactly one common temporary -- that is the
+            # ternary's value slot; the instruction after the merge reads it.
+            def written(child):
+                return {o for o in child.temps if o > 0 and
+                        (o not in self.temps or child.temps[o] is not self.temps[o])}
+            common = written(yes) & written(no)
+            if len(common) != 1:
+                return False
+            off = common.pop()
+            if self.is_named(off):
+                return False
         condition = _negate_cond(self._taken_condition(ins))
         self.temps.update(no.temps)
         yes_value = yes.stack[-1] if stack_merge else yes.temps[off]

@@ -1,0 +1,31 @@
+// A regression fixture for the ternary-inside-an-expression bug. A `? :` that
+// is the whole return value always decompiled correctly; one used as an operand
+// of a larger expression collapsed to its false arm -- `10 + (c ? 3 : 7)` came
+// back as `10 + 7`, with an empty `if`. Every ternary below is a subexpression.
+int in_sum(bool c) { return 10 + (c ? 3 : 7); }
+
+int accumulated(int x) {
+	int total = 5;
+	total += (x > 0 ? 1000 : 0);
+	total += (x > 10 ? 20 : 30);
+	return total;
+}
+
+int nested(int x) {
+	// a ternary whose arms feed another operator
+	return (x > 0 ? 2 : 3) * 100 + (x > 5 ? 7 : 9);
+}
+
+int whole_value(bool c) { return c ? 41 : 42; }   // the case that always worked
+
+void main() {
+	int total = 0;
+	total += in_sum(true) + in_sum(false) * 1000;              // 13 + 17000
+	total += accumulated(5) * 100000;                          // 1035 -> 103500000
+	total += accumulated(15) * 100;                            // 1045 -> 104500
+	total += nested(1) + nested(9) * 1000;                     // 207 + 309000
+	total += whole_value(true) + whole_value(false) * 10;      // 41 + 420
+	file_put_contents("result.txt", "" + total);
+	file_put_contents("debug.bin", script_get_module("nvgt_game", 0).get_bytecode(false));
+	file_put_contents("strip.bin", script_get_module("nvgt_game", 0).get_bytecode(true));
+}

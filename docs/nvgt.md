@@ -153,11 +153,18 @@ Writing the second fixture surfaced three bugs, each of the "compiles and lies"
 kind, so the fixture is written to avoid them and they are recorded here for a
 fix rather than shipped in a failing test. Each has a one-line repro.
 
-- **A ternary inside a larger expression.** `return c ? 3 : 7;` is correct, but
-  `return 10 + (c ? 3 : 7);` decompiles to an empty `if (c) {} else {}` and
-  `return (10 + 7);` -- the branch collapses to its false arm. The value-merge
-  that builds a `? :` fires only when the merged value is the whole return or
-  assignment, not when it is an operand of a surrounding expression.
+- **A ternary inside a larger expression** (*fixed*). `return c ? 3 : 7;` was
+  correct, but `return 10 + (c ? 3 : 7);` decompiled to an empty `if (c) {} else
+  {}` and `return (10 + 7);` -- the branch collapsed to its false arm. The
+  value-merge fired only when the merged value was consumed by a push or a
+  return, not when the diamond's slot is read straight into an arithmetic
+  operand (`ADDi slot = 10 + <ternary slot>`). It now derives that slot from the
+  arms (the one slot both wrote) whenever the merge is an arithmetic or
+  comparison op, and the op reads the folded ternary. `fixtures/ternary_
+  expression.nvgt` guards it. (Restricted to arithmetic/comparison merges on
+  purpose: a diamond producing a handle or a short-circuit bool is an ordinary
+  branch, and folding those as a value ternary put a `bool` where a handle or
+  double was wanted -- it briefly cut the corpus to 35/52 before the guard.)
 - **A stored short-circuit result.** `bool b = (x && f()) || (y || g());`
   decompiles with the guarded calls hoisted out and evaluated unconditionally,
   and the stored bool lost. The `&&` / `||` structuring recovers a *branch* but
@@ -172,8 +179,9 @@ fix rather than shipped in a failing test. Each has a one-line repro.
   variable, not just the survivors. `fixtures/reused_loop_variable.nvgt` guards
   it: its debug build must recompile and declare the counter once.
 
-The first two are value recovery, not reading: the bytecode is understood, but
-the source shape put around it is wrong. They remain open in `CLAUDE.md`.
+The stored-short-circuit bug is value recovery, not reading: the bytecode is
+understood, but the source shape put around it is wrong. It remains open in
+`CLAUDE.md`.
 
 What had to change, grouped by what it broke:
 

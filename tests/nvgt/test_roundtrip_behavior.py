@@ -142,6 +142,18 @@ class ControlFlowBehaviourTests(_BehaviourFixture):
         self.assertIn("-4", source)             # -8 >>> 1, the arithmetic result
 
 
+class TernaryExpressionTests(_BehaviourFixture):
+    FIXTURE = "ternary_expression.nvgt"
+
+    def test_stripped_build_keeps_the_ternary_inside_the_expression(self):
+        # The bug: `10 + (c ? 3 : 7)` came back as `10 + 7` with an empty if.
+        project = self._decompiled("strip")
+        source = "\n".join(p.read_text(encoding="utf-8")
+                           for p in project.rglob("*.nvgt"))
+        # a ternary is still written as one, inside an arithmetic expression
+        self.assertRegex(source, r"\+ \(.*\? .* : .*\)")
+
+
 class ReusedLoopVariableTests(_BehaviourFixture):
     FIXTURE = "reused_loop_variable.nvgt"
 
