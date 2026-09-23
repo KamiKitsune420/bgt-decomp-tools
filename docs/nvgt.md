@@ -165,10 +165,19 @@ fix rather than shipped in a failing test. Each has a one-line repro.
   purpose: a diamond producing a handle or a short-circuit bool is an ordinary
   branch, and folding those as a value ternary put a `bool` where a handle or
   double was wanted -- it briefly cut the corpus to 35/52 before the guard.)
-- **A stored short-circuit result.** `bool b = (x && f()) || (y || g());`
-  decompiles with the guarded calls hoisted out and evaluated unconditionally,
-  and the stored bool lost. The `&&` / `||` structuring recovers a *branch* but
-  not a *value*.
+- **A stored short-circuit result.** `bool b = (x > 0) && (x < 10); return b ?
+  100 : 200;` decompiles to an empty `if (x <= 0) {}` and `return ((x < 10) ?
+  100 : 200);` -- the first operand is lost and only the second survives. The
+  `&&`/`||` value is recovered (`_begin_bool_merge`) only where the merge loads
+  the result straight into the value register (`CpyVtoR4`), i.e. a return or a
+  condition. When the result is stored into a slot (`CpyVtoV4` into `b`, then a
+  `SUSPEND`, then a later load) it is not. A naive fix -- skip the `SUSPEND` and
+  treat the later load as the merge -- makes `b ? 100 : 200` come out right but
+  silently breaks `bool b = A || B; if (b) ...`, where `b` reaches its use by a
+  different path, and it cut the corpus to 50/52. The real fix has to bind the
+  short-circuit *value* to the stored slot and honour every later read of it,
+  not just the first; it is left open rather than shipped half-right, because a
+  wrong value that compiles is worse than a known gap.
 - **A loop variable reused in sibling scopes** (*fixed*). `for (int i ...) {}
   for (uint i ...) {}` is legal -- two scopes -- and the compiler reuses each
   counter's slot for a later local (`i` then `total`, `i` then `v`). The
