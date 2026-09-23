@@ -24,6 +24,7 @@ language.
 Needs NVGT_COMPILER (an nvgt.exe); skips otherwise.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -139,6 +140,19 @@ class ControlFlowBehaviourTests(_BehaviourFixture):
                            for p in project.rglob("*.nvgt"))
         self.assertIn("2147483644", source)     # -8 >> 1, the logical result
         self.assertIn("-4", source)             # -8 >>> 1, the arithmetic result
+
+
+class ReusedLoopVariableTests(_BehaviourFixture):
+    FIXTURE = "reused_loop_variable.nvgt"
+
+    def test_debug_build_declares_the_reused_counter_once(self):
+        # The bug: `for (int i) {} for (uint i) {}` on reused slots hoisted a
+        # declaration for the slot's LAST name only, leaving two typed `i`
+        # declarations at one scope. The debug project must recompile, and its
+        # counter must be declared exactly once.
+        project = self._decompiled("debug")
+        body = "\n".join(p.read_text(encoding="utf-8") for p in project.rglob("*.nvgt"))
+        self.assertEqual(len(re.findall(r"^\s*u?int i;", body, re.M)), 1, body)
 
 
 if __name__ == "__main__":

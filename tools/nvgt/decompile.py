@@ -2502,10 +2502,21 @@ class ModuleDecompiler:
             # original position, rather than declaring in just the first arm.
             declarations = []
             hoisted_names: set[str] = set()
+
+            def _is_scalar(dt):
+                return (dt.obj_type is None or dt.obj_type.kind == "enum"
+                        or dt.is_object_handle or dt.obj_type.name == "string")
+
             scalar_names = {fd.name_of(off) for off, dt in fd.var_types.items()
-                            if off > 0 and fd.is_named(off) and
-                            (dt.obj_type is None or dt.obj_type.kind == "enum"
-                             or dt.is_object_handle or dt.obj_type.name == "string")}
+                            if off > 0 and fd.is_named(off) and _is_scalar(dt)}
+            # A reused slot carries several debug variables at different scopes
+            # (slot 2 is `int i` in one loop, then `int total`); var_names keeps
+            # only the last, so a transient scalar name like a loop's `i` would
+            # be missing here and its declaration left un-hoisted -- and a
+            # second `i` on another slot then makes two `int i = 0;` at one
+            # scope, "'i' is already declared". Take every scalar name.
+            scalar_names |= {v.name for v in f.variables
+                             if v.name and v.stack_offset > 0 and _is_scalar(v.type)}
             for event in ev:
                 if event.kind != "stmt":
                     continue
@@ -2526,8 +2537,9 @@ class ModuleDecompiler:
                     if name not in hoisted_names:
                         hoisted_names.add(name)
                         declarations.append(decl)
-                    off = next(off for off in fd.var_names if fd.name_of(off) == name)
-                    prefix = "@" if fd.var_types.get(off) and fd.var_types[off].is_object_handle and text != name + ";" else ""
+                    off = next((off for off in fd.var_names if fd.name_of(off) == name), None)
+                    is_handle = off is not None and fd.var_types.get(off) and fd.var_types[off].is_object_handle
+                    prefix = "@" if is_handle and text != name + ";" else ""
                     event.data = ("", "" if text == name + ";" else prefix + text)
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
             scopes = _recover_plain_scopes(ev, f, self.m.classes)

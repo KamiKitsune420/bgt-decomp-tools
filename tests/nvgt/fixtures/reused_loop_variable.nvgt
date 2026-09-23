@@ -1,0 +1,24 @@
+// A regression fixture for the reused-loop-variable bug: two sibling `for`
+// scopes both name their counter `i`, and the compiler reuses each counter's
+// slot for a later local (i -> total, i -> v). A debug build records every
+// name a slot ever held, and the decompiler used to hoist a declaration for
+// only the last one, leaving the two `i` counters as two typed declarations at
+// one scope -- "'i' is already declared". The debug build must recompile.
+int reused() {
+	int[] xs;
+	for (int i = 0; i < 6; i += 1) xs.insert_last((i * 7) % 5);
+	xs.sort_ascending();
+	int total = 0;
+	for (uint i = 0; i < xs.length(); i += 1) total += xs[i] * int(i);
+	dictionary d;
+	d.set("a", 11);
+	int v = 0;
+	if (d.exists("a")) { d.get("a", v); total += v; }
+	return total;
+}
+
+void main() {
+	file_put_contents("result.txt", "" + reused());
+	file_put_contents("debug.bin", script_get_module("nvgt_game", 0).get_bytecode(false));
+	file_put_contents("strip.bin", script_get_module("nvgt_game", 0).get_bytecode(true));
+}

@@ -162,14 +162,18 @@ fix rather than shipped in a failing test. Each has a one-line repro.
   decompiles with the guarded calls hoisted out and evaluated unconditionally,
   and the stored bool lost. The `&&` / `||` structuring recovers a *branch* but
   not a *value*.
-- **A loop variable reused in sibling scopes.** `for (int i ...) {} for (uint i
-  ...) {}` is legal -- two scopes -- but a debug build (which has the scope
-  metadata) re-emits both declarations at function scope and the recompile fails
-  with "`i` is already declared". The decompiler does not reopen a nested scope
-  for a `for` initialiser.
+- **A loop variable reused in sibling scopes** (*fixed*). `for (int i ...) {}
+  for (uint i ...) {}` is legal -- two scopes -- and the compiler reuses each
+  counter's slot for a later local (`i` then `total`, `i` then `v`). The
+  hoisting that emits one declaration per scalar name read the names from the
+  post-run frame, which keeps only a slot's *last* name, so a transient `i` was
+  never hoisted and its two typed declarations landed at one scope: "`i` is
+  already declared". Hoisting now takes the scalar names from every debug
+  variable, not just the survivors. `fixtures/reused_loop_variable.nvgt` guards
+  it: its debug build must recompile and declare the counter once.
 
-All three are value/scope recovery, not reading: the bytecode is understood, but
-the source shape put around it is wrong. They join the open items in `CLAUDE.md`.
+The first two are value recovery, not reading: the bytecode is understood, but
+the source shape put around it is wrong. They remain open in `CLAUDE.md`.
 
 What had to change, grouped by what it broke:
 

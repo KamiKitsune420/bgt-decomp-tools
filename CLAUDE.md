@@ -1066,14 +1066,15 @@ library builds recompile. But only `test_roundtrip_behavior`'s two fixtures are
 *run* and compared, and NVGT decompiler bugs compile cleanly while computing
 something else. A new construct belongs in a fixture, not only in the corpus.
 
-**Three NVGT constructs still decompile wrong**, each of the compiles-and-lies
+**Two NVGT constructs still decompile wrong**, each of the compiles-and-lies
 kind, characterised while writing the control-flow fixture (see the repro for
 each in `docs/nvgt.md`): a ternary used *inside* a larger expression collapses
-to one arm (`10 + (c ? 3 : 7)` becomes `10 + 7`); a stored `&&`/`||` result
-loses the value and runs its guarded calls unconditionally; and a `for`
-variable reused in two sibling scopes is re-declared at function scope, so a
-debug build fails to recompile. All three are value/scope recovery, not reading
--- the bytecode is understood, the source shape around it is wrong.
+to one arm (`10 + (c ? 3 : 7)` becomes `10 + 7`), and a stored `&&`/`||` result
+loses the value and runs its guarded calls unconditionally. Both are value
+recovery, not reading -- the bytecode is understood, the source shape around it
+is wrong. (A third, a `for` variable reused across sibling scopes re-declared at
+function scope, is fixed -- hoisting now takes scalar names from every debug
+variable, not just the last per slot.)
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified
