@@ -105,9 +105,11 @@ maps BGT's token ids onto the current ones. BGT's `?` (59) becomes NVGT's 60,
 which is how the two halves' `?&in` rules line up.
 
 `decompile` simulates each body's stack and registers, and structures loops,
-`switch`, `try`/`catch`, ternaries and short-circuit logic. A counted `while`
-whose last statement increments the variable its condition tests is folded back
-into a `for` -- `for (i = 0; (i < n); i = (i + 1))` rather than an `i = 0;` and a
+`switch`, `try`/`catch`, ternaries and short-circuit logic. A self-assignment
+`x = (x + y)` is written `x += y` (and `x = (x + 1)` as `x++`), for a simple
+lvalue with no call in it so nothing is evaluated twice. A counted `while` whose
+last statement increments the variable its condition tests is then folded back
+into a `for` -- `for (i = 0; (i < n); i++)` rather than an `i = 0;` and a
 `while` -- but only where that is behaviour-preserving: a loop containing
 `continue` is left as a `while`, because `continue` skips the increment in a
 `while` and runs it in a `for`. `recover` wraps it into a project, and

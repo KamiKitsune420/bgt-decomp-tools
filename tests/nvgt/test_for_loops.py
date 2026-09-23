@@ -1,12 +1,44 @@
-"""`_reconstruct_for_loops` turns a rotated while back into a for, but only where
-that is behaviour-preserving. These are synthetic line lists -- no compiler."""
+"""`_reconstruct_for_loops` turns a rotated while back into a for, and
+`_use_compound_assignment` turns `x = (x + y)` into `x += y` -- both only where
+behaviour is preserved. These are synthetic line lists -- no compiler."""
 import unittest
 
 from decompile import _reconstruct_for_loops as fold
+from decompile import _use_compound_assignment as compound
 
 
 def run(*lines):
     return fold(list(lines))
+
+
+class CompoundAssignmentTests(unittest.TestCase):
+    def one(self, line):
+        return compound([line])[0].strip()
+
+    def test_increment_and_decrement(self):
+        self.assertEqual(self.one("    i = (i + 1);"), "i++;")
+        self.assertEqual(self.one("    i = (i - 1);"), "i--;")
+
+    def test_compound_operators(self):
+        self.assertEqual(self.one("    total = (total + v);"), "total += v;")
+        self.assertEqual(self.one("    x = (x * 2);"), "x *= 2;")
+        self.assertEqual(self.one("    flags = (flags | 4);"), "flags |= 4;")
+
+    def test_member_and_index_lvalues(self):
+        self.assertEqual(self.one("    this.c_form[v2].caption = (this.c_form[v2].caption + 1);"),
+                         "this.c_form[v2].caption++;")
+
+    def test_not_self_referential_is_left_alone(self):
+        self.assertEqual(self.one("    a = (b + c);"), "a = (b + c);")
+
+    def test_a_call_in_the_lvalue_is_left_alone(self):
+        # arr[f()] would be evaluated once as `++` but twice as written; a call
+        # there could have a side effect, so it is never folded.
+        line = "    arr[f()] = (arr[f()] + 1);"
+        self.assertEqual(self.one(line), line.strip())
+
+    def test_no_binary_operator_is_left_alone(self):
+        self.assertEqual(self.one("    x = (y);"), "x = (y);")
 
 
 class ForLoopTests(unittest.TestCase):

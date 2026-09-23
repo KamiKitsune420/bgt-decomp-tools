@@ -2359,6 +2359,34 @@ class Structurer:
 # module rendering
 # --------------------------------------------------------------------------
 
+_COMPOUND = re.compile(r"^(\s*)([\w.\[\]]+) = \((.+)\);$")
+
+
+def _use_compound_assignment(lines):
+    """`x = (x + y);` -> `x += y;`, and `x = (x + 1);` -> `x++;`.
+
+    Only for a simple lvalue with no call in it (so the target is not evaluated
+    for its side effects), and only when the right-hand side begins with exactly
+    that lvalue and a binary operator -- so the value is unchanged.
+    """
+    out = []
+    for line in lines:
+        m = _COMPOUND.match(line)
+        if m and "(" not in m.group(2):
+            indent, lhs, expr = m.groups()
+            em = re.match(r"^%s (\+|-|\*|/|%%|&|\||\^|<<|>>>?) (.+)$"
+                          % re.escape(lhs), expr)
+            if em:
+                op, rest = em.group(1), em.group(2)
+                if rest == "1" and op in ("+", "-"):
+                    out.append("%s%s%s;" % (indent, lhs, op * 2))
+                    continue
+                out.append("%s%s %s= %s;" % (indent, lhs, op, rest))
+                continue
+        out.append(line)
+    return out
+
+
 _FOR_WHILE = re.compile(r"while (\(.+\)) \{$")
 _FOR_INIT = re.compile(r"((?:[\w:<>@\[\], ]+? )?([A-Za-z_]\w*) = .+);$")
 
@@ -2637,7 +2665,8 @@ class ModuleDecompiler:
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
             scopes = _recover_plain_scopes(ev, f, self.m.classes)
             st = Structurer(ev, f, scopes)
-            return _reconstruct_for_loops(declarations + st.render(indent))
+            return _reconstruct_for_loops(
+                _use_compound_assignment(declarations + st.render(indent)))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
 
