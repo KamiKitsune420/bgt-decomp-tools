@@ -628,7 +628,8 @@ class Reader:
         lists are NOT -- returning early on an interface is what makes this look
         like a broken format rather than a missing branch.
         """
-        out = {"name": decl["name"], "derivedFrom": self.type_info(),
+        out = {"name": decl["name"], "namespace": decl.get("namespace", ""),
+               "derivedFrom": self.type_info(),
                "interfaces": [], "ctors": [], "methods": [], "virtuals": []}
         iface = self.is_interface(decl)
         for _ in range(self._count(256)):
@@ -679,14 +680,18 @@ class Reader:
         """
         interfaces = [c for c in decls if self.is_interface(c)]
         others = [c for c in decls if not self.is_interface(c)]
-        blocks = ([self.class_block(c) for c in interfaces]
-                  + [self.class_block(c) for c in others])
-        by_name = {b["name"]: b for b in blocks}
-        for c in others:
-            props = self.class_phase3(c)
-            if c["name"] in by_name:
-                by_name[c["name"]]["properties"] = props
-        return blocks
+        iface_blocks = [self.class_block(c) for c in interfaces]
+        other_blocks = [self.class_block(c) for c in others]
+        # Phase 3 walks the same `others` list in the same order, so each
+        # property table belongs to the block at the same POSITION. Pairing them
+        # by name -- as this once did -- breaks as soon as two classes share a
+        # name in different namespaces: Manamon 2 declares `sound_pool` both
+        # globally and in `rhythm`, and the global one's properties
+        # (destroy_sound_callback among them) landed on the other block and were
+        # then overwritten.
+        for block, c in zip(other_blocks, others):
+            block["properties"] = self.class_phase3(c)
+        return iface_blocks + other_blocks
 
     # -- the tail sections -------------------------------------------------
     #

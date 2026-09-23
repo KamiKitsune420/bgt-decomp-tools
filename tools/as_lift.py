@@ -95,9 +95,9 @@ so a 64-bit push is +2 there and one expression here.
 
 The end-to-end check is the stack being empty at `RET`. Across four titles:
 
-    Psycho Strike       1,090 / 1,102 functions  (98.9%)
-    Paladin of the Sky    923 /   926            (99.7%)
-    Manamon 2           9,919 / 9,924            (99.9%)
+    Psycho Strike       1,102 / 1,102 functions  (100%)
+    Paladin of the Sky    926 /   926            (100%)
+    Manamon 2           9,924 / 9,924            (100%)
     SBYW                2,348 / 2,348            (100%)
 
 Manamon 2 was 95.8% under the old call-frame rules. The metric improved because
@@ -122,8 +122,8 @@ instruction stream, iterative dominators and post-dominators, natural loops from
 back edges, then nested `if` / `else` / `while` / `do-while` with `break` and
 `continue`. Anything that does not reduce stays a labelled `goto`.
 
-    residual gotos    3,818 / 410,034 statements  (0.93%), four titles
-    goto-free bodies  83.7% strike · 89.2% paladin · 94.6% Manamon 2 · 90.2% SBYW
+    residual gotos    3,597 / 408,764 statements  (0.88%), four titles
+    goto-free bodies  84.3% strike · 89.8% paladin · 94.8% Manamon 2 · 91.4% SBYW
 
 Three shapes decide whether the output is right, and each was wrong first:
 
@@ -233,16 +233,60 @@ class Lifter:
         self.non_value_types = getattr(mod, "non_value_types", self.script_classes)
         # A reference-returning call held until whatever reads it: (index, text).
         self.pending: Optional[Tuple[int, str]] = None
+        # Declared type of whatever the last call left in the registers, so a
+        # PshRPtr of it keeps the type -- `events[i](this)` needs the element's
+        # funcdef to size the CallPtr that follows.
+        self.reg_dtype: Optional[Dict[str, Any]] = None
+        # The instruction stream, so a register load can look ahead to see
+        # whether it is the value of a `return` (set by lift_function).
+        self.code: List[Dict[str, Any]] = []
+        # Set once a `return x;` has been emitted for the current path; the
+        # jump to the shared exit and the RET there then add nothing.
+        self.returned = False
+
         self.layout = as_disasm.frame_layout(func, self.non_value_types)
         # Known types of frame slots: parameters from the signature, and any
         # variable a typed handle has been copied into (RefCpyV).
         self.slot_types: Dict[int, Dict[str, Any]] = {}
+        # What a variable was last handle-copied from (RefCpyV), for naming a
+        # CallPtr through it after the thing the source actually called.
+        self.slot_origin: Dict[int, str] = {}
         params = func.get("params", [])
         for off, label in self.layout.items():
             if label.startswith("a") and label[1:].isdigit():
                 idx = int(label[1:])
                 if idx < len(params) and isinstance(params[idx], dict):
                     self.slot_types[off] = params[idx]
+
+    def leads_to_exit(self, i: int) -> bool:
+        """Does control go straight from after instruction `i` to RET?
+
+        `return x;` compiles to `CpyVtoR4 x` (or `LOADOBJ x` for a handle) and a
+        JMP to the function's single exit, which runs only cleanup -- FREE,
+        SUSPEND -- before RET. Following that shape, and nothing else, is what
+        tells a return value from an ordinary register load.
+        """
+        return self.exit_from(i + 1)
+
+    def exit_from(self, j: int) -> bool:
+        """Does execution starting AT instruction j reach RET via cleanup only?"""
+        by_index = {ins["index"]: ins for ins in self.code}
+        hops = 0
+        while j in by_index and hops < 64:
+            ins = by_index[j]
+            name = ins["name"]
+            if name == "RET":
+                return True
+            if name in ("FREE", "SUSPEND", "LINE"):
+                j += 1
+            elif name == "JMP":
+                tgt = ins["args"][0].get("target") if ins["args"] else None
+                if tgt is None:
+                    return False
+                j, hops = tgt, hops + 1
+            else:
+                return False
+        return False
 
     # -- helpers ---------------------------------------------------------
     def var(self, slot: int) -> str:
@@ -376,20 +420,31 @@ class Lifter:
             if this and this.startswith("&"):
                 return "%s = %s(%s)" % (this[1:], typ, inner)
             return "%s(%s)" % (typ, inner)
+        # The receiver arrives as an address when it is a local (`PSF 1`); the
+        # VM needs that, the source never wrote it. Left in, `s = t` on a
+        # string local read `&v1 = v2;` and `a + b` read `&v6 + v1` -- 888 times
+        # in Psycho Strike alone. Arguments keep their `&`: there it marks a
+        # by-reference argument, which is information.
+        recv = this[1:] if this.startswith("&") else this
         op = OPERATORS.get(name)
         text = None
         if op and this:
             if op == "[]":
-                text = "%s[%s]" % (this, ", ".join(args))
+                text = "%s[%s]" % (recv, ", ".join(args))
             elif op == "=" and args:
-                return "%s = %s" % (this, args[0])
+                return "%s = %s" % (recv, args[0])
             elif len(args) == 1:
-                text = "%s %s %s" % (this, op, args[0])
+                text = "%s %s %s" % (recv, op, args[0])
 
         if text is None:
             label = as_disasm.function_label(fn) if owner else name
             if owner and this:
-                label = "%s.%s" % (this, name)
+                label = "%s.%s" % (recv, name)
+            if name == "factstub" and not owner:
+                # The template factory stub the engine builds for `array<T>`
+                # and friends. Its name says nothing; its return type is the
+                # type being constructed, which is what the source wrote.
+                label = as_disasm.type_name(fn.get("returns")).rstrip("@&")
             text = "%s(%s)" % (label, ", ".join(args))
         # A value returned on the stack is written straight into the slot whose
         # address the caller pushed, so the call IS an assignment to that slot.
@@ -416,10 +471,15 @@ def lift_function(mod: "as_disasm.Module", func: Dict[str, Any]) -> Dict[str, An
         if text:
             lines.append((idx, text))
 
+    lift.code = instrs
     for ins in instrs:
         i, name = ins["index"], ins["name"]
         args = [a["value"] for a in ins["args"]]
         named = [a.get("text") for a in ins["args"]]
+        # A `return x;` path runs only exit cleanup until its JMP / RET; any
+        # other instruction means we are past it, on a new path.
+        if lift.returned and name not in ("JMP", "RET", "FREE", "SUSPEND", "LINE"):
+            lift.returned = False
         _step(lift, emit, i, name, args, named)
     lift.flush_pending(emit)
 
@@ -449,7 +509,7 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
     if name in ("PshV4", "PshV8", "PshVPtr", "VAR", "PSF", "PshRPtr"):
         if name == "PshRPtr":
             L.consume_pending()
-            L.push(L.obj_reg)
+            L.push(L.obj_reg, dtype=L.reg_dtype)
         elif name == "PSF":
             L.push("&" + L.var(a0), is_ref=True, dtype=L.slot_types.get(a0))
         else:
@@ -470,7 +530,8 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         L.push("<len>")
         return
     if name in ("PshGPtr", "PGA", "PshG4"):
-        L.push(n0 or "global#%d" % a0)
+        gtype = getattr(L.mod, "global_property_type", lambda v: None)(a0)
+        L.push(n0 or "global#%d" % a0, dtype=gtype)
         return
     if name == "LDG":
         L.ref_reg = n0 or "global#%d" % a0        # stackInc 0 -- not a push
@@ -500,6 +561,8 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
     if name in ("CALLSYS", "CALL", "CALLINTF", "CALLBND", "Thiscall1"):
         L.flush_pending(emit)
         text = L._call(a0, name)
+        fn = L.callee(a0)
+        L.reg_dtype = fn.get("returns") if isinstance(fn, dict) else None
         if text:
             L.obj_reg = L.value_reg = text
             if text.startswith('"'):
@@ -594,18 +657,26 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         # handles -- stored into a variable. Without this the variable appears
         # later from nowhere.
         emit(i, "%s = %s;" % (L.var(a0), L.obj_reg))
+        L.slot_origin.pop(a0, None)
+        if L.reg_dtype is not None:
+            L.slot_types[a0] = L.reg_dtype
         L.obj_reg = "ret"
+        L.reg_dtype = None
         return
     if name == "LOADOBJ":
         # A variable moved INTO the object register, which is how a function
         # returning a handle hands its result back: `return v1`, not `return ret`.
         L.obj_reg = L.value_reg = L.var(a0)
+        if not _is_void(L.func) and L.leads_to_exit(i):
+            emit(i, "return %s;" % L.obj_reg)
+            L.returned = True
         return
     if name == "ClrVPtr":
         # Sets a handle variable to null; the variable is often compared next
         # (`if (callback is null)`), so leaving it silent makes it appear from
         # nowhere.
         emit(i, "@%s = null;" % L.var(a0))
+        L.slot_origin.pop(a0, None)
         return
     if name in ("FREE", "CHKREF", "SwapPtr",
                 "GETOBJ", "GETREF", "GETOBJREF", "RDSPtr", "ChkRefS",
@@ -623,6 +694,12 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         return
     if name in ("CpyVtoR4", "CpyVtoR8"):
         L.value_reg = L.var(a0)
+        if not _is_void(L.func) and L.leads_to_exit(i):
+            # A return value. Printing it only at the shared RET showed
+            # whichever path came last linearly for EVERY path: BGT's own
+            # sound_pool::destroy_sound read as always returning false.
+            emit(i, "return %s;" % L.value_reg)
+            L.returned = True
         return
     if name in ("CpyGtoV4",):
         emit(i, "%s = %s;" % (L.var(a0), named[1] or "global#%d" % a1))
@@ -638,6 +715,10 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         emit(i, "@%s = %s;" % (L.var(a0), src.text if src else "?"))
         if src is not None and src.dtype is not None:
             L.slot_types[a0] = src.dtype
+        if src is not None and not src.text.startswith(("&", "?")):
+            L.slot_origin[a0] = src.text
+        else:
+            L.slot_origin.pop(a0, None)
         return
     if name in ("WRTV1", "WRTV2", "WRTV4", "WRTV8"):
         L.consume_pending()
@@ -716,8 +797,11 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         return
     if name in ("INCi", "DECi", "INCi64", "DECi64", "INCf", "DECf",
                 "INCd", "DECd", "INCi8", "DECi8", "INCi16", "DECi16"):
-        # increments the value the register points at
-        emit(i, "*%s%s;" % (L.value_reg, "++" if name.startswith("INC") else "--"))
+        # Increments the value at the address in the REFERENCE register --
+        # `c_form[i].list_length--` is PshVPtr / ADDSi list_length / PopRPtr /
+        # DECi. Reading the value register instead printed a stale expression
+        # dereferenced: `*this.c_form[a0]--;`.
+        emit(i, "%s%s;" % (L.ref_reg, "++" if name.startswith("INC") else "--"))
         return
     if name == "SetG4":
         emit(i, "%s = %s;" % (n0 or "global#%d" % a0, a1))
@@ -730,7 +814,18 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         L.value_reg = L.ref_reg = named[1] or "global#%d" % a1
         emit(i, "%s = %s;" % (L.var(a0), L.value_reg))
         return
-    if name in ("COPY", "SetThisR"):
+    if name == "COPY":
+        # A memberwise copy of a POD value (asBC_COPY, stackInc -1): pop the
+        # destination address, copy from the source address beneath it, and
+        # leave the DESTINATION where the source was. Treated as a no-op,
+        # `PSF 4 / PSF 3 / COPY / PopPtr` -- `v3 = v4` for a returned vector --
+        # dropped the assignment and stranded `&v4` on the stack.
+        dest = L.pop()
+        src = L.pop()
+        emit(i, "%s = %s;" % (dest.lstrip("&"), src.lstrip("&")))
+        L.push(dest, is_ref=True)
+        return
+    if name == "SetThisR":
         return
     if name == "Cast":
         # consumes the type id TYPEID pushed (stackInc -1)
@@ -761,7 +856,10 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
                 args.append(frame.pop(0) if frame else "?")
                 if width == 2 and frame:
                     frame.pop(0)
-        call = "%s(%s)" % (L.var(a0), ", ".join(args))
+        # Name the callback by where it came from when the variable was just
+        # copied from something (`@v4 = this.callback;` then CallPtr 4): the
+        # source called `callback(...)`, not a temporary.
+        call = "%s(%s)" % (L.slot_origin.get(a0, L.var(a0)), ", ".join(args))
         if result.startswith("&"):
             emit(i, "%s = %s;" % (result[1:], call))
             L.value_reg = L.obj_reg = result[1:]
@@ -792,6 +890,18 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
 
     # -- control flow -------------------------------------------------------
     if name == "JMP":
+        if L.returned:
+            return                     # the jump to the exit of a `return x;`
+        target = L.code[i]["args"][0].get("target") if L.code and i < len(L.code) else None
+        if (_is_void(L.func) and target is not None and target != i + 1
+                and L.exit_from(target)):
+            # `return;` in a void function is a jump to the shared exit. As a
+            # plain jump the structurer nested everything after a guard clause
+            # inside an `if` -- form.bgt's `if (handle.active == false) {
+            # return; }` came out as the rest of the body wrapped in a branch.
+            emit(i, "return;")
+            L.returned = True
+            return
         emit(i, "@goto %s" % (named[0] or "?"))
         return
     if name in JUMP_CONDS:
@@ -806,6 +916,9 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         emit(i, "@switch %s" % L.var(a0))
         return
     if name == "RET":
+        if L.returned:
+            L.returned = False         # every path here already said `return x;`
+            return
         emit(i, "return;" if _is_void(L.func) else "return %s;" % L.value_reg)
         return
 
@@ -1180,26 +1293,48 @@ class _Emitter:
             self._line(depth, "}")
             return follow
 
+        # No reconvergence at all -- each arm ends in its own `return`. Either
+        # arm could be the nested one; nesting the FALLTHROUGH keeps the order
+        # the compiler laid the code out in, which is the source's order. The
+        # other choice printed BGT's form.bgt `edit_silent` -- replace_text,
+        # trim_to_length, append_text, one guarded return each -- backwards.
+        if (follow is None and fall is not None
+                and not self._is_exit(fall, loop) and not self._is_exit(taken, loop)):
+            self._line(depth, "if (%s) {" % _negate(blk.cond))
+            self.region(fall, stop, depth + 1, loop)
+            self._line(depth, "}")
+            return taken
+
         # An `else` arm only exists if the fallthrough is not itself the
         # reconvergence point -- otherwise this is a plain one-armed `if`.
         has_else = (fall is not None and follow is not None
                     and fall != follow and taken != follow)
 
-        self._line(depth, "if (%s) {" % blk.cond)
-        self.region(taken, follow if follow is not None else stop,
-                    depth + 1, loop)
+        end = follow if follow is not None else stop
         if has_else:
-            self._line(depth, "} else {")
+            # The source's THEN arm is the fallthrough: `if (c) {A} else {B}`
+            # compiles to "if not c, jump to B", then A. So print A first under
+            # the negated jump condition. Printing the jump target first turned
+            # form.bgt's `if (selections.length() == 1) {...} else {...}` into
+            # `if (v3 != 1) {else-arm} else {then-arm}`.
+            self._line(depth, "if (%s) {" % _negate(blk.cond))
             mark = len(self.out)
-            self.region(fall, follow if follow is not None else stop,
-                        depth + 1, loop)
-            if len(self.out) == mark:
-                # The arm produced nothing -- typically a block holding only
-                # the jump to the join. `} else { }` says nothing the plain
-                # `if` does not; its blocks are still marked emitted.
-                self.out.pop()
+            self.region(fall, end, depth + 1, loop)
+            if len(self.out) > mark:
+                self._line(depth, "} else {")
+                self.region(taken, end, depth + 1, loop)
+                self._line(depth, "}")
+                return follow
+            # The fallthrough arm produced nothing -- typically a block holding
+            # only the jump to the join. `if (!c) { } else { B }` says nothing
+            # `if (c) { B }` does not; its blocks stay marked emitted.
+            self.out.pop()
+            self._line(depth, "if (%s) {" % blk.cond)
+            self.region(taken, end, depth + 1, loop)
             self._line(depth, "}")
             return follow
+        self._line(depth, "if (%s) {" % blk.cond)
+        self.region(taken, end, depth + 1, loop)
         self._line(depth, "}")
         return fall
 

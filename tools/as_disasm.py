@@ -159,7 +159,12 @@ def _type_info_name(obj: Optional[Dict[str, Any]]) -> str:
         return "void"
     kind = obj.get("kind")
     if kind == "named":
-        return str(obj.get("name") or "?")
+        # Qualified when the type lives in a namespace: two script classes can
+        # share a name (Manamon 2 has `sound_pool` and `rhythm::sound_pool`),
+        # and every table keyed by this text has to tell them apart.
+        name = str(obj.get("name") or "?")
+        ns = obj.get("namespace")
+        return "%s::%s" % (ns, name) if ns else name
     if kind == "subtype":
         return str(obj.get("name") or "T")
     if kind == "child":
@@ -210,11 +215,14 @@ class Module:
         self.used_type_ids = self.tail.get("used_type_ids", [])
 
         # class name -> its own property table, for naming member accesses
+        # Keyed by the namespace-qualified name, the same text _type_info_name
+        # renders an owner as -- see the `sound_pool` note there.
         self.properties: Dict[str, List[Dict[str, Any]]] = {
-            b["name"]: b.get("properties", []) for b in self.blocks}
+            _qualified(b): b.get("properties", []) for b in self.blocks}
         # Every class and interface the module declares. Script objects are
         # always reference types, which decides how a call returns them.
         self.script_classes = frozenset(b["name"] for b in self.blocks)
+        self.script_classes_qualified = frozenset(_qualified(b) for b in self.blocks)
         # Named types that are never returned through a caller-supplied
         # address: script classes (reference types) and the module's own enums
         # and typedefs (scalars, returned in the value register).
@@ -377,6 +385,20 @@ class Module:
         prop = next((p for p in props if p.get("name") == rec.get("name")), None)
         return prop.get("type") if isinstance(prop, dict) else None
 
+    def global_property_type(self, value: int) -> Optional[Dict[str, Any]]:
+        """Declared type of a global-pointer operand, or None for a literal.
+
+        Same encoding rules as resolve("globalptr"): a plain usedGlobalProps
+        index in `tagged`, `2 * index + tag` in `len2` with tag 1 = global.
+        """
+        if self.dialect == as_module.TAGGED:
+            g = _at(self.used_global_props, value)
+        elif value & 1:
+            g = _at(self.used_global_props, value >> 1)
+        else:
+            return None
+        return g.get("type") if isinstance(g, dict) else None
+
     def funcdef_signature(self, dt: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """The signature behind a funcdef-typed value, or None.
 
@@ -410,6 +432,11 @@ class Module:
         return "%s::%s" % (_type_info_name(rec.get("owner")), rec["name"])
 
 
+def _qualified(block: Dict[str, Any]) -> str:
+    ns = block.get("namespace")
+    return "%s::%s" % (ns, block["name"]) if ns else block["name"]
+
+
 def _at(table: List[Any], i: int) -> Any:
     return table[i] if 0 <= i < len(table) else None
 
@@ -418,10 +445,29 @@ def _quote(s: bytes, limit: int = 60) -> str:
     """A string literal, with embedded NULs shown -- BGT literals really do
     contain them, and rendering them as spaces has misread a key before."""
     text = s.decode("latin1")
-    if len(text) > limit:
-        text = text[:limit] + "..."
-    return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"') \
-                       .replace("\x00", "\\0").replace("\n", "\\n")
+    cut = len(text) > limit
+    if cut:
+        text = text[:limit]
+    return '"%s"%s' % ("".join(_escape_char(c) for c in text), "..." if cut else "")
+
+
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\x00": "\\0", "\n": "\\n", "\r": "\\r",
+            "\t": "\\t"}
+
+
+def _escape_char(c: str) -> str:
+    """Every control byte escaped, so a literal never spans lines.
+
+    Only \\n and \\0 used to be escaped: form.bgt's `"\\r\\n"` printed as a raw
+    carriage return followed by `\\n`, which is a different string to anyone
+    reading it. The truncation marker now sits OUTSIDE the quotes, so a cut
+    literal is not mistaken for one that ends in three dots.
+    """
+    if c in _ESCAPES:
+        return _ESCAPES[c]
+    if ord(c) < 0x20 or ord(c) == 0x7F:
+        return "\\x%02x" % ord(c)
+    return c
 
 
 # Token ids whose values take two dwords on the stack: int64, uint64, double.

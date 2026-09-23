@@ -439,8 +439,20 @@ still lands exactly on EOF. The giveaways were statistical and semantic. All
 6,523 of Manamon 2's values are odd, which chance would not produce. Read as
 indices they rendered as `menu_properties_object::prop[11939]` (no class has
 11,940 properties), and that placeholder still counted as "resolved". Read as
-strings, 6,507 name a real property of their owner; the other 16 belong to
-registered types such as `vector::x`. The module still rewrites byte for byte.
+strings, 6,520 name a real property of their exact owner; the other 3 are
+`vector::x`, `y` and `z`, members of a registered type with no script
+declaration to check against. (It was 6,507 until same-named classes in different
+namespaces were told apart -- see "Classes that share a name" below.) The
+module still rewrites byte for byte.
+
+**Classes that share a name.** Manamon 2 declares `sound_pool`, `sound_pool_item`,
+`tweener` and `action_item` twice -- globally and in namespace `rhythm`. Phase-3
+property tables were attached to class blocks **by name**, so both declarations
+wrote to one block: the global `sound_pool` lost every property (its
+`destroy_sound_callback` among them) and the other was overwritten. They are
+paired by **position** now, as `ReadInner` reads them, blocks carry their
+namespace, and type names render qualified (`rhythm::sound_pool`) wherever the
+namespace is not empty.
 The lesson is the same as for `ALLOC`: a field that parses to EOF can still be
 the wrong field, and a resolver that returns a placeholder is not resolving.
 
@@ -488,19 +500,46 @@ field that means something else.
 
 `as_lift.py` turns the instruction stream into statements with a symbolic stack
 machine. **Zero passthrough across all 1,111,490 instructions in the four
-titles** — every opcode is modelled — and 153 of 166 methods in BGT's own shipped
-library sources come back by name.
+titles** — every opcode is modelled.
+
+**Checked against the library source, mechanically.** `bgt libcheck` compares
+every function that appears once in both BGT's shipped `include/*.bgt` and a
+recovered module: the sequence of calls in evaluation order, and the string
+literals as a multiset. On Psycho Strike, built with the same library version as
+BGT 1.3's include folder, **153 of 155** functions have the source's exact call
+sequence (107 before the fixes it drove) and **155 of 155** its exact literals.
+Of the two left, `dynamic_menu::run_extended` is the game's own library edit (it
+checks `alts_pressed` where 1.3 checks joystick buttons); `control::focus`
+differs by one `length()` call's position and is not yet explained. Manamon 2
+and SBYW ship modified library versions, so they score lower for reasons that
+are not the lifter's.
+
+What it drove, each a real bug that read plausibly: arguments rendered in
+reverse; `return` values taken from whichever path came last; guard clauses
+nesting the rest of the body; arms with no join, and `if`/`else` arms, printed
+in the opposite order to the source (the THEN arm is the fall-through, so it
+now prints first under the negated jump condition); `INC`/`DEC` printed as
+`*this.c_form[a0]--` instead of `this.c_form[a0].list_length--` (they act
+through the reference register); a receiver passed by address printed with its
+`&` -- `&v1 = v2`, `&v6 + v1`, 888 times in Psycho Strike; and a carriage
+return written raw inside string literals. Lifted output reads like this (a
+game's own `prepare_audio`, which sets its sound-pack key):
 
 ```
 void <global>::prepare_audio()
 {
     ret = get_SCRIPT_COMPILED();
-    if (!get_SCRIPT_COMPILED()) goto L0;
-    v2 = string("\0\0able to\0\0learn\0...");
-    v3 = string(&v2);
-    v2 = get(v3);
-    ret = set_sound_decryption_key(&v2, v1);
-    ...
+    if (ret) {
+        v1 = 0;
+        v2 = string("\0\0able to\0\0learn\0...");
+        v3 = string(&v2);
+        v2 = get(v3);
+        ret = set_sound_decryption_key(&v2, v1);
+        v2 = string("data.dat");
+        v3 = string(&v2);
+        ret = set_sound_storage(v3);
+    }
+    return;
 }
 ```
 
@@ -582,10 +621,19 @@ is the stack being empty at `RET`:
 
 | title | functions ending clean | before the call-frame fixes |
 |---|---|---|
-| Psycho Strike | 1,090 / 1,102 (98.9%) | 98.0% |
-| Paladin of the Sky | 923 / 926 (99.7%) | 99.2% |
-| Manamon 2 | 9,919 / 9,924 (99.9%) | 95.8% |
+| Psycho Strike | 1,102 / 1,102 (100%) | 98.0% |
+| Paladin of the Sky | 926 / 926 (100%) | 99.2% |
+| Manamon 2 | 9,924 / 9,924 (100%) | 95.8% |
 | SBYW | 2,348 / 2,348 (100%) | 95.5% |
+
+Every one of the 14,300 bodies ends with an empty stack, and none has a call
+that finds too few values. The last dozen came from three more modelling
+gaps: `COPY` (a POD value copy: pop the destination, copy from the source
+beneath it, leave the destination -- a no-op dropped `v3 = v4` for a returned
+`vector`), a callback fetched from an array (`events[i](this)`: the call's
+declared return type now travels through the register to the `PshRPtr` that
+pushes it), and a funcdef held in a global (globals now push with their
+declared type).
 
 "Residue" now means what it should in both directions. A **shortfall** (a
 call asking for more values than the stack holds) counts. It used to vanish
@@ -643,9 +691,26 @@ honest measure of what is still approximate.
 **Structuring is real structural analysis**, not pattern-spotting: a CFG,
 iterative dominators and post-dominators, natural loops from back edges, then
 nested `if` / `else` / `while` / `do-while` with `break` and `continue`.
-Residual gotos are **3,818 of 410,034 statements (0.93%)** across the four
-titles, and 84-95% of function bodies come out entirely goto-free (83.7% Psycho
-Strike, 89.2% Paladin, 94.6% Manamon 2, 90.2% SBYW).
+Residual gotos are **3,597 of 408,764 statements (0.88%)** across the four
+titles, and 84-95% of function bodies come out entirely goto-free (84.3% Psycho
+Strike, 89.8% Paladin, 94.8% Manamon 2, 91.4% SBYW).
+
+**Returns are placed where the source put them.** `return x;` compiles to the
+value moved into the register (`CpyVtoR4`, or `LOADOBJ` for a handle) and a
+jump to the function's single exit, which runs only cleanup before `RET`. The
+lifter used to print a value only at that `RET`, so every path returned
+whatever the *last* path in the bytecode loaded -- BGT's own
+`sound_pool::destroy_sound` read as always returning false. A register load that
+flows only through cleanup to `RET` now emits `return x;` on the spot, and in a
+void function a jump to the exit is a `return;`. Guard clauses
+(`if (handle.active == false) return;`) come out as the source wrote them
+instead of wrapping the rest of the body in a branch.
+
+**Arms that never rejoin keep the compiler's order.** When both arms of a
+branch end in their own `return` there is no join point, and either arm can be
+the nested one. Nesting the fall-through keeps the bytecode's order -- which is
+the source's: `form.bgt`'s `edit_silent` has three guarded returns, and nesting
+the jump target instead printed them in reverse.
 
 Three shapes decide whether that output is right, and each was wrong first:
 
@@ -878,15 +943,14 @@ the entry tags in one AES block, and `Entry.decrypt(key)` returns the plaintext 
 Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
-**A few bodies still do not balance their stack**: 12 in Psycho Strike, 3 in
-Paladin, 5 in Manamon 2, none in SBYW (at most 1.1%). The template-id rule
-once listed here is settled (see "The call frame"), and Manamon 2 went from 414
-to 5. What remains is values left behind, never shortfalls: all four titles
-now have zero calls that find too few arguments. Psycho Strike's are mostly
-`PSF` addresses in `character::find_attack_point`, `weapon::fire` and
-`weapon::play_weapon`, so start there.
+**Stack balance is complete on the four titles** -- 14,300 / 14,300 bodies --
+so it no longer points at anything. The open work is readability: temporaries
+the compiler materialises (`v5 = string(""); v6 = string("&");
+string_replace(v7, v6, v5, v1)`) could fold back into their single use, and
+`bool` tests compiled as `!v1 != !v2` could fold to the comparison they are.
+`bgt libcheck` is the check to run for either.
 
-**0.93% residual gotos.** Irreducible flow, switch tails and multi-entry loops
+**0.88% residual gotos.** Irreducible flow, switch tails and multi-entry loops
 stay labelled `goto` rather than being forced into a shape they do not have.
 Some of this is genuinely irreducible; some is not yet recognised.
 

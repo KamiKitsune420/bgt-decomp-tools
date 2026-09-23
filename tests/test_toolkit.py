@@ -23,8 +23,9 @@ import tempfile
 
 try:                                   # after `pip install -e .`
     from bgtdecomp import (as_disasm, as_lift, as_module, as_opcodes,
-                           as_write, bgt_crack, bgt_ghidra, bgt_kdf, bgt_pack,
-                           bgt_repack, bgt_string_crypt, bgtlib, cli)
+                           as_write, bgt_crack, bgt_ghidra, bgt_kdf,
+                           bgt_libcheck, bgt_pack, bgt_repack, bgt_string_crypt,
+                           bgtlib, cli)
 except ImportError:                    # straight from a checkout
     sys.path.insert(0, os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
@@ -36,6 +37,7 @@ except ImportError:                    # straight from a checkout
     import bgt_crack
     import bgt_ghidra
     import bgt_kdf
+    import bgt_libcheck
     import bgt_pack
     import bgt_repack
     import bgt_string_crypt
@@ -577,6 +579,13 @@ def test_string_literals_render_embedded_nuls():
     """BGT literals really do contain NULs -- the pack password is one. Showing
     them as spaces has already caused a key to be misread once."""
     assert as_disasm._quote(b"a\x00b") == '"a\\0b"'
+
+
+def test_string_literals_escape_every_control_byte():
+    """form.bgt's "\\r\\n" printed as a raw carriage return followed by `\\n`.
+    A cut literal keeps its marker outside the quotes."""
+    assert as_disasm._quote(b"\r\n\t\x07") == '"\\r\\n\\t\\x07"'
+    assert as_disasm._quote(b"abcdef", limit=3) == '"abc"...'
 
 
 def test_globalptr_is_a_plain_index_in_the_tagged_dialect():
@@ -1132,7 +1141,8 @@ def test_template_calls_take_no_hidden_argument():
                              "subtypes": [{"token": 68}]}}}])
     L.push("keep")
     L.push("10")
-    assert L._call(0, "CALL") == "factstub(10)"
+    # ...and it reads as the type it builds, not as the stub's name.
+    assert L._call(0, "CALL") == "array<int>(10)"
     assert [e.text for e in L.stack] == ["keep"]
 
 
@@ -1468,7 +1478,8 @@ def test_callptr_pops_the_funcdefs_arity_found_through_the_variables_type():
         ("RefCpyV", [1, 47], [None, None]), ("PopPtr", [], []),
         ("CallPtr", [1], [None]),
     ])
-    assert out[-1] == "ret = v1(v4, a0);"
+    # Named after what was called, not the temporary it was copied into.
+    assert out[-1] == "ret = this.callback(v4, a0);"
     assert not L.stack
 
 
@@ -1516,6 +1527,124 @@ def test_an_unread_reference_return_is_still_emitted_for_its_side_effects():
     L, _ = _lifter(functions=[op_index])
     out = _run_ops(L, [("CALL", [0], [None]), ("RET", [0], [None])])
     assert out == ["ret = grow();", "return;"]
+
+
+def test_copy_is_a_value_assignment_leaving_the_destination():
+    """character::find_attack_point copies a returned vector: PSF 4 / PSF 3 /
+    COPY / PopPtr. As a no-op it dropped `v3 = v4` and stranded `&v4`."""
+    L, _ = _lifter()
+    out = _run_ops(L, [("PSF", [4], [None]), ("PSF", [3], [None]),
+                       ("COPY", [0, 3], [None, None]), ("PopPtr", [], [])])
+    assert out == ["v3 = v4;"]
+    assert not L.stack
+
+
+def _lift_code(func, ops):
+    """Lift a hand-built instruction list; jump operands are absolute targets."""
+    L = as_lift.Lifter(_FakeModule(b""), func)
+    code = []
+    for idx, (op, args) in enumerate(ops):
+        items = [{"value": a,
+                  "target": a if op in ("JMP", "JZ", "JNZ", "JLowZ") else None}
+                 for a in args]
+        code.append({"index": idx, "name": op, "args": items})
+    L.code = code
+    out = []
+    for ins in code:
+        if L.returned and ins["name"] not in ("JMP", "RET", "FREE", "SUSPEND", "LINE"):
+            L.returned = False
+        as_lift._step(L, lambda i, t: out.append(t), ins["index"], ins["name"],
+                      [a["value"] for a in ins["args"]], [None] * len(ins["args"]))
+    return out
+
+
+def test_each_return_path_returns_its_own_value():
+    """`return x;` is CpyVtoR4 x then a JMP to the shared exit. Printed only at
+    the RET, every path returned whichever value came last -- BGT's own
+    sound_pool::destroy_sound read as always returning false."""
+    func = {"name": "f", "owner": None, "params": [], "returns": {"token": 65}}
+    out = _lift_code(func, [("SetV1", [2, 1]), ("CpyVtoR4", [2]), ("JMP", [6]),
+                            ("SetV1", [1, 0]), ("CpyVtoR4", [1]), ("FREE", [3, 0]),
+                            ("RET", [0])])
+    assert out == ["v2 = 1;", "return v2;", "v1 = 0;", "return v1;"]
+
+
+def test_a_void_jump_to_the_exit_is_a_return():
+    """Guard clauses: `if (!handle.active) return;` is a jump to the exit. As a
+    plain jump the rest of the body was nested inside a branch."""
+    func = {"name": "f", "owner": None, "params": [], "returns": {"token": 80}}
+    out = _lift_code(func, [("JMP", [3]), ("SetV4", [1, 5]), ("SetV4", [2, 6]),
+                            ("FREE", [3, 0]), ("RET", [0])])
+    # The early path returns at the jump; the fallthrough path reaches the RET
+    # on its own and returns there. Each path says `return;` exactly once.
+    assert out == ["return;", "v1 = 5;", "v2 = 6;", "return;"]
+
+
+def test_arms_without_a_join_keep_the_compilers_order():
+    """form.bgt edit_silent: guarded returns come out in source order."""
+    lines = [(0, "@if a != 0 -> L0"), (1, "x = 1;"), (2, "return;"),
+             (3, "y = 2;"), (4, "return;")]
+    body, _ = _structured(lines, {3: 0}, 5)
+    assert body == ["if (a == 0) {", "x = 1;", "return;", "}", "y = 2;", "return;"]
+
+
+def test_classes_sharing_a_name_in_different_namespaces_keep_their_properties():
+    """Manamon 2 declares `sound_pool` and `rhythm::sound_pool`. Pairing phase-3
+    property tables by name gave one class none and the other the wrong ones;
+    they pair by position, as ReadInner reads them."""
+    decls = [{"name": "pool", "flags": 1, "size": 8, "namespace": ""},
+             {"name": "pool", "flags": 1, "size": 8, "namespace": "rhythm"}]
+    r = as_module.Reader(b"", as_module.LEN2)
+    tables = iter([["a"], ["b"]])
+    r.class_block = lambda d: {"name": d["name"], "namespace": d["namespace"]}
+    r.class_phase3 = lambda d: next(tables)
+    blocks = r.class_blocks(decls)
+    assert [(b["namespace"], b["properties"]) for b in blocks] == \
+        [("", ["a"]), ("rhythm", ["b"])]
+    assert as_disasm._type_info_name(
+        {"kind": "named", "name": "pool", "namespace": "rhythm"}) == "rhythm::pool"
+
+
+def test_a_global_pushes_with_its_declared_type():
+    """A funcdef held in a global needs its type on the stack, or the CallPtr
+    that follows cannot know its arity."""
+    hook = {"token": 5, "type": {"kind": "named", "name": "hook"}, "handle": True}
+
+    class Mod(_FakeModule):
+        def global_property_type(self, value):
+            return hook
+    L = as_lift.Lifter(Mod(b""), {"name": "f", "owner": None, "params": [],
+                                  "returns": {"token": 80}})
+    _run_ops(L, [("PshGPtr", [3], ["speech_hook"])])
+    assert L.stack[-1].dtype is hook
+
+
+def test_libcheck_orders_calls_by_evaluation_not_by_text():
+    assert bgt_libcheck.calls("speak(input_box_speak(find(x)), y);") == \
+        ["find", "input_box_speak", "speak"]
+
+
+def test_libcheck_ignores_accessors_and_counts_literals_as_a_multiset():
+    """Arguments are evaluated last to first, so `string_replace(c, "&", "")`
+    materialises "" before "&": a sequence comparison would flag a correct lift."""
+    assert bgt_libcheck.calls(
+        "x.set_pan(1); y.get_volume(); z.opIndex(2); string(s); go();") == ["go"]
+    assert bgt_libcheck.literals('f("&", "")') == \
+        bgt_libcheck.literals('v = ""; w = "&";')
+
+
+def test_libcheck_reads_functions_with_their_owning_class():
+    src = """
+    // a comment with a { brace in it
+    int free_fn(int a) { return a; }
+    class menu {
+        string name;
+        bool run(string s) { if (s == "}") { return true; } return false; }
+    }
+    """
+    funcs = bgt_libcheck.source_functions(src)
+    assert set(funcs) == {"<global>::free_fn", "menu::run"}
+    assert "return true;" in funcs["menu::run"][0]
 
 
 def test_clrvptr_reads_as_a_null_assignment():

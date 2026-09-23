@@ -239,6 +239,7 @@ itself.
 | `bgt crack sounds.dat --dict module.bin` | search the script for the pack password |
 | `bgt opcodes game.exe` | dump the engine's opcode table |
 | `bgt validate a.exe b.exe` | run the whole pipeline over several games |
+| `bgt libcheck module.bin game.exe` | score lifted code against BGT's own library source |
 | `bgt ghidra status \| install \| decompile` | set up and drive Ghidra |
 | **NVGT** | |
 | `bgt nvgt recover game.exe -o out.zip` | full source project |
@@ -286,7 +287,7 @@ against pass every stage:
 | function bodies | 1,102 | 926 | 9,924 | 2,348 |
 | operands named | 100% | 100% | 100% | 100% |
 | rebuilds byte-for-byte | yes | yes | yes | yes |
-| bodies ending with an empty stack | 98.9% | 99.7% | 99.9% | 100% |
+| bodies ending with an empty stack | 100% | 100% | 100% | 100% |
 
 BGT games share one engine, so a title that fails is more likely a BGT *version*
 this has not seen than a modified engine. `bgt validate` shows which stage

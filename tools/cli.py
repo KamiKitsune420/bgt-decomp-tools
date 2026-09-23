@@ -16,6 +16,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
                --replace sounds.dat=my.dat -o modified.bin
     bgt repack game.exe modified.bin -o patched.exe
     bgt validate game.exe patched.exe
+    bgt libcheck work/game_bytecode.bin game.exe   lifted code vs BGT's own library source
     bgt ghidra status                      is Ghidra + a JDK 21+ available?
     bgt ghidra decompile game.exe --string _builtin_function_
 
@@ -42,8 +43,8 @@ from typing import List, Optional
 
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
-                   bgt_crack, bgt_ghidra, bgt_pack, bgt_repack, bgt_unpack,
-                   bgt_validate, bgtlib, engine)
+                   bgt_crack, bgt_ghidra, bgt_libcheck, bgt_pack, bgt_repack,
+                   bgt_unpack, bgt_validate, bgtlib, engine)
 except ImportError:       # run directly from a checkout
     import as_disasm
     import as_lift
@@ -52,6 +53,7 @@ except ImportError:       # run directly from a checkout
     import as_write
     import bgt_crack
     import bgt_ghidra
+    import bgt_libcheck
     import bgt_pack
     import bgt_repack
     import bgt_unpack
@@ -326,6 +328,17 @@ def cmd_pack(args: argparse.Namespace) -> int:
     return 0 if not skipped else 1
 
 
+def cmd_libcheck(args: argparse.Namespace) -> int:
+    argv = [args.module] + ([args.exe] if args.exe else [])
+    if args.opcodes:
+        argv += ["--opcodes", args.opcodes]
+    for folder in args.include or []:
+        argv += ["--include", folder]
+    if args.verbose:
+        argv.append("-v")
+    return bgt_libcheck.main(argv)
+
+
 def cmd_identify(args: argparse.Namespace) -> int:
     return engine.main(list(args.exe) + (["--json"] if args.json else []))
 
@@ -502,6 +515,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("rest", nargs=argparse.REMAINDER,
                    help="status | install | install-extension | decompile ...")
     p.set_defaults(func=cmd_ghidra)
+
+    p = sub.add_parser("libcheck",
+                       help="compare lifted code with BGT's shipped library source")
+    p.add_argument("module")
+    p.add_argument("exe", nargs="?")
+    p.add_argument("--opcodes")
+    p.add_argument("--include", action="append")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_libcheck)
 
     p = sub.add_parser("validate", help="run the pipeline over several titles")
     p.add_argument("exe", nargs="+")
