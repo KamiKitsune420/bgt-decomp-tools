@@ -114,10 +114,11 @@ into a `for` -- `for (i = 0; i < n; i++)` rather than an `i = 0;` and a
 `continue` is left as a `while`, because `continue` skips the increment in a
 `while` and runs it in a `for`. A single paren pair that encloses a whole return
 value or condition is dropped (`return (x);` -> `return x;`), string-aware so a
-paren inside a literal is never touched. A branch condition compared against a
-bool literal is simplified to the value or its negation -- `x == true` to `x`,
-`x == false` to `!x` -- and a resulting double negation cancels, so
-`!(getf()) == false` reads `getf()`. `recover` wraps it into a project, and
+paren inside a literal is never touched. A comparison against a bool
+literal is simplified to the value or its negation -- `x == true` to `x`,
+`x == false` to `!x` -- whether it is the branch condition or a term inside a
+larger `&&` / `||`, and a resulting double negation cancels, so `!(getf()) ==
+false` reads `getf()`. `recover` wraps it into a project, and
 `source_evidence.json` separates what the bytecode retained from what was
 synthesised.
 

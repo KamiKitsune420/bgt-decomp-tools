@@ -858,7 +858,17 @@ class FuncDecompiler:
             if self.cmp_pair is not None:
                 a, b = self.cmp_pair
                 self.cmp_pair = None
-                self.value_reg = Atom("call", f"({a.text} {op} {b.text})", data_type=DataType(token_type=67))
+                text = f"({a.text} {op} {b.text})"
+                # `x == true` is `x`, `x == false` is `!x`, ... -- the same
+                # simplification _taken_condition does, but for a comparison
+                # used as a value inside a larger `&&` / `||`.
+                if op in ("==", "!="):
+                    for lit, other in ((b.text, a.text), (a.text, b.text)):
+                        if lit in ("true", "false"):
+                            keep = (op == "==") == (lit == "true")
+                            text = other if keep else _negate_cond(other)
+                            break
+                self.value_reg = Atom("call", text, data_type=DataType(token_type=67))
             else:
                 self.value_reg = Atom("call", f"({self.value_reg.text} {op} 0)", data_type=DataType(token_type=67))
             return
