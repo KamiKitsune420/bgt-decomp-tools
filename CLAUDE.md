@@ -1062,10 +1062,18 @@ before assuming a new title matches, and check the lifter's passthrough count
 as well as the stages.
 
 **The NVGT library corpus is checked for compiling, not meaning.** All 50
-library builds recompile. But only `test_roundtrip_behavior`'s fixture is
-*run* and compared, and three NVGT decompiler bugs compiled cleanly while
-computing something else. A new construct belongs in that fixture, not only in
-the corpus.
+library builds recompile. But only `test_roundtrip_behavior`'s two fixtures are
+*run* and compared, and NVGT decompiler bugs compile cleanly while computing
+something else. A new construct belongs in a fixture, not only in the corpus.
+
+**Three NVGT constructs still decompile wrong**, each of the compiles-and-lies
+kind, characterised while writing the control-flow fixture (see the repro for
+each in `docs/nvgt.md`): a ternary used *inside* a larger expression collapses
+to one arm (`10 + (c ? 3 : 7)` becomes `10 + 7`); a stored `&&`/`||` result
+loses the value and runs its guarded calls unconditionally; and a `for`
+variable reused in two sibling scopes is re-declared at function scope, so a
+debug build fails to recompile. All three are value/scope recovery, not reading
+-- the bytecode is understood, the source shape around it is wrong.
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified

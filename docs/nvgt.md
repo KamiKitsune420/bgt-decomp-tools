@@ -139,9 +139,37 @@ counted against the decompiler.
 Compiling proves valid AngelScript, not the same meaning. Three of the bugs
 below compiled cleanly and computed something else, so
 `tests/nvgt/test_roundtrip_behavior.py` goes a step further. It **runs** a
-decompiled program and compares its result with the original's. Its fixture,
-`fixtures/decompiler_patterns.nvgt`, holds one instance of each construct.
-Undoing any one of those three fixes on its own fails that test.
+decompiled program and compares its result with the original's. Its fixtures,
+`fixtures/decompiler_patterns.nvgt` and `fixtures/control_flow_patterns.nvgt`,
+hold one instance of each construct -- inheritance, handles and out-arguments in
+the first; loops, `switch`, bitwise arithmetic (`>>` vs `>>>`), arrays,
+dictionaries and argument order in the second. Each is run in both its debug and
+its stripped build and must produce the original's value. Undoing any one of the
+three fixes below fails the first fixture.
+
+### Three constructs still decompiled wrong
+
+Writing the second fixture surfaced three bugs, each of the "compiles and lies"
+kind, so the fixture is written to avoid them and they are recorded here for a
+fix rather than shipped in a failing test. Each has a one-line repro.
+
+- **A ternary inside a larger expression.** `return c ? 3 : 7;` is correct, but
+  `return 10 + (c ? 3 : 7);` decompiles to an empty `if (c) {} else {}` and
+  `return (10 + 7);` -- the branch collapses to its false arm. The value-merge
+  that builds a `? :` fires only when the merged value is the whole return or
+  assignment, not when it is an operand of a surrounding expression.
+- **A stored short-circuit result.** `bool b = (x && f()) || (y || g());`
+  decompiles with the guarded calls hoisted out and evaluated unconditionally,
+  and the stored bool lost. The `&&` / `||` structuring recovers a *branch* but
+  not a *value*.
+- **A loop variable reused in sibling scopes.** `for (int i ...) {} for (uint i
+  ...) {}` is legal -- two scopes -- but a debug build (which has the scope
+  metadata) re-emits both declarations at function scope and the recompile fails
+  with "`i` is already declared". The decompiler does not reopen a nested scope
+  for a `for` initialiser.
+
+All three are value/scope recovery, not reading: the bytecode is understood, but
+the source shape put around it is wrong. They join the open items in `CLAUDE.md`.
 
 What had to change, grouped by what it broke:
 

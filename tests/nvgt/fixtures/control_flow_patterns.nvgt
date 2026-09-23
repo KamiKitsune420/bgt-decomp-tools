@@ -1,0 +1,93 @@
+// A behaviour fixture: control flow, arithmetic and collections that compile
+// cleanly but can be decompiled to something that computes a DIFFERENT number.
+// It exports its own module and writes the value it computed; a decompiled copy
+// must write the same. No audio or TTS, so it runs headless under the tests.
+//
+// It deliberately avoids three constructs the decompiler still gets wrong (see
+// "What is still open" in CLAUDE.md): a ternary used inside a larger expression,
+// a `||`/`&&` whose result is stored, and two sibling scopes that reuse a loop
+// variable name. Those belong in a future fixture once they are fixed; a
+// behaviour test has to pass to be a guard.
+int64 loops() {
+	int64 total = 0;
+	for (int i = 0; i < 10; i += 1) {
+		if (i == 3) continue;          // skip one
+		if (i == 8) break;             // stop early
+		total += i;                    // 0+1+2+4+5+6+7 = 25
+	}
+	int j = 0;
+	while (j < 5) { total += j * 10; j += 1; }   // 0+10+20+30+40 = 100
+	int k = 0;
+	do { total += 1000; k += 1; } while (k < 3); // 3000
+	return total;                                 // 3125
+}
+
+int classify(int n) {
+	switch (n) {
+		case 0:
+		case 1:
+			return 7;                  // fallthrough 0 -> 1
+		case 2:
+			return 20;
+		default:
+			return 99;
+	}
+}
+
+int bit_math() {
+	int total = 0;
+	total += (-8 >> 1);        // logical shift: 2147483644
+	total += (-8 >>> 1);       // arithmetic shift: -4
+	total += (1 << 4);         // 16
+	total += (0xF0 & 0x18);    // 16
+	total += (0x01 | 0x10);    // 17
+	total += (0xFF ^ 0x0F);    // 240
+	total += (~0);             // -1
+	total += (17 % 5);         // 2
+	total += (17 / 5);         // 3 (integer division)
+	return total;
+}
+
+int collections() {
+	int[] xs;
+	for (int fill = 0; fill < 6; fill += 1) xs.insert_last((fill * 7) % 5);
+	xs.sort_ascending();
+	int total = 0;
+	for (uint at = 0; at < xs.length(); at += 1) total += xs[at] * int(at);
+	dictionary d;
+	d.set("a", 11);
+	d.set("b", 22);
+	int v = 0;
+	if (d.exists("a")) { d.get("a", v); total += v; }
+	if (!d.exists("z")) total += 100;
+	return total;
+}
+
+// Evaluation order: arguments run last to first. (No short-circuit here.)
+int order_counter = 0;
+int tick(int by) { order_counter += by; return order_counter; }
+int order() {
+	order_counter = 0;
+	int a = tick(1) * 100 + tick(10) * 10 + tick(100);   // last-to-first: 100,10,1
+	return a + order_counter;                            // 12300 + 111
+}
+
+int strings() {
+	string s = "Hello, world";
+	int total = s.length() + s.find("world");            // 12 + 7
+	if (s.substr(0, 5) == "Hello") total += 1000;
+	if (s.substr(7) == "world") total += 10000;
+	return total;
+}
+
+void main() {
+	int64 total = loops();
+	total += classify(0) + classify(2) + classify(5);   // 7 + 20 + 99
+	total += bit_math();
+	total += collections();
+	total += order();
+	total += strings();
+	file_put_contents("result.txt", "" + total);
+	file_put_contents("debug.bin", script_get_module("nvgt_game", 0).get_bytecode(false));
+	file_put_contents("strip.bin", script_get_module("nvgt_game", 0).get_bytecode(true));
+}

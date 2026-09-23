@@ -16,6 +16,11 @@ bugs its fixture pins compiled cleanly and computed something else --
 * `d.set("item", @b)` lost its `@`, and a `?&in` then stores a copy of the
   object rather than a handle to it.
 
+A second fixture, control_flow_patterns.nvgt, covers loops, switch, bitwise
+arithmetic (including `>>` vs `>>>`, which once differed), arrays, dictionaries
+and argument evaluation order -- the same round-trip, a different corner of the
+language.
+
 Needs NVGT_COMPILER (an nvgt.exe); skips otherwise.
 """
 import os
@@ -27,7 +32,7 @@ from pathlib import Path
 
 import recover
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "decompiler_patterns.nvgt"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 COMPILER = Path(os.environ["NVGT_COMPILER"]) if os.environ.get("NVGT_COMPILER") else None
 
 
@@ -54,19 +59,27 @@ def _run(script: Path) -> str:
 
 @unittest.skipUnless(COMPILER and COMPILER.exists(),
                      "set NVGT_COMPILER to an nvgt.exe for behavioural round-trips")
-class DecompiledBehaviourTests(unittest.TestCase):
+class _BehaviourFixture(unittest.TestCase):
+    """Compile the fixture, run it, then require each decompiled build -- debug
+    and stripped -- to run to the same value. Subclasses name the fixture."""
+    FIXTURE = None                          # set by each subclass
+
     @classmethod
     def setUpClass(cls):
+        if cls is _BehaviourFixture:
+            raise unittest.SkipTest("base class")
         cls.work = Path(tempfile.mkdtemp(prefix="nvgt_behaviour_"))
         original = cls.work / "original"
         original.mkdir()
-        shutil.copy(FIXTURE, original / FIXTURE.name)
-        cls.expected = _run(original / FIXTURE.name)
+        fixture = FIXTURES / cls.FIXTURE
+        shutil.copy(fixture, original / fixture.name)
+        cls.expected = _run(original / fixture.name)
         cls.bytecode = {kind: original / f"{kind}.bin" for kind in ("debug", "strip")}
 
     @classmethod
     def tearDownClass(cls):
-        shutil.rmtree(cls.work, ignore_errors=True)
+        if cls is not _BehaviourFixture:
+            shutil.rmtree(cls.work, ignore_errors=True)
 
     def _decompiled(self, kind: str) -> Path:
         project = self.work / f"recovered_{kind}"
@@ -77,6 +90,16 @@ class DecompiledBehaviourTests(unittest.TestCase):
                          if (project / "compile-report.txt").exists() else manifest)
         return project
 
+    def test_debug_build_behaves_identically(self):
+        self.assertEqual(_run(self._decompiled("debug") / "main.nvgt"), self.expected)
+
+    def test_stripped_build_behaves_identically(self):
+        self.assertEqual(_run(self._decompiled("strip") / "main.nvgt"), self.expected)
+
+
+class DecompiledBehaviourTests(_BehaviourFixture):
+    FIXTURE = "decompiler_patterns.nvgt"
+
     def test_fixture_computes_its_documented_value(self):
         # Derived by hand, so the reference itself is checked rather than
         # trusted. handles(): weight 3, touched to 4 through the stored
@@ -85,9 +108,6 @@ class DecompiledBehaviourTests(unittest.TestCase):
         # polish(), "x".length() 1 -> 4978. A copy stored by set() would
         # leave fetched.weight at 3; a lost `@h.item = b` returns -1.
         self.assertEqual(self.expected, "4978")
-
-    def test_debug_build_behaves_identically(self):
-        self.assertEqual(_run(self._decompiled("debug") / "main.nvgt"), self.expected)
 
     def test_stripped_build_behaves_identically(self):
         project = self._decompiled("strip")
@@ -100,6 +120,25 @@ class DecompiledBehaviourTests(unittest.TestCase):
         self.assertRegex(source, r"bool __nvgt_ret_\d+ = local_\d+\.get\(")
         self.assertIn("cast<sword@>(", source)
         self.assertRegex(source, r"\? 1 : 0\)")          # bool stored in a float slot
+
+
+class ControlFlowBehaviourTests(_BehaviourFixture):
+    FIXTURE = "control_flow_patterns.nvgt"
+
+    def test_fixture_computes_its_documented_value(self):
+        # loops 3125; classify 7+20+99; bit_math incl. -8>>1 (logical,
+        # 2147483644) and -8>>>1 (arithmetic, -4); collections; order 12411;
+        # strings 11019 -- summed in an int64 that wraps to this exact value.
+        # Pinned so a fixture edit that changes coverage is noticed.
+        self.assertEqual(self.expected, "-2147468510")
+
+    def test_stripped_build_keeps_the_two_shift_operators_apart(self):
+        # The one that most easily regresses: `>>` is logical, `>>>` arithmetic.
+        project = self._decompiled("strip")
+        source = "\n".join(p.read_text(encoding="utf-8")
+                           for p in project.rglob("*.nvgt"))
+        self.assertIn("2147483644", source)     # -8 >> 1, the logical result
+        self.assertIn("-4", source)             # -8 >>> 1, the arithmetic result
 
 
 if __name__ == "__main__":
