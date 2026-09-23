@@ -34,10 +34,37 @@ a known count from the top leaves that residue underneath, where it is ignored
 rather than turned into a phantom argument. Arity comes from the callee's own
 signature record, which `as_module` already recovered.
 
-Registered functions that return an object are called through the C++ ABI and
-take a hidden pointer to the return slot; script functions return through the
-object register and do not. That is why the hidden argument is modelled on
-`CALLSYS` only.
+## The call frame
+
+Top of stack first, as asCContext::CallSystemFunction consumes it:
+
+    this                 methods only
+    return address       only when the callee returns a value type on the stack
+    argument 0           arguments are pushed LAST TO FIRST, so the first one
+    ...                  is nearest the top
+    argument n-1
+
+Each `?&in` argument is two slots, its value above the type id TYPEID pushed
+first. `ALLOC` is the one inversion: its destination address is the DEEPEST
+slot, because the constructor pops its own arguments before ALLOC pops it.
+
+Every part of that was read rather than fitted:
+
+* **Argument order.** `random(95, 105)` compiles to `PshC4 105 / PshC4 95 /
+  CALLSYS random`, and BGT's shipped dynamic_menu.bgt calls
+  `add_item_extended(filename, true, name)` where the bytecode pushes `name`
+  first. An earlier version rendered the stack bottom-to-top, which printed
+  every multi-argument call reversed.
+* **The return address** belongs to `DoesReturnOnStack`: a registered VALUE
+  type returned by value, on any call kind -- not handles, not references, not
+  arrays (a reference type), not script classes (Paladin's `generate_maze`
+  returns `map` and is followed by STOREOBJ, the object register). An earlier
+  rule applied it to CALLSYS only and to handles too.
+* **No hidden argument for templates.** bgt.exe's GenerateTemplateFactoryStub
+  (FUN_0046fd30 in that build) emits `OBJTYPE <type>; CALLSYS <factory>; RET`:
+  the object type is pushed inside the stub, whose parameter list drops the
+  hidden `int&in`. An earlier rule inferred a caller-pushed type id from stack
+  balance; the binary says there is none.
 
 ## Registers, not just a stack
 
@@ -47,6 +74,9 @@ as pushes is the single biggest source of imbalance:
 
     LoadThisR    this->prop into the reference register   stackInc 0
     LDG          a global into the reference register     stackInc 0
+    PopRPtr      pops an address INTO the register         stackInc -1
+    LdGRdR4      reads a global AND leaves its address     stackInc 0
+    call -> T&   a reference result is an address there
     WRTV*        write a variable THROUGH that register   stackInc 0
     RDR*         read it back into a variable             stackInc 0
 
@@ -63,11 +93,17 @@ reference for the variadic ones -- `CALL`, `CALLSYS`, `CALLINTF` and `ALLOC`
 depend on the callee -- and it counts stack slots where this model counts values,
 so a 64-bit push is +2 there and one expression here.
 
-The end-to-end check is the stack being empty at `RET`. Across the three titles:
+The end-to-end check is the stack being empty at `RET`. Across four titles:
 
-    Psycho Strike       1,080 / 1,102 functions  (98.0%)
-    Paladin of the Sky    919 /   926            (99.2%)
-    Manamon 2           9,510 / 9,924            (95.8%)
+    Psycho Strike       1,090 / 1,102 functions  (98.9%)
+    Paladin of the Sky    923 /   926            (99.7%)
+    Manamon 2           9,919 / 9,924            (99.9%)
+    SBYW                2,348 / 2,348            (100%)
+
+Manamon 2 was 95.8% under the old call-frame rules. The metric improved because
+the rules became correct, not the other way round: in Paladin the old,
+looser return rule "balanced" one extra body by swallowing an unrelated value
+at each call, and the stricter rule is kept because STOREOBJ says so.
 
 A `?&in` parameter (token 59) is worth its own note: it is AngelScript's
 variable-argument type and the caller pushes the VALUE **and** its TYPE ID, so
@@ -86,8 +122,8 @@ instruction stream, iterative dominators and post-dominators, natural loops from
 back edges, then nested `if` / `else` / `while` / `do-while` with `break` and
 `continue`. Anything that does not reduce stays a labelled `goto`.
 
-    residual gotos    2,676 / 264,309 statements  (1.01%)
-    goto-free bodies  84.1% strike · 89.2% paladin · 94.6% Manamon 2
+    residual gotos    3,818 / 410,034 statements  (0.93%), four titles
+    goto-free bodies  83.7% strike · 89.2% paladin · 94.6% Manamon 2 · 90.2% SBYW
 
 Three shapes decide whether the output is right, and each was wrong first:
 
@@ -115,7 +151,7 @@ Unmodelled opcodes are emitted as `/* OPCODE ... */` rather than dropped, and
 `lift_function` reports how many. A lifter that silently omits what it does not
 understand produces output that reads better and means less -- the passthrough
 count is the number that says how much of the function is really recovered. It is
-currently **zero across all 853,190 instructions** in the three titles.
+currently **zero across all 1,111,490 instructions** in the four titles.
 """
 
 import argparse
@@ -157,13 +193,24 @@ LOWJUMPS = {"JLowZ": "!{val}", "JLowNZ": "{val}"}
 
 
 class Expr:
-    """A lifted value: its text plus whether it is already a statement."""
+    """A lifted value: its text, whether it is an address, and its type if known.
 
-    __slots__ = ("text", "is_ref")
+    The type is carried only where the bytecode states it -- a parameter's
+    declared type, a property's recorded type -- because one thing needs it:
+    `CallPtr` pops however many arguments the funcdef held in a variable takes,
+    and nothing but the variable's type says how many that is.
+    """
 
-    def __init__(self, text: str, is_ref: bool = False) -> None:
+    __slots__ = ("text", "is_ref", "dtype", "settled")
+
+    def __init__(self, text: str, is_ref: bool = False,
+                 dtype: Optional[Dict[str, Any]] = None) -> None:
         self.text = text
         self.is_ref = is_ref
+        self.dtype = dtype
+        # True for a value the bytecode itself leaves behind on purpose (a
+        # REFCPY source nothing pops, which RET discards). Not residue.
+        self.settled = False
 
     def __repr__(self) -> str:
         return "Expr(%r)" % self.text
@@ -182,13 +229,46 @@ class Lifter:
         self.cmp: Tuple[str, str] = ("cond", "0")   # last comparison operands
         self.passthrough = 0
         self.residue = 0
+        self.script_classes = getattr(mod, "script_classes", frozenset())
+        self.non_value_types = getattr(mod, "non_value_types", self.script_classes)
+        # A reference-returning call held until whatever reads it: (index, text).
+        self.pending: Optional[Tuple[int, str]] = None
+        self.layout = as_disasm.frame_layout(func, self.non_value_types)
+        # Known types of frame slots: parameters from the signature, and any
+        # variable a typed handle has been copied into (RefCpyV).
+        self.slot_types: Dict[int, Dict[str, Any]] = {}
+        params = func.get("params", [])
+        for off, label in self.layout.items():
+            if label.startswith("a") and label[1:].isdigit():
+                idx = int(label[1:])
+                if idx < len(params) and isinstance(params[idx], dict):
+                    self.slot_types[off] = params[idx]
 
     # -- helpers ---------------------------------------------------------
     def var(self, slot: int) -> str:
-        return as_disasm.variable_name(self.func, slot)
+        return as_disasm.variable_name(self.func, slot, self.layout)
 
-    def push(self, text: str, is_ref: bool = False) -> None:
-        self.stack.append(Expr(text, is_ref))
+    def push(self, text: str, is_ref: bool = False,
+             dtype: Optional[Dict[str, Any]] = None) -> None:
+        self.stack.append(Expr(text, is_ref, dtype))
+
+    def top(self) -> Optional[Expr]:
+        return self.stack[-1] if self.stack else None
+
+    def consume_pending(self) -> None:
+        """A held reference-returning call was used by what reads it."""
+        self.pending = None
+
+    def flush_pending(self, emit) -> None:
+        """Emit a held call nobody consumed, at its own position.
+
+        Its result went unused, but the call still ran -- dropping it would lose
+        its side effects, which is the one thing a lifter must never do.
+        """
+        if self.pending is not None:
+            idx, text = self.pending
+            emit(idx, "ret = %s;" % text)
+            self.pending = None
 
     def pop(self) -> str:
         if not self.stack:
@@ -196,9 +276,17 @@ class Lifter:
         return self.stack.pop().text
 
     def popn(self, n: int) -> List[str]:
-        """Pop n values from the TOP, keeping their source order."""
+        """Pop n values from the TOP, keeping their source order.
+
+        Asking for more than the stack holds is a modelling error -- something
+        upstream pushed too little -- so the shortfall is counted as residue.
+        It used to vanish into `?` arguments, which let 21 such calls in SBYW
+        go unmeasured.
+        """
         if n <= 0:
             return []
+        if n > len(self.stack):
+            self.residue += n - len(self.stack)
         taken = self.stack[-n:] if len(self.stack) >= n else list(self.stack)
         del self.stack[len(self.stack) - len(taken):]
         return [e.text for e in taken]
@@ -208,7 +296,37 @@ class Lifter:
         return f[index] if 0 <= index < len(f) else None
 
     def _call(self, index: int, kind: str) -> str:
-        """Render a call, popping the callee's declared arity."""
+        """Render a call, popping exactly what the caller pushed for it.
+
+        The frame a caller builds, TOP of stack first -- read out of
+        asCContext::CallSystemFunction, which takes the object pointer first,
+        then the return address, then the arguments:
+
+            this                 methods only
+            return address       only when the callee returns on the stack
+            argument 0
+            argument 1           ...arguments are pushed LAST TO FIRST
+            ...
+            argument n-1         (deepest)
+
+        Each `?&in` argument is two slots: its value, and beneath it the type
+        id TYPEID pushed first.
+
+        Two pieces of evidence pin the argument order, neither a metric:
+        `random(95, 105)` compiles to `PshC4 105 / PshC4 95 / CALLSYS random`,
+        and BGT's own dynamic_menu.bgt calls
+        `add_item_extended(filename, true, name)` where the bytecode pushes the
+        copy of `name` first. Rendering bottom-to-top prints every
+        multi-argument call reversed -- plausible, and wrong.
+
+        What is NOT on the frame: a hidden type id for template functions. An
+        earlier rule added one, inferred from stack balance. bgt.exe settles it
+        (GenerateTemplateFactoryStub, FUN_0046fd30 in that build): the stub it
+        builds is `OBJTYPE <type>; CALLSYS <factory>; RET`, so the object type
+        is pushed INSIDE the stub, the stub's parameter list drops the hidden
+        `int&in`, and callers push only declared arguments. The compiler emits
+        TYPEID only for `?&` parameters.
+        """
         fn = self.callee(index)
         if not isinstance(fn, dict):
             self.residue += 1
@@ -216,61 +334,34 @@ class Lifter:
 
         name = fn.get("name") or "?"
         owner = fn.get("owner")
-        nargs = len(fn.get("params", []))
-        # A method takes `this`; a registered function returning an object also
-        # takes a hidden pointer to the return slot (the C++ ABI), which script
-        # calls do not.
-        hidden = 1 if (kind == "CALLSYS" and _returns_object(fn)) else 0
-        # A `?&in` parameter (token 59) is AngelScript's variable-argument type:
-        # the caller pushes the VALUE and its TYPE ID, so one declared parameter
-        # occupies two stack slots. dictionary::set(const string&in, const ?&in)
-        # is the case in hand. Rare -- three functions across this corpus -- but
-        # mechanical, and derivable from the signature rather than guessed.
-        hidden += sum(1 for p in fn.get("params", [])
-                      if isinstance(p, dict) and p.get("token") == 59)
-        # A template-registered function also receives a hidden type id -- that
-        # is how an array<T> factory learns T, and TYPEID pushes one right
-        # before such calls, underneath the declared arguments.
-        #
-        # STILL INFERRED, and the weakest claim in this file. asCReader's
-        # TranslateFunction was checked and does not settle it: it gives TYPEID's
-        # operand a meaning (an index into usedTypeIds) but says nothing about
-        # the stack, because the hidden argument is a runtime calling convention
-        # rather than a load-time fixup. What supports it is behaviour: TYPEID is
-        # 51x enriched in the bodies that do not balance, it is followed by more
-        # argument pushes and then a call, and removing this rule costs 0.67
-        # points of clean-stack functions and 168 stranded values while changing
-        # the over-pop counter by one. Settling it properly means reading the
-        # VM's CallSystemFunction path, not the loader.
-        if _is_template(fn):
-            hidden += 1
-        want = nargs + (1 if owner else 0) + hidden
-        args = self.popn(want)
-        raw = list(args)          # before this/hidden stripping
+        params = fn.get("params", [])
+        on_stack = (as_disasm.returns_on_stack(fn, self.non_value_types)
+                    and index not in getattr(self.mod, "register_returns", ()))
+        widths = [2 if isinstance(p, dict) and p.get("token") == as_disasm.VAR_TYPE_TOKEN
+                  else 1 for p in params]
+        want = (1 if owner else 0) + (1 if on_stack else 0) + sum(widths)
+        raw = self.popn(want)                  # bottom -> top
+        frame = list(reversed(raw))            # top -> bottom: the order above
 
-        # The object pointer is pushed LAST, so `this` is on top -- for ordinary
-        # methods as well as constructors. dynamic_menu::add_item makes it
-        # unambiguous:
-        #     VAR 1 / PshV4 2 / VAR 3 / PshVPtr 0 / CALLINTF add_item_extended
-        # -- the three declared arguments, then `this`. Taking it from the
-        # bottom yields `a0.add_item_extended(a1, v3, this)`: the receiver
-        # becomes an argument and an argument becomes the receiver, which reads
-        # perfectly well and is wrong.
-        this = ""
-        if owner and args:
-            this, args = args[-1], args[:-1]
-        if hidden and args:
-            args = args[1:]          # the hidden return pointer is deepest
+        this = frame.pop(0) if owner and frame else ""
+        result = frame.pop(0) if on_stack and frame else ""
+        args: List[str] = []
+        for width in widths:
+            if not frame:
+                # Fewer values than the callee takes: something upstream was
+                # modelled short. Say so rather than inventing an operand.
+                args.append("?")
+                continue
+            args.append(frame.pop(0))
+            if width == 2 and frame:
+                frame.pop(0)                   # the TYPEID beneath a ?& value
 
         # The string factory turns (constant, length) back into the literal.
         # Collapsing it away entirely was tried and reverted upstream: it
         # desynchronises the literal from the PshRPtr that follows, and literal
         # recovery drops by an order of magnitude. Keep the literal, drop the
-        # plumbing.
+        # plumbing. It returns `const string&`, so nothing else is on its frame.
         if name == "_string_factory_" or name.endswith("stringfactory"):
-            # Search the RAW pops: the hidden-return-pointer strip above would
-            # otherwise discard the literal itself, since the factory's operands
-            # are (constant, length) with the constant deepest.
             lit = next((a for a in raw if a.startswith('"')), None)
             return lit if lit else "string()"
 
@@ -286,34 +377,25 @@ class Lifter:
                 return "%s = %s(%s)" % (this[1:], typ, inner)
             return "%s(%s)" % (typ, inner)
         op = OPERATORS.get(name)
+        text = None
         if op and this:
             if op == "[]":
-                return "%s[%s]" % (this, ", ".join(args))
-            if op == "=" and args:
+                text = "%s[%s]" % (this, ", ".join(args))
+            elif op == "=" and args:
                 return "%s = %s" % (this, args[0])
-            if len(args) == 1:
-                return "%s %s %s" % (this, op, args[0])
+            elif len(args) == 1:
+                text = "%s %s %s" % (this, op, args[0])
 
-        label = as_disasm.function_label(fn) if owner else name
-        if owner and this:
-            label = "%s.%s" % (this, name)
-        return "%s(%s)" % (label, ", ".join(args))
-
-
-def _is_template(fn: Dict[str, Any]) -> bool:
-    """Is this a template-registered function (array<T>, weakref<T>, ...)?"""
-    owner = fn.get("owner")
-    if isinstance(owner, dict) and owner.get("kind") == "template":
-        return True
-    ret = fn.get("returns")
-    rt = ret.get("type") if isinstance(ret, dict) else None
-    return bool(isinstance(rt, dict) and rt.get("kind") == "template")
-
-
-def _returns_object(fn: Dict[str, Any]) -> bool:
-    ret = fn.get("returns")
-    return bool(isinstance(ret, dict) and (ret.get("type") is not None
-                                           or ret.get("handle")))
+        if text is None:
+            label = as_disasm.function_label(fn) if owner else name
+            if owner and this:
+                label = "%s.%s" % (this, name)
+            text = "%s(%s)" % (label, ", ".join(args))
+        # A value returned on the stack is written straight into the slot whose
+        # address the caller pushed, so the call IS an assignment to that slot.
+        if result.startswith("&"):
+            return "%s = %s" % (result[1:], text)
+        return text
 
 
 def lift_function(mod: "as_disasm.Module", func: Dict[str, Any]) -> Dict[str, Any]:
@@ -339,12 +421,19 @@ def lift_function(mod: "as_disasm.Module", func: Dict[str, Any]) -> Dict[str, An
         args = [a["value"] for a in ins["args"]]
         named = [a.get("text") for a in ins["args"]]
         _step(lift, emit, i, name, args, named)
+    lift.flush_pending(emit)
 
-    lift.residue += len(lift.stack)
+    lift.residue += sum(1 for e in lift.stack if not e.settled)
     return {"disasm": dis, "lines": lines, "targets": targets,
             "passthrough": lift.passthrough, "residue": lift.residue,
             "signature": dis["signature"], "label": dis["label"],
             "instructions": len(instrs)}
+
+
+# Instructions that end straight-line flow or start another call: a held
+# reference-returning call nobody has read by then was only called for its effect.
+_FLUSH_PENDING = frozenset(("ALLOC", "CallPtr", "JMP", "JMPP", "RET", "JZ", "JNZ",
+                            "JS", "JNS", "JP", "JNP", "JLowZ", "JLowNZ"))
 
 
 def _step(L: Lifter, emit, i: int, name: str, args: List[int],
@@ -353,15 +442,18 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
     a0 = args[0] if args else 0
     a1 = args[1] if len(args) > 1 else 0
     n0 = named[0] if named else None
+    if L.pending is not None and name in _FLUSH_PENDING:
+        L.flush_pending(emit)
 
     # -- pushes ---------------------------------------------------------
     if name in ("PshV4", "PshV8", "PshVPtr", "VAR", "PSF", "PshRPtr"):
         if name == "PshRPtr":
+            L.consume_pending()
             L.push(L.obj_reg)
         elif name == "PSF":
-            L.push("&" + L.var(a0), is_ref=True)
+            L.push("&" + L.var(a0), is_ref=True, dtype=L.slot_types.get(a0))
         else:
-            L.push(L.var(a0))
+            L.push(L.var(a0), dtype=L.slot_types.get(a0))
         return
     if name in ("PshC4", "PshC8", "SetV4", "SetV8", "SetV1", "SetV2"):
         if name.startswith("Psh"):
@@ -389,7 +481,8 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         # adjusts the pointer already on the stack -- net zero, not a push
         member = (n0 or "prop#%d" % a0).split("::")[-1]
         base = L.pop().lstrip("&")
-        L.push("%s.%s" % (base, member), is_ref=True)
+        prop_type = getattr(L.mod, "object_property_type", lambda v: None)(a0)
+        L.push("%s.%s" % (base, member), is_ref=True, dtype=prop_type)
         return
     if name == "LoadThisR":
         # loads this->prop into the REFERENCE REGISTER; stackInc is 0, so
@@ -405,12 +498,25 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
 
     # -- calls -----------------------------------------------------------
     if name in ("CALLSYS", "CALL", "CALLINTF", "CALLBND", "Thiscall1"):
+        L.flush_pending(emit)
         text = L._call(a0, name)
         if text:
             L.obj_reg = L.value_reg = text
             if text.startswith('"'):
                 # The factory produced a literal. It is a value, not a
                 # statement -- the constructor that follows consumes it.
+                return
+            callee = L.callee(a0)
+            ret = callee.get("returns") if isinstance(callee, dict) else None
+            if (isinstance(ret, dict) and ret.get("reference")
+                    and " = " not in text):
+                # A reference comes back as an ADDRESS in the register that
+                # RDR* / WRTV* go through -- `array<uint>::opIndex` then
+                # `RDR4 3` is `v3 = totals[i]`. Held rather than emitted, so
+                # the read or write that follows can say what it touches; if
+                # nothing does, flush_pending emits the call where it was.
+                L.ref_reg = text
+                L.pending = (i, text)
                 return
             # A constructor or opAssign already reads as an assignment; wrapping
             # it in `ret =` would claim a return value it does not have.
@@ -428,25 +534,81 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         # Knowing the constructor is what makes that arity available -- operand
         # 1 is a one-based usedFunctions index (see as_disasm.OPERAND_ROLES),
         # which is why this could not be balanced before that was settled.
+        #
+        # The destination is the DEEPEST slot, not the top: asCContext's ALLOC
+        # handler calls the constructor, which pops its own arguments, and only
+        # then pops the variable address. dynamic_menu::add_item shows it --
+        # `PSF 1 / PshVPtr -2 / ALLOC string` copies parameter `name` (-2) into
+        # temporary 1; reading the top as the destination instead yields
+        # `s2 = string(&a0)`, a copy in the wrong direction. The arguments above
+        # it are in call order, last pushed first, like any other call.
         typ = n0 or "object"
-        nargs = 0
+        widths: List[int] = []
         if len(args) > 1 and a1:
             ctor = L.callee(a1 - 1)
             if isinstance(ctor, dict):
-                nargs = len(ctor.get("params", []))
-        taken = L.popn(nargs + 1)
-        dest = taken[-1].lstrip("&") if taken else "?"
-        ctor_args = ", ".join(a for a in taken[:-1] if a != "<len>")
-        emit(i, "%s = %s(%s);" % (dest, typ, ctor_args))
+                widths = [2 if isinstance(p, dict)
+                          and p.get("token") == as_disasm.VAR_TYPE_TOKEN else 1
+                          for p in ctor.get("params", [])]
+        taken = L.popn(sum(widths) + 1)
+        dest = taken[0].lstrip("&") if taken else "?"
+        frame = list(reversed(taken[1:]))       # top -> bottom = argument order
+        ctor_args: List[str] = []
+        for width in widths:
+            if not frame:
+                break
+            ctor_args.append(frame.pop(0))
+            if width == 2 and frame:
+                frame.pop(0)
+        emit(i, "%s = %s(%s);" % (dest, typ,
+                                  ", ".join(a for a in ctor_args if a != "<len>")))
         return
     if name == "PshListElmnt":
         L.push("list[%d]" % a0)                   # stackInc +1
         return
-    if name in ("PopPtr", "PopRPtr", "REFCPY"):
+    if name == "REFCPY":
+        # A handle assignment: pop the destination address, then copy the handle
+        # that is now on top into it. The source STAYS on the stack (stackInc
+        # -1), and when the expression's value is unused the compiler leaves it
+        # there for RET to discard. Modelling this as a bare pop dropped the
+        # assignment itself -- `pool = sound_pool(500)` lifted to an empty
+        # initialiser.
+        dest = L.pop().lstrip("&")
+        src = L.top()
+        emit(i, "@%s = %s;" % (dest, src.text if src else "?"))
+        if src is not None:
+            src.settled = True       # popping it later removes it as usual
+        return
+    if name == "PopRPtr":
+        # Pops a pointer INTO the register that RDR* / WRTV* read and write
+        # through (asBC_PopRPtr). As a plain pop, `PshGPtr pool / ADDSi
+        # max_distance / PopRPtr / RDR4 3` lifted to `v3 = ref;` and the write
+        # back to `ref = v3;` -- the member access was lost both ways.
+        L.ref_reg = L.pop().lstrip("&")
+        return
+    if name == "PopPtr":
         L.pop()                                   # stackInc -1
         return
-    if name in ("FREE", "ClrVPtr", "CHKREF", "SwapPtr", "STOREOBJ",
-                "LOADOBJ", "GETOBJ", "GETREF", "GETOBJREF", "RDSPtr", "ChkRefS",
+    if name == "STOREOBJ":
+        # The object register -- where script functions and factories return
+        # handles -- stored into a variable. Without this the variable appears
+        # later from nowhere.
+        emit(i, "%s = %s;" % (L.var(a0), L.obj_reg))
+        L.obj_reg = "ret"
+        return
+    if name == "LOADOBJ":
+        # A variable moved INTO the object register, which is how a function
+        # returning a handle hands its result back: `return v1`, not `return ret`.
+        L.obj_reg = L.value_reg = L.var(a0)
+        return
+    if name == "ClrVPtr":
+        # Sets a handle variable to null; the variable is often compared next
+        # (`if (callback is null)`), so leaving it silent makes it appear from
+        # nowhere.
+        emit(i, "@%s = null;" % L.var(a0))
+        return
+    if name in ("FREE", "CHKREF", "SwapPtr",
+                "GETOBJ", "GETREF", "GETOBJREF", "RDSPtr", "ChkRefS",
                 "ChkNullV", "ChkNullS", "SUSPEND", "LINE", "ClrHi",
                 "PshNull", "CpyVtoR8", "SetListSize",
                 "SetListType", "AllocMem", "FREE_"):
@@ -469,11 +631,20 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         emit(i, "%s = %s;" % (named[1] or "global#%d" % a1, L.var(a0)))
         return
     if name == "RefCpyV":
+        # Copy the handle on top of the stack into a variable; the stack is
+        # unchanged. The variable inherits the value's type, which is what later
+        # lets a CallPtr through it know its funcdef's arity.
+        src = L.top()
+        emit(i, "@%s = %s;" % (L.var(a0), src.text if src else "?"))
+        if src is not None and src.dtype is not None:
+            L.slot_types[a0] = src.dtype
         return
     if name in ("WRTV1", "WRTV2", "WRTV4", "WRTV8"):
+        L.consume_pending()
         emit(i, "%s = %s;" % (L.ref_reg, L.var(a0)))
         return
     if name in ("RDR1", "RDR2", "RDR4", "RDR8"):
+        L.consume_pending()
         emit(i, "%s = %s;" % (L.var(a0), L.ref_reg))
         L.value_reg = L.var(a0)
         return
@@ -487,7 +658,12 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
               "ADDd": "+", "SUBd": "-", "MULd": "*", "DIVd": "/", "MODd": "%",
               "DIVu": "/", "MODu": "%", "DIVu64": "/", "MODu64": "%",
               "ADDi64": "+", "SUBi64": "-", "MULi64": "*", "DIVi64": "/",
-              "MODi64": "%"}
+              "MODi64": "%",
+              # AngelScript's `**`. Same fixed three-operand shape (asBCInfo
+              # type 8, stackInc 0) as the rest of this group. SBYW is the
+              # first title seen to use it -- POWdi is double ** int.
+              "POWi": "**", "POWu": "**", "POWf": "**", "POWd": "**",
+              "POWdi": "**", "POWi64": "**", "POWu64": "**"}
     if name in _ARITH:
         emit(i, "%s = %s %s %s;" % (L.var(a0), L.var(a1), _ARITH[name],
                                     L.var(args[2]) if len(args) > 2 else "?"))
@@ -511,10 +687,12 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
                                     args[2] if len(args) > 2 else "?"))
         return
 
-    # bitwise / shifts, same three-address shape as the arithmetic group
+    # bitwise / shifts, same three-address shape as the arithmetic group.
+    # AngelScript's `>>` is the LOGICAL shift and `>>>` the arithmetic one, so
+    # BSRA must not read as `>>` -- the two differ for every negative value.
     _BITS = {"BAND": "&", "BOR": "|", "BXOR": "^", "BSLL": "<<",
-             "BSRL": ">>", "BSRA": ">>", "BAND64": "&", "BOR64": "|",
-             "BXOR64": "^"}
+             "BSRL": ">>", "BSRA": ">>>", "BAND64": "&", "BOR64": "|",
+             "BXOR64": "^", "BSLL64": "<<", "BSRL64": ">>", "BSRA64": ">>>"}
     if name in _BITS:
         emit(i, "%s = %s %s %s;" % (L.var(a0), L.var(a1), _BITS[name],
                                     L.var(args[2]) if len(args) > 2 else "?"))
@@ -545,7 +723,11 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         emit(i, "%s = %s;" % (n0 or "global#%d" % a0, a1))
         return
     if name == "LdGRdR4":
-        L.value_reg = named[1] or "global#%d" % a1
+        # Reads the global into a0 AND leaves its address in the register, so
+        # a following WRTV* writes back to it -- `g += x` compiles to
+        # LdGRdR4 / ADD / WRTV4. Setting only the value side rendered the
+        # write-back as `ref = v2;`.
+        L.value_reg = L.ref_reg = named[1] or "global#%d" % a1
         emit(i, "%s = %s;" % (L.var(a0), L.value_reg))
         return
     if name in ("COPY", "SetThisR"):
@@ -555,8 +737,37 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         L.pop()
         L.value_reg = "cast<%s>(%s)" % (n0 or "?", L.obj_reg)
         return
-    if name in ("CallPtr", "CALLBND"):
-        emit(i, "ret = %s();" % L.pop())
+    if name == "CallPtr":
+        # Call through a funcdef held in variable a0. Its stackInc is -1, which
+        # in asBCInfo is the 0xFFFF "depends on the callee" marker, not a
+        # literal pop: the call consumes the funcdef's declared arguments, in
+        # the same last-to-first frame as any call. The arity comes from the
+        # variable's type -- a parameter's declared funcdef, or the property a
+        # handle was copied from. Unknown type: pop nothing rather than guess;
+        # the arguments then stay visible as residue.
+        sig = getattr(L.mod, "funcdef_signature", lambda dt: None)(
+            L.slot_types.get(a0))
+        args: List[str] = []
+        result = ""
+        if sig is not None:
+            params = sig.get("params", [])
+            on_stack = as_disasm.returns_on_stack(sig, L.non_value_types)
+            widths = [2 if isinstance(p, dict) and p.get("token") == as_disasm.VAR_TYPE_TOKEN
+                      else 1 for p in params]
+            frame = list(reversed(L.popn(sum(widths) + (1 if on_stack else 0))))
+            if on_stack and frame:
+                result = frame.pop(0)
+            for width in widths:
+                args.append(frame.pop(0) if frame else "?")
+                if width == 2 and frame:
+                    frame.pop(0)
+        call = "%s(%s)" % (L.var(a0), ", ".join(args))
+        if result.startswith("&"):
+            emit(i, "%s = %s;" % (result[1:], call))
+            L.value_reg = L.obj_reg = result[1:]
+        else:
+            emit(i, "ret = %s;" % call)
+            L.value_reg = L.obj_reg = "ret"
         return
     if name == "FuncPtr":
         L.push("@func#%d" % a0)
@@ -979,8 +1190,14 @@ class _Emitter:
                     depth + 1, loop)
         if has_else:
             self._line(depth, "} else {")
+            mark = len(self.out)
             self.region(fall, follow if follow is not None else stop,
                         depth + 1, loop)
+            if len(self.out) == mark:
+                # The arm produced nothing -- typically a block holding only
+                # the jump to the join. `} else { }` says nothing the plain
+                # `if` does not; its blocks are still marked emitted.
+                self.out.pop()
             self._line(depth, "}")
             return follow
         self._line(depth, "}")

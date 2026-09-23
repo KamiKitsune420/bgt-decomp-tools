@@ -769,16 +769,21 @@ class Reader:
         Indexed by ADDSi / LoadThisR, so it is what turns a member access into
         `this->health` instead of `+36`.
 
-        The two builds identify the property differently: the newer one writes
-        an encoded index into the owner's property table, the older one writes
-        the property's **name** as a string. Reading the older form as an index
-        takes one byte where a string tag plus its payload was written, so the
-        section drifts and cannot land on EOF.
+        Both builds write the property's **name** as a string (asCWriter finds
+        the property at the used byte offset and writes its name). They differ
+        only in how a string is encoded, and that is what once hid this.
+
+        The `len2` form was read as a bare encoded index. That parses to
+        exactly EOF, because a `len2` back-reference IS a single encoded value
+        -- odd, `2 * index + 1`. The proof it is a string: all 6,523 of
+        Manamon 2's values are odd, which chance would not produce, and read as
+        strings 6,507 of them name a real property of their owner (the rest
+        belong to registered types such as `vector`). Read as indices they
+        resolved to `menu_properties_object::prop[11939]`, and that still
+        counted as "named".
         """
         owner = self.type_info()
-        if self.dialect == TAGGED:
-            return {"owner": owner, "name": self.string().decode("latin1")}
-        return {"owner": owner, "index": self.eu()}
+        return {"owner": owner, "name": self.string().decode("latin1")}
 
     def tail(self, verify_eof: bool = True) -> Dict[str, Any]:
         """Read every section from the typedefs to EOF.

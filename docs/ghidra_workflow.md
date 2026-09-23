@@ -224,9 +224,29 @@ What it genuinely adds:
   stub is already sitting uncompressed in any game executable you have, so this
   is only useful if you have BGT but no games.
 
+* **The runtime's calling conventions.** `bgt.exe` contains the VM and the
+  compiler, not only the loader. That is where the lifter's call-frame
+  questions are answered, since `TranslateFunction` says nothing about the
+  stack. It settled the one rule that used to be inferred: search for the
+  string `factstub` and the referencing function (`FUN_0046fd30` in this build)
+  is `GenerateTemplateFactoryStub`. It emits `OBJTYPE <type>; CALLSYS <real
+  factory>; RET`, so template factories get their type inside the stub, and
+  callers push no hidden argument. The only emitter of `TYPEID`
+  (`asCCompiler::PrepareArgument`) is gated on `?&` parameters.
+
+  ```bash
+  bgt ghidra decompile "C:/Program Files (x86)/BGT/bgt.exe" --string factstub -o stub.c
+  ```
+
 What it does not add: the reader for a dialect you do not already have a game
-for. All three titles here now parse end to end, so the reading side is done;
-`bgt.exe` is for the writing side.
+for. All four titles here now parse end to end, so the reading side is done.
+Open `bgt.exe` for the writing side and for runtime conventions.
+
+**Paths with parentheses.** `analyzeHeadless.bat` is a cmd.exe batch file, and
+an unescaped `)` inside one of its `if (...)` blocks ends the block early. An
+input under `Program Files (x86)` (BGT's default install) dies with
+"\BGT\bgt.exe was unexpected at this time". `bgt ghidra decompile` now copies
+such inputs to a batch-safe scratch path first (`bgt_ghidra.batch_safe_path`).
 
 ## Finding `pack::create` (the SFPv1 writer)
 

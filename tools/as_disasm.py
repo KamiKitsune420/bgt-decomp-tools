@@ -58,7 +58,7 @@ boundary and silently point at the wrong one.
 import argparse
 import json
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 try:                      # installed as a package
     from . import as_module, as_opcodes
@@ -212,8 +212,42 @@ class Module:
         # class name -> its own property table, for naming member accesses
         self.properties: Dict[str, List[Dict[str, Any]]] = {
             b["name"]: b.get("properties", []) for b in self.blocks}
+        # Every class and interface the module declares. Script objects are
+        # always reference types, which decides how a call returns them.
+        self.script_classes = frozenset(b["name"] for b in self.blocks)
+        # Named types that are never returned through a caller-supplied
+        # address: script classes (reference types) and the module's own enums
+        # and typedefs (scalars, returned in the value register).
+        scalars = {e["name"] for e in self.info.get("enums") or []}
+        scalars |= {t[0]["name"] if isinstance(t, tuple) else t.get("name", "")
+                    for t in self.tail.get("typedefs", []) if t}
+        self.non_value_types = self.script_classes | frozenset(scalars)
 
         self.functions = self._collect_functions()
+        self.register_returns = self._register_returns()
+
+    def _register_returns(self) -> frozenset:
+        """usedFunctions indices whose result is read from the VALUE register.
+
+        A call followed by CpyRtoV4 / CpyRtoV8 takes its result from the value
+        register, so nothing was returned through a stack address, whatever
+        the declared type looks like. This is how an engine-registered enum
+        (`nw_download_state`, say) is told from a registered value type such as
+        `string`: the enum's flags are not serialised, but its call sites show
+        the protocol. The NVGT decompiler infers registered REF / scalar types
+        the same way.
+        """
+        found = set()
+        for f in self.functions:
+            start, end = f["body"]
+            prev = None
+            for _off, _op, name, args in as_opcodes.disassemble(
+                    self.data[start:end], self.opcodes):
+                if prev is not None and name in ("CpyRtoV4", "CpyRtoV8"):
+                    found.add(prev)
+                prev = args[0] if name in ("CALL", "CALLSYS", "CALLINTF",
+                                           "Thiscall1") and args else None
+        return frozenset(found)
 
     # -- gathering every record that carries a body ------------------------
     def _collect_functions(self) -> List[Dict[str, Any]]:
@@ -334,20 +368,46 @@ class Module:
             return _type_info_name(ti) if ti is not None else None
         return None
 
+    def object_property_type(self, value: int) -> Optional[Dict[str, Any]]:
+        """The declared data type of a usedObjectProps entry, if recoverable."""
+        rec = _at(self.used_object_props, value)
+        if not isinstance(rec, dict):
+            return None
+        props = self.properties.get(_type_info_name(rec.get("owner"))) or []
+        prop = next((p for p in props if p.get("name") == rec.get("name")), None)
+        return prop.get("type") if isinstance(prop, dict) else None
+
+    def funcdef_signature(self, dt: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """The signature behind a funcdef-typed value, or None.
+
+        The two dialects store it differently (see CLAUDE.md): the older one
+        embeds a whole nested signature in the data type of a
+        `_builtin_function_` value, the newer one names the funcdef, whose
+        signature is in the module's funcdef section.
+        """
+        if not isinstance(dt, dict):
+            return None
+        if isinstance(dt.get("funcdef"), dict):
+            return dt["funcdef"]
+        obj = dt.get("type")
+        if isinstance(obj, dict) and obj.get("kind") == "named":
+            for f in self.info.get("funcdefs") or []:
+                if isinstance(f, dict) and f.get("name") == obj.get("name"):
+                    return f
+        return None
+
     def _object_property(self, value: int) -> Optional[str]:
         rec = _at(self.used_object_props, value)
         if not isinstance(rec, dict):
             return None
-        owner = _type_info_name(rec.get("owner"))
-        # The older build stores the property NAME in the record; the newer one
-        # stores an index into the owner's property table and needs the lookup.
-        if rec.get("name"):
-            return "%s::%s" % (owner, rec["name"])
-        props = self.properties.get(owner) or []
-        i = rec.get("index", -1)
-        if 0 <= i < len(props):
-            return "%s::%s" % (owner, props[i]["name"])
-        return "%s::prop[%d]" % (owner, i)
+        # Both builds store the property's NAME (see
+        # as_module.Reader.used_object_prop). A record without one is
+        # unresolved, and says so: returning a placeholder such as
+        # `owner::prop[11939]` here once counted as "named" and hid a reader
+        # bug behind a 100% resolution rate.
+        if not rec.get("name"):
+            return None
+        return "%s::%s" % (_type_info_name(rec.get("owner")), rec["name"])
 
 
 def _at(table: List[Any], i: int) -> Any:
@@ -364,26 +424,101 @@ def _quote(s: bytes, limit: int = 60) -> str:
                        .replace("\x00", "\\0").replace("\n", "\\n")
 
 
-def variable_name(f: Dict[str, Any], slot: int) -> str:
-    """Best-effort name for a variable slot.
+# Token ids whose values take two dwords on the stack: int64, uint64, double.
+WIDE_TOKENS = frozenset((71, 78, 92))
 
-    `noDebugInfo = 1`, so the real names are gone and this is a positional
-    approximation: slot 0 of a method is `this`, slots inside the parameter
-    region are `aN`, everything above is `vN`. It is labelled `a`/`v` rather
-    than invented names precisely so nobody mistakes it for recovered data.
+# `?` -- AngelScript's variable type. A `?&in` argument is passed as the value's
+# address AND its type id, so it occupies two slots for one declared parameter.
+VAR_TYPE_TOKEN = 59
+
+
+def returns_on_stack(f: Dict[str, Any],
+                     not_value_types: Iterable[str] = ()) -> bool:
+    """asCScriptFunction::DoesReturnOnStack -- does the caller supply the result?
+
+    A function returning a **value type by value** writes its result through a
+    hidden address the caller pushes; everything else comes back in a register
+    (primitives in the value register, handles and references in the object
+    register). The type's flags are not serialised, so "value type" is decided
+    by elimination, each step read rather than guessed:
+
+    * handles and references never return on the stack;
+    * script classes are always reference types (asOBJ_SCRIPT_OBJECT is a ref
+      type), so returning one "by value" still goes through the register;
+    * enums and typedefs are scalars, returned in the value register. The
+      module's own are passed in `not_value_types` with the script classes;
+      engine-registered enums are told apart at the call site instead
+      (Module.register_returns);
+    * `array<T>` and every other template in BGT is a reference type -- its
+      factory is the stub GenerateTemplateFactoryStub builds, returning `T@`.
+
+    What remains are the registered value types: `string`, `vector` and their
+    kin. Applied to every call kind, not only CALLSYS -- script functions
+    return value types the same way. Measured over four titles this took
+    Manamon 2 from 95.8% to 99.8% of bodies ending with an empty stack, but it
+    was adopted because it is AngelScript's rule, not because of the metric.
     """
-    base = 1 if f.get("owner") else 0
-    nparams = len(f.get("params", []))
+    ret = f.get("returns")
+    if not isinstance(ret, dict) or ret.get("handle") or ret.get("reference"):
+        return False
+    rtype = ret.get("type")
+    if not isinstance(rtype, dict) or rtype.get("kind") in ("template", "subtype",
+                                                            "listpattern"):
+        return False
+    return rtype.get("name") not in set(not_value_types)
+
+
+def frame_layout(f: Dict[str, Any],
+                 not_value_types: Iterable[str] = ()) -> Dict[int, str]:
+    """Stack offsets of `this`, the hidden return address and each parameter.
+
+    asCCompiler::SetupParametersAndReturnVariable lays a frame out downward
+    from zero: a method's object pointer at 0; then, if the function returns
+    on the stack, the caller-supplied return address; then each parameter in
+    declaration order, each taking its own size (two dwords for int64 /
+    uint64 / double, one for everything else in a 32-bit build). Locals and
+    temporaries live at POSITIVE offsets.
+
+    Concretely, for `int dynamic_menu::add_item(string filename, string name)`:
+    `PshVPtr -1` is `filename` and `PshVPtr -2` is `name` -- the two copies the
+    body makes of them land in slots 1 and 3, which are temporaries, not
+    parameters. Naming slots 1..n as parameters, as an earlier version did,
+    gives every temporary a parameter's name.
+    """
+    layout: Dict[int, str] = {}
+    pos = 0
+    if f.get("owner"):
+        layout[0] = "this"
+        pos = -1
+    if returns_on_stack(f, not_value_types):
+        layout[pos] = "result"
+        pos -= 1
+    for i, p in enumerate(f.get("params", [])):
+        layout[pos] = "a%d" % i
+        token = p.get("token") if isinstance(p, dict) else None
+        by_value = isinstance(p, dict) and not (p.get("reference") or p.get("handle"))
+        pos -= 2 if (by_value and token in WIDE_TOKENS) else 1
+    return layout
+
+
+def variable_name(f: Dict[str, Any], slot: int,
+                  layout: Optional[Dict[int, str]] = None) -> str:
+    """Name for a variable slot.
+
+    `noDebugInfo = 1`, so the real names are gone. Parameters and `this` are
+    named from the frame layout (see `frame_layout`), which is exact; every
+    positive slot is a local or temporary and reads as `vN`. They are labelled
+    `a`/`v` rather than invented names precisely so nobody mistakes them for
+    recovered data. Any other negative slot -- outside the parameter area --
+    renders as `sN` rather than `v-1`, which reads like an expression.
+    """
+    if layout is None:
+        layout = frame_layout(f)
+    name = layout.get(slot)
+    if name is not None:
+        return name
     if slot < 0:
-        # Serialised variable positions can be negative -- the loader adjusts
-        # them (CalculateAdjustmentByPos) and we are reading the unadjusted
-        # form. Render them as distinct stack slots rather than as `v-1`, which
-        # reads like an expression.
         return "s%d" % (-slot)
-    if f.get("owner") and slot == 0:
-        return "this"
-    if base <= slot < base + nparams:
-        return "a%d" % (slot - base)
     return "v%d" % slot
 
 
@@ -430,6 +565,7 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
                 item["text"] = "L%d" % lab if lab is not None else None
 
     return {"function": f, "label": function_label(f), "signature": signature(f),
+            "layout": frame_layout(f, getattr(mod, "non_value_types", ())),
             "declared_instructions": f.get("instructions"),
             "decoded_instructions": len(raw),
             "stack_needed": f.get("stackNeeded"),
@@ -446,6 +582,10 @@ def format_function(dis: Dict[str, Any]) -> str:
     if params:
         out.append("; params: %s" % ", ".join(
             "a%d=%s" % (i, type_name(p)) for i, p in enumerate(params)))
+    layout = dis.get("layout") or {}
+    if layout:
+        out.append("; frame: %s   (locals are positive)" % "  ".join(
+            "%s@%d" % (name, off) for off, name in sorted(layout.items(), reverse=True)))
     if dis["stack_needed"] is not None:
         out.append("; stack needed: %s" % dis["stack_needed"])
     declared, decoded = dis["declared_instructions"], dis["decoded_instructions"]

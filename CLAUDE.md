@@ -1,7 +1,15 @@
-# BGT Games — Decompilation Toolkit
+# BGT & NVGT Games — Decompilation Toolkit
 
 General-purpose tooling for recovering code and assets from games built with **BGT
-(BlastBay Gaming Toolkit)**, the 2010 audio-game engine by BlastBay Studios.
+(BlastBay Gaming Toolkit)**, the 2010 audio-game engine by BlastBay Studios, and
+with its open-source successor **NVGT**.
+
+This document covers BGT in depth. NVGT lives in `tools/nvgt/` (the
+`bgtdecomp.nvgt` subpackage, merged from nvgt-source-recovery) and is documented
+in `docs/nvgt.md`. The two share a scripting language and almost nothing else:
+packaging, encryption, AngelScript version and asset packs all differ.
+`tools/engine.py` (`bgt identify`) decides which half an executable needs, and
+claims an engine only when that engine's own self-verifying layer agrees.
 
 This folder ships **only this document and the Python tools**. It holds no game
 files, no extracted binaries and no per-title findings — those belong in the folder
@@ -91,6 +99,8 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_ghidra.py` | find/install Ghidra + a JDK, install extensions, drive headless decompiles |
 | `bgt_kdf.py` | BGT's password → AES-key derivation for encrypted asset packs |
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
+| `engine.py` | `bgt identify`: BGT or NVGT, decided by each engine's own verifying layer |
+| `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
 
 `docs/ghidra_workflow.md` covers how to find `asCReader::ReadInner`, `asBCInfo[]`,
 the KDF and `pack::create` in a binary, and how to verify a transcription.
@@ -146,10 +156,16 @@ python tools/bgt_pack.py path/to/data.dat
 ## Tests
 
 ```bash
-python tests/test_toolkit.py        # or: python -m pytest tests/ -q
+python -m pytest tests/ -q          # everything: BGT, NVGT, integration
+python tests/test_toolkit.py        # the BGT known-answer tests alone
 ```
 
-124 known-answer tests on **synthetic inputs only** — no game files — so they run
+`tests/test_toolkit.py` holds the BGT known-answer tests,
+`tests/test_integration.py` the checks that join the two halves (embedded-pack
+walk, NVGT packs, engine identification, the two integer codecs agreeing), and
+`tests/nvgt/` the NVGT suite, whose compiler-backed tests skip unless their
+optional fixtures are configured (`tests/nvgt/README.md`). All of it runs on
+**synthetic inputs and owned fixtures only** — no game files — so it runs
 anywhere. They deliberately target the things that fail *quietly* rather than loudly:
 the encoded-integer boundary at 64, negative lengths rewinding the cursor, overlapping
 LZ77 matches, the keygen constant, a pack walk that does not land on EOF, the SWCR
@@ -274,6 +290,13 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | Psycho Strike | tagged | 68 / 68 | 1,102 | ends exactly at EOF |
 | Paladin of the Sky | tagged | 47 / 47 | 926 | ends exactly at EOF |
 | Manamon 2 | len2 | 1,604 / 1,604 | 9,924 | ends exactly at EOF |
+| SBYW | tagged | 154 / 154 | 2,348 | ends exactly at EOF |
+
+SBYW is the fourth title, and the first run after the three above were done. It
+passed every `bgt validate` stage with no reader change, byte-exact rewrite
+included. What it added was on the lifting side: it is the first title to use
+`**` (`POWd`, `POWdi`) and 64-bit shifts (`BSLL64`, `BSRL64`), 19 instructions
+the lifter had never needed to model.
 
 Psycho Strike's tail reproduces every count an entirely separate parser recorded:
 105 global properties, 288 module functions, 220 global functions, 109
@@ -312,7 +335,7 @@ read out of the relevant binary, not inferred:
 | try/catch block | none | present when `flags & 0x10` |
 | body trailer | one traits byte | none |
 | funcdef-typed params | `_builtin_function_` + a **nested signature** | the funcdef type is named directly |
-| `usedObjectProps` entry | `typeinfo` + property **name** | `typeinfo` + **index** |
+| `usedObjectProps` entry | `typeinfo` + property **name** (tagged string) | `typeinfo` + property **name** (a `len2` back-reference — see below) |
 | global-pointer operands | plain index | `2 * index + tag` |
 
 Two of these are worth calling out because each was a whole afternoon.
@@ -401,11 +424,25 @@ table's size. The right table *saturates*.
 | `LoadThisR` arg1 | 1661 | `usedTypeIds` | 1662 |
 
 A saturating maximum makes an off-by-one impossible in either direction. Across
-all three titles this resolves **every operand** — 226,626/226,626 on Manamon 2,
-52,889/52,889 on Psycho Strike, 55,338/55,338 on Paladin — with every jump target
+all four titles this resolves **every operand** — 242,245/242,245 on Manamon 2,
+54,682/54,682 on Psycho Strike, 57,798/57,798 on Paladin, 110,291/110,291 on
+SBYW — with every jump target
 landing on an instruction boundary and every `LoadThisR` property belonging to its
 enclosing class. Psycho Strike's 6,612 jump targets and 2,352 `LoadThisR` sites
 match an independent parser's counts exactly.
+
+**`usedObjectProps` stores the property NAME in both dialects.** This table once
+said `len2` stored an index into the owner's property table. It does not: a
+`len2` back-reference is a single encoded value, `2 * index + 1`, so a name
+written as a back-reference reads perfectly well as an integer and the tail
+still lands exactly on EOF. The giveaways were statistical and semantic. All
+6,523 of Manamon 2's values are odd, which chance would not produce. Read as
+indices they rendered as `menu_properties_object::prop[11939]` (no class has
+11,940 properties), and that placeholder still counted as "resolved". Read as
+strings, 6,507 name a real property of their owner; the other 16 belong to
+registered types such as `vector::x`. The module still rewrites byte for byte.
+The lesson is the same as for `ALLOC`: a field that parses to EOF can still be
+the wrong field, and a resolver that returns a placeholder is not resolving.
 
 **Global-pointer operands are encoded differently per dialect, and both readings
 fail quietly.** In `len2` the operand is `2 * index + tag`: tag 0 selects the
@@ -450,9 +487,9 @@ field that means something else.
 ## Lifting
 
 `as_lift.py` turns the instruction stream into statements with a symbolic stack
-machine. **Zero passthrough across all 853,190 instructions in the three titles** —
-every opcode is modelled — and 153 of 166 methods in BGT's own shipped library
-sources come back by name.
+machine. **Zero passthrough across all 1,111,490 instructions in the four
+titles** — every opcode is modelled — and 153 of 166 methods in BGT's own shipped
+library sources come back by name.
 
 ```
 void <global>::prepare_audio()
@@ -460,13 +497,60 @@ void <global>::prepare_audio()
     ret = get_SCRIPT_COMPILED();
     if (!get_SCRIPT_COMPILED()) goto L0;
     v2 = string("\0\0able to\0\0learn\0...");
-    ret = get(&v2);
-    ret = set_sound_decryption_key(v3, &v2);
-    v2 = string("data.dat");
-    ret = set_sound_storage(v3);
-L0:
+    v3 = string(&v2);
+    v2 = get(v3);
+    ret = set_sound_decryption_key(&v2, v1);
+    ...
 }
 ```
+
+### The call frame — read, not fitted
+
+Top of stack first, as `asCContext::CallSystemFunction` consumes it:
+
+```
+this                 methods only
+return address       only when the callee returns a value type on the stack
+argument 0           arguments are pushed LAST TO FIRST
+...
+argument n-1         (deepest)
+```
+
+Each `?&in` argument is two slots: the value, above the `TYPEID` pushed first.
+`ALLOC` is the one inversion — its destination address is the **deepest** slot,
+because the constructor pops its own arguments before ALLOC pops the address.
+
+Each of these replaced an earlier rule that read plausibly and was wrong:
+
+- **Argument order.** `random(95, 105)` compiles to `PshC4 105 / PshC4 95 /
+  CALLSYS random`, and `dynamic_menu.bgt` calls
+  `add_item_extended(filename, true, name)` where the bytecode pushes `name`
+  first. The lifter used to render bottom-to-top, printing **every
+  multi-argument call reversed**. It survived review because the positional
+  names (`a0`, `v3`) gave nothing to check the order against. The shipped
+  library source and constant arguments did.
+- **Parameters live at negative offsets.** `SetupParametersAndReturnVariable`
+  lays a frame out downward: `this` at 0, then the return address if any, then
+  parameters, two slots for int64/uint64/double. Positive slots are locals and
+  temporaries. `as_disasm.frame_layout()` computes it, and the disassembly
+  header prints it. Naming slots 1..n as parameters, as before, gave
+  temporaries parameter names.
+- **The return address is `DoesReturnOnStack`**: a registered value type
+  returned by value, on **every** call kind. It never applies to handles,
+  references, arrays (a reference type) or script classes. Paladin's
+  `generate_maze` returns the script class `map` and is followed by
+  `STOREOBJ`, i.e. the object register. The old rule applied it to CALLSYS only
+  and to handles too.
+- **No hidden argument for templates.** This was the one rule marked
+  "inferred rather than read"; `bgt.exe` settles it. `GenerateTemplateFactoryStub`
+  (`FUN_0046fd30` there; find it through the `factstub` string) emits
+  `OBJTYPE <type>; CALLSYS <factory>; RET`, so the object type is pushed *inside*
+  the stub. The stub's parameter list drops the hidden `int&in`, and callers
+  push only declared arguments. The compiler emits `TYPEID` only for `?&`
+  parameters (`PrepareArgument`, gated on token 59).
+- **`>>` is the logical shift**; arithmetic is `>>>`. NVGT evaluates `-8 >> 1`
+  as 2147483644 and `-8 >>> 1` as -4, so `BSRA` rendered as `>>` changed every
+  negative shift.
 
 Four things decide whether the output means anything:
 
@@ -496,25 +580,62 @@ reference for `CALL` / `CALLSYS` / `CALLINTF` / `ALLOC`, which depend on the
 callee, and it counts slots where the lifter counts values. The end-to-end check
 is the stack being empty at `RET`:
 
-| title | functions ending clean |
-|---|---|
-| Psycho Strike | 1,080 / 1,102 (98.0%) |
-| Paladin of the Sky | 919 / 926 (99.2%) |
-| Manamon 2 | 9,510 / 9,924 (95.8%) |
+| title | functions ending clean | before the call-frame fixes |
+|---|---|---|
+| Psycho Strike | 1,090 / 1,102 (98.9%) | 98.0% |
+| Paladin of the Sky | 923 / 926 (99.7%) | 99.2% |
+| Manamon 2 | 9,919 / 9,924 (99.9%) | 95.8% |
+| SBYW | 2,348 / 2,348 (100%) | 95.5% |
+
+"Residue" now means what it should in both directions. A **shortfall** (a
+call asking for more values than the stack holds) counts. It used to vanish
+into `?` arguments, which hid 21 such calls in SBYW, all engine enums being
+treated as returned on the stack. A value the bytecode **deliberately** leaves
+(a `REFCPY` source nothing pops, which `RET` discards) does not count.
+
+Besides the call frame, the last step came from opcodes that had been
+modelled as no-ops or bare pops, which dropped real statements:
+
+- **`REFCPY`** is a handle assignment: it pops the destination, then copies the
+  handle now on top into it, leaving that source on the stack for `RET` to
+  discard. As a bare pop, the initialiser `pool = sound_pool(500)` lifted to an
+  empty body. It now reads `@pool = v2;`. `RefCpyV` is the same, into a variable.
+- **`STOREOBJ` / `LOADOBJ`** move the object register, where handles are
+  returned, to and from a variable. As no-ops, variables appeared from nowhere
+  and a factory ended `return ret;` instead of `return v1;`.
+- **`CallPtr`** calls the funcdef held in a variable. Its `stackInc` of −1 is
+  asBCInfo's `0xFFFF` "depends on the callee" marker, not a literal pop. It
+  consumes the funcdef's declared arguments, which the lifter now finds from the
+  variable's type (a parameter's, or the property it was copied from). Unknown
+  types pop nothing rather than guessing.
+- **`ClrVPtr`** nulls a handle, so it reads `@v2 = null;`.
+- **The reference register is loaded by more than `LoadThisR` / `LDG`.**
+  `PopRPtr` pops an address into it, `LdGRdR4` leaves the global's address in it
+  (the compound-assignment pattern), and a call returning a reference returns
+  an address there. Each was modelled as a pop or not at all, so reads and
+  writes came out as a bare `ref`: 30 of them in Psycho Strike, e.g.
+  `v3 = ref;` for `v3 = pool.max_distance;`. None remain in any of the four
+  titles. A reference-returning call is held until the `RDR`/`WRTV` that reads
+  it, giving `v3 = totals[i]` once instead of the call plus `ref`. If nothing
+  reads it, it is still emitted where it was, because the call ran.
+- **Engine enums return in the value register.** Their flags are not
+  serialised, so a call followed by `CpyRtoV4`/`CpyRtoV8` marks its callee as a
+  register return (`Module.register_returns`), the same protocol evidence the
+  NVGT decompiler uses. The module's own enums and typedefs are known by name.
+
+The rules were adopted because the binary and the bytecode say so, and the
+metric followed. Paladin shows why that order matters. A looser return rule,
+which counts script classes as returned on the stack, "balances" one more
+Paladin body by swallowing an unrelated leftover value at each call.
+`STOREOBJ` after that call says the looser rule is wrong, and it was not
+adopted. The old template rule's measured benefit (168 stranded values) likewise
+disappears once the return address is modelled correctly: these numbers are
+reached without it.
 
 A **`?&in` parameter (token 59)** takes two stack slots for one declared
 parameter -- AngelScript's variable-argument type passes the value *and* its type
 id. Three functions in this corpus take one; the rule is mechanical and worth 82
 balanced bodies.
-
-The one rule here that is **inferred rather than read** is the hidden type id a
-template-registered function receives. `TranslateFunction` was checked and does
-not settle it -- it gives `TYPEID`'s operand a meaning but says nothing about the
-stack, because that is a runtime calling convention rather than a load-time
-fixup. Supporting it: `TYPEID` is **51x enriched** in bodies that do not balance,
-and removing the rule costs 0.67 points of clean-stack functions and 168 stranded
-values while moving the over-pop counter by one. Settling it means reading the
-VM's `CallSystemFunction` path.
 
 Residue never corrupts output — it sits *below* the popped arity — but it is the
 honest measure of what is still approximate.
@@ -522,8 +643,9 @@ honest measure of what is still approximate.
 **Structuring is real structural analysis**, not pattern-spotting: a CFG,
 iterative dominators and post-dominators, natural loops from back edges, then
 nested `if` / `else` / `while` / `do-while` with `break` and `continue`.
-Residual gotos are **2,676 of 264,309 statements (1.01%)**, and 84-95% of
-function bodies come out entirely goto-free.
+Residual gotos are **3,818 of 410,034 statements (0.93%)** across the four
+titles, and 84-95% of function bodies come out entirely goto-free (83.7% Psycho
+Strike, 89.2% Paladin, 94.6% Manamon 2, 90.2% SBYW).
 
 Three shapes decide whether that output is right, and each was wrong first:
 
@@ -756,19 +878,15 @@ the entry tags in one AES block, and `Entry.decrypt(key)` returns the plaintext 
 Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
-**The hidden type id a template-registered function receives.** The one rule in
-`as_lift` that is inferred rather than read. `asCReader::TranslateFunction` was
-checked and does not settle it -- it gives `TYPEID`'s operand a meaning but says
-nothing about the stack, because that is a runtime calling convention rather than
-a load-time fixup. Settling it means reading the VM's `CallSystemFunction` path.
-See "Lifting" for the evidence that supports it and the A/B that keeps it.
+**A few bodies still do not balance their stack**: 12 in Psycho Strike, 3 in
+Paladin, 5 in Manamon 2, none in SBYW (at most 1.1%). The template-id rule
+once listed here is settled (see "The call frame"), and Manamon 2 went from 414
+to 5. What remains is values left behind, never shortfalls: all four titles
+now have zero calls that find too few arguments. Psycho Strike's are mostly
+`PSF` addresses in `character::find_attack_point`, `weapon::fire` and
+`weapon::play_weapon`, so start there.
 
-**~4% of Manamon 2 bodies do not balance their stack** (9,510 / 9,924 clean;
-strike 98.0%, paladin 99.2%). Most are off by exactly one value. Residue never
-corrupts output -- it sits below the popped arity -- but it is the honest measure
-of what is approximate. The template rule above is the largest known contributor.
-
-**1.01% residual gotos.** Irreducible flow, switch tails and multi-entry loops
+**0.93% residual gotos.** Irreducible flow, switch tails and multi-entry loops
 stay labelled `goto` rather than being forced into a shape they do not have.
 Some of this is genuinely irreducible; some is not yet recognised.
 
@@ -777,14 +895,23 @@ not that your edit makes sense. Renaming a literal is safe; changing an
 instruction's stack effect or pointing a `CALL` outside `usedFunctions` yields a
 module that loads and then misbehaves.
 
-**A fourth title may differ again.** Three builds already produced two answers
-for the template-namespace field and two for the script-object flag. Run
-`bgt validate` before assuming a new title matches either.
+**A fifth title may differ again.** Three builds produced two answers for the
+template-namespace field and two for the script-object flag. The fourth (SBYW)
+parsed unchanged but used opcodes none of the others did. Run `bgt validate`
+before assuming a new title matches, and check the lifter's passthrough count
+as well as the stages.
+
+**NVGT payloads from unverified builds.** Official NVGT releases get fresh
+packaging parameters per build, so executables from releases without a verified
+profile are reported as unsupported (see `docs/nvgt.md`). That is deliberate. A
+profile is added only after it has been verified against real samples.
 
 # Conventions
 
 - **Read the reader, don't guess the format.** Every format detail here came out of a
-  game's own `asCReader` / `pack::create` in Ghidra.
+  game's own `asCReader` / `pack::create` in Ghidra -- or, for NVGT, its published
+  source. `bgt.exe` itself is worth opening: it settled the template-stub question
+  (`bgt ghidra decompile "<BGT>/bgt.exe" --string factstub`).
 - **Make each layer self-verifying.** Exact declared lengths, exact EOF landings,
   identifier-shaped names. A parser that "mostly works" is a parser that is silently
   desynchronised.

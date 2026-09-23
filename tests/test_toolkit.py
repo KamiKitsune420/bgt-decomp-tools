@@ -251,14 +251,28 @@ def test_template_namespace_is_a_build_variant():
 
 
 def test_tagged_used_object_prop_stores_a_name_not_an_index():
-    """The older build writes the property name; the newer writes an index into
-    the owner's table. Reading a name as an index drifts the section."""
+    """The older build writes the property name as a tagged string."""
     body = b"\x6f" + _tagged_str(b"player") + NUL + _tagged_str(b"health")
     r = as_module.Reader(body, as_module.TAGGED, 0)
     rec = r.used_object_prop()
     assert rec["owner"]["name"] == "player"
     assert rec["name"] == "health"
     assert r.p == len(body)
+
+
+def test_len2_used_object_prop_is_a_name_back_reference_not_an_index():
+    """The newer build writes the NAME too -- almost always as a back-reference,
+    which in len2 is one odd encoded value and so reads, wrongly, as an index.
+    Manamon 2: 6,523 of 6,523 values odd; as strings they name real properties.
+    Read as an index this record came out as `player::prop[3]`."""
+    saved = _len2(b"player") + _len2(b"health")          # saved[0], saved[1]
+    body = b"\x6f" + b"\x01" + NUL + b"\x03"               # 'o' ref0 "" | ref1
+    r = as_module.Reader(saved + body, as_module.LEN2, 0)
+    r.string(), r.string()
+    rec = r.used_object_prop()
+    assert rec == {"owner": {"kind": "named", "name": "player", "namespace": ""},
+                   "name": "health"}
+    assert r.p == len(saved + body)
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +568,7 @@ def test_unresolvable_operand_returns_none_not_a_placeholder():
 def test_object_property_resolves_through_the_owning_class():
     mod = _FakeModule(
         b"",
-        objprops=[{"owner": {"kind": "named", "name": "player"}, "index": 1}],
+        objprops=[{"owner": {"kind": "named", "name": "player"}, "name": "position"}],
         properties={"player": [{"name": "health"}, {"name": "position"}]})
     assert mod.resolve("objprop", 0) == "player::position"
 
@@ -1061,10 +1075,111 @@ def test_pop_takes_the_callees_arity_from_the_top():
                                "params": [{"token": 68}, {"token": 68}],
                                "returns": {"token": 80}}])
     L.push("leftover")
-    L.push("x")
     L.push("y")
+    L.push("x")
     assert L._call(0, "CALL") == "g(x, y)"
     assert [e.text for e in L.stack] == ["leftover"]
+
+
+def test_arguments_are_pushed_last_to_first():
+    """Psycho Strike compiles `random(95, 105)` as PshC4 105 / PshC4 95 /
+    CALLSYS random. Rendering the stack bottom-to-top prints every
+    multi-argument call reversed -- plausible, and wrong."""
+    L, _ = _lifter(functions=[{"name": "random", "owner": None,
+                               "params": [{"token": 68}, {"token": 68}],
+                               "returns": {"token": 68}}])
+    L.push("105")
+    L.push("95")
+    assert L._call(0, "CALLSYS") == "random(95, 105)"
+
+
+def test_method_frame_is_this_then_arguments_in_order():
+    """dynamic_menu::add_item calls add_item_extended(filename, true, name) as
+    VAR name / PshV4 flag / VAR filename / PshVPtr this / CALLINTF -- checked
+    against dynamic_menu.bgt, which BGT ships as source."""
+    L, _ = _lifter(functions=[{
+        "name": "add_item_extended", "owner": {"kind": "named", "name": "dynamic_menu"},
+        "params": [{"token": 5}, {"token": 65}, {"token": 5}],
+        "returns": {"token": 68}}])
+    for value in ("name", "true", "filename", "this"):
+        L.push(value)
+    assert L._call(0, "CALLINTF") == "this.add_item_extended(filename, true, name)"
+
+
+def test_var_type_argument_has_its_type_id_beneath_it():
+    """`?&in` is two slots: TYPEID is pushed first, then the value. Paladin's
+    `dict.set("is_boss", is_boss)` is TYPEID bool / VAR v / <key> / this."""
+    L, _ = _lifter(functions=[{
+        "name": "set", "owner": {"kind": "named", "name": "dictionary"},
+        "params": [{"token": 5, "reference": True},
+                   {"token": 59, "reference": True}],
+        "returns": {"token": 80}}])
+    for value in ("typeid:bool", "v3", '"is_boss"', "dict"):
+        L.push(value)
+    assert L._call(0, "CALLSYS") == 'dict.set("is_boss", v3)'
+    assert not L.stack
+
+
+def test_template_calls_take_no_hidden_argument():
+    """bgt.exe's GenerateTemplateFactoryStub emits OBJTYPE / CALLSYS / RET: the
+    object type is pushed INSIDE the stub, so a caller pushes only declared
+    arguments. An earlier rule added one hidden slot here, and it swallowed a
+    neighbouring value on every array construction."""
+    L, _ = _lifter(functions=[{
+        "name": "factstub", "owner": None, "params": [{"token": 75}],
+        "returns": {"token": 5, "handle": True,
+                    "type": {"kind": "template", "name": "array",
+                             "subtypes": [{"token": 68}]}}}])
+    L.push("keep")
+    L.push("10")
+    assert L._call(0, "CALL") == "factstub(10)"
+    assert [e.text for e in L.stack] == ["keep"]
+
+
+def test_value_return_takes_the_address_just_below_this():
+    """asCContext::CallSystemFunction reads the object pointer, THEN the return
+    address, then the arguments. The call writes its result through that
+    address, so it reads as an assignment to the slot."""
+    L, _ = _lifter(functions=[{
+        "name": "opAdd", "owner": {"kind": "named", "name": "string"},
+        "params": [{"token": 5, "reference": True,
+                    "type": {"kind": "named", "name": "string"}}],
+        "returns": {"token": 5, "type": {"kind": "named", "name": "string"}}}])
+    for value in ("v2", "&v4", "v1"):
+        L.push(value)
+    assert L._call(0, "CALLSYS") == "v4 = v1 + v2"
+    assert not L.stack
+
+
+def test_handles_references_arrays_and_script_classes_never_return_on_stack():
+    """Only registered value types return through a caller-supplied address.
+    Paladin's generate_maze returns the script class `map` and is followed by
+    STOREOBJ: a script object comes back in the object register."""
+    named = {"kind": "named", "name": "map"}
+    cases = [
+        ({"token": 5, "type": named, "handle": True}, False),
+        ({"token": 5, "type": {"kind": "named", "name": "string"}, "reference": True}, False),
+        ({"token": 5, "type": {"kind": "template", "name": "array"}}, False),
+        ({"token": 5, "type": named}, False),                  # script class
+        ({"token": 5, "type": {"kind": "named", "name": "string"}}, True),
+        ({"token": 68}, False),
+    ]
+    for ret, expected in cases:
+        assert as_disasm.returns_on_stack({"returns": ret}, {"map"}) is expected, ret
+
+
+def test_frame_layout_puts_parameters_at_negative_offsets():
+    """this at 0, the return address next when there is one, then parameters
+    downward -- two slots for a double. Positive slots are locals."""
+    method = {"owner": {"kind": "named", "name": "c"},
+              "params": [{"token": 92}, {"token": 68}],
+              "returns": {"token": 5, "type": {"kind": "named", "name": "string"}}}
+    assert as_disasm.frame_layout(method) == {0: "this", -1: "result",
+                                              -2: "a0", -4: "a1"}
+    free = {"owner": None, "params": [{"token": 68}], "returns": {"token": 80}}
+    assert as_disasm.frame_layout(free) == {0: "a0"}
+    assert as_disasm.variable_name(free, 3) == "v3"
+    assert as_disasm.variable_name(free, 0) == "a0"
 
 
 def test_constructor_takes_this_from_the_top_and_reads_as_assignment():
@@ -1160,14 +1275,18 @@ def test_ldg_loads_a_register_rather_than_pushing():
 def test_alloc_consumes_its_constructor_arguments():
     """ALLOC runs the constructor, so it eats the declared arguments and the
     destination pointer. Knowing the constructor is what makes that arity
-    available -- operand 1 is a ONE-BASED usedFunctions index."""
+    available -- operand 1 is a ONE-BASED usedFunctions index.
+
+    The destination is the DEEPEST slot: the constructor pops its own
+    arguments first, then ALLOC pops the address. The arguments above it are
+    pushed last to first, like any call's."""
     ctor = {"name": "$beh0", "owner": {"kind": "named", "name": "vec"},
             "params": [{"token": 68}, {"token": 68}], "returns": {"token": 80}}
     L, _ = _lifter(functions=[ctor], types=[{"kind": "named", "name": "vec"}])
     L.push("keep")
-    L.push("3")
-    L.push("4")
     L.push("&v1")
+    L.push("4")
+    L.push("3")
     out = []
     as_lift._step(L, lambda i, t: out.append(t), 0, "ALLOC", [0, 1],
                   ["vec", "vec::$beh0"])
@@ -1272,6 +1391,145 @@ def test_callers_of_finds_the_body_that_calls_an_engine_function():
     assert [f["name"] for f in mod.callers_of("set_sound_decryption_key")] \
         == ["prepare_audio"]
     assert mod.callers_of("something_absent") == []
+
+
+def test_arithmetic_right_shift_is_triple_angle():
+    """AngelScript's `>>` is logical and `>>>` arithmetic: NVGT evaluates
+    -8 >> 1 as 2147483644 and -8 >>> 1 as -4. BSRA read as `>>` changes the
+    result for every negative value."""
+    for op, text in (("BSRA", ">>>"), ("BSRA64", ">>>"), ("BSRL", ">>"),
+                     ("BSLL64", "<<")):
+        L, _ = _lifter()
+        out = []
+        as_lift._step(L, lambda i, t: out.append(t), 0, op, [1, 2, 3], [None] * 3)
+        assert out == ["v1 = v2 %s v3;" % text], (op, out)
+
+
+def test_power_opcodes_are_modelled():
+    """SBYW, the fourth title, is the first to use `**` (POWd, POWdi)."""
+    for op in ("POWi", "POWd", "POWdi", "POWu64"):
+        L, _ = _lifter()
+        out = []
+        as_lift._step(L, lambda i, t: out.append(t), 0, op, [1, 2, 3], [None] * 3)
+        assert out == ["v1 = v2 ** v3;"] and L.passthrough == 0, op
+
+
+def _run_ops(L, ops):
+    out = []
+    for i, (op, args, named) in enumerate(ops):
+        as_lift._step(L, lambda _i, t: out.append(t), i, op, args, named)
+    return out
+
+
+def test_refcpy_is_a_handle_assignment_not_a_bare_pop():
+    """Psycho Strike's `pool = sound_pool(500)` initialiser: PshVPtr 2 / PGA pool
+    / REFCPY. Modelled as a pop, the assignment vanished and the body was empty.
+    The source stays on the stack -- REFCPY's stackInc is -1."""
+    L, _ = _lifter()
+    out = _run_ops(L, [("PshVPtr", [2], [None]), ("PGA", [4], ["pool"]),
+                       ("REFCPY", [11], ["sound_pool"])])
+    assert out == ["@pool = v2;"]
+    assert [e.text for e in L.stack] == ["v2"]
+
+
+def test_storeobj_and_loadobj_move_the_object_register():
+    """A factory is `PSF 1 / ALLOC / LOADOBJ 1 / RET`: it returns v1, not `ret`.
+    A handle-returning call is followed by STOREOBJ into a variable."""
+    L, func = _lifter()
+    func["returns"] = {"token": 5, "handle": True,
+                       "type": {"kind": "named", "name": "pool"}}
+    out = _run_ops(L, [("STOREOBJ", [3], [None]), ("LOADOBJ", [3], [None]),
+                       ("RET", [0], [None])])
+    assert out == ["v3 = ret;", "return v3;"]
+
+
+def test_callptr_pops_the_funcdefs_arity_found_through_the_variables_type():
+    """weapon::invoke_callback: `callback(this, level)` through a property of a
+    funcdef type. CallPtr's stackInc (-1) is asBCInfo's "depends" marker; the
+    old model popped exactly one value and stranded the rest."""
+    sig = {"name": "cb", "owner": None, "returns": {"token": 80},
+           "params": [{"token": 5, "handle": True}, {"token": 68}]}
+
+    class Mod(_FakeModule):
+        def object_property_type(self, value):
+            return {"token": 5, "type": {"kind": "named", "name": "_builtin_function_"},
+                    "funcdef": sig}
+        funcdef_signature = as_disasm.Module.funcdef_signature
+        info = {"funcdefs": []}
+
+    mod = Mod(b"")
+    L = as_lift.Lifter(mod, {"name": "f", "owner": {"kind": "named", "name": "weapon"},
+                             "params": [{"token": 68}], "returns": {"token": 80}})
+    out = _run_ops(L, [
+        ("PshV4", [-1], [None]),                      # level (a0), deepest
+        ("PshVPtr", [0], [None]), ("RefCpyV", [4, 10], [None, None]),
+        ("PopPtr", [], []), ("VAR", [4], [None]),     # handle to this
+        ("PshVPtr", [0], [None]), ("ADDSi", [306, 1], ["weapon::callback", None]),
+        ("RefCpyV", [1, 47], [None, None]), ("PopPtr", [], []),
+        ("CallPtr", [1], [None]),
+    ])
+    assert out[-1] == "ret = v1(v4, a0);"
+    assert not L.stack
+
+
+def test_callptr_with_an_unknown_type_pops_nothing_rather_than_guessing():
+    L, _ = _lifter()
+    L.push("x")
+    out = _run_ops(L, [("CallPtr", [5], [None])])
+    assert out == ["ret = v5();"]
+    assert [e.text for e in L.stack] == ["x"]
+
+
+def test_poprptr_loads_the_register_that_rdr_and_wrtv_go_through():
+    """weapon::play_weapon reads and writes pool.max_distance via PshGPtr /
+    ADDSi / PopRPtr / RDR4. As a plain pop both lifted to a bare `ref`."""
+    L, _ = _lifter()
+    out = _run_ops(L, [("PshGPtr", [4], ["pool"]),
+                       ("ADDSi", [139, 13], ["sound_pool::max_distance", None]),
+                       ("PopRPtr", [], []), ("RDR4", [3], [None]),
+                       ("WRTV4", [5], [None])])
+    assert out == ["v3 = pool.max_distance;", "pool.max_distance = v5;"]
+    assert not L.stack
+
+
+def test_ldgrdr4_leaves_the_global_for_a_compound_write_back():
+    L, _ = _lifter()
+    out = _run_ops(L, [("LdGRdR4", [1, 155], [None, "spawn_next_object"]),
+                       ("WRTV4", [2], [None])])
+    assert out == ["v1 = spawn_next_object;", "spawn_next_object = v2;"]
+
+
+def test_reference_return_is_read_through_not_printed_twice():
+    """array<uint>::opIndex returns uint& -- an ADDRESS the following RDR4 reads
+    through: `v3 = totals[i]`, one statement, not `ret = ...; v3 = ref;`."""
+    op_index = {"name": "opIndex", "owner": {"kind": "named", "name": "array"},
+                "params": [{"token": 75}], "returns": {"token": 75, "reference": True}}
+    L, _ = _lifter(functions=[op_index])
+    out = _run_ops(L, [("PshV4", [4], [None]), ("PshVPtr", [5], [None]),
+                       ("CALLSYS", [0], [None]), ("RDR4", [3], [None])])
+    assert out == ["v3 = v5[v4];"]
+
+
+def test_an_unread_reference_return_is_still_emitted_for_its_side_effects():
+    op_index = {"name": "grow", "owner": None, "params": [],
+                "returns": {"token": 75, "reference": True}}
+    L, _ = _lifter(functions=[op_index])
+    out = _run_ops(L, [("CALL", [0], [None]), ("RET", [0], [None])])
+    assert out == ["ret = grow();", "return;"]
+
+
+def test_clrvptr_reads_as_a_null_assignment():
+    L, _ = _lifter()
+    assert _run_ops(L, [("ClrVPtr", [2], [None])]) == ["@v2 = null;"]
+
+
+def test_an_empty_else_arm_is_not_printed():
+    """weapon::invoke_callback's fall-through arm holds only the jump to the
+    join; `} else { }` added nothing the plain `if` does not say."""
+    lines = [(0, "@if c -> L0"), (1, "@goto L1"), (2, "y = 2;"), (3, "return;")]
+    body, _ = _structured(lines, {2: 0, 3: 1}, 4)
+    assert "} else {" not in body
+    assert body[:3] == ["if (c) {", "y = 2;", "}"]
 
 
 def test_unmodelled_opcodes_are_visible_not_dropped():
@@ -1493,12 +1751,23 @@ def test_install_extension_from_a_zip_lands_in_the_user_directory():
         zf.writestr("MyExt/extension.properties", "name=MyExt\n")
         zf.writestr("MyExt/lib/MyExt.jar", "")
 
-    target = bgt_ghidra.extensions_dir(install)
+    # Point every per-user config root at a scratch directory. Without this the
+    # test installs into -- and then deletes from -- the real Ghidra profile of
+    # whoever runs it, which would destroy a genuine extension named MyExt.
+    profile = tempfile.mkdtemp()
+    saved = {k: os.environ.get(k) for k in ("APPDATA", "XDG_CONFIG_HOME", "HOME")}
+    os.environ.update(APPDATA=profile, XDG_CONFIG_HOME=profile, HOME=profile)
     try:
+        target = bgt_ghidra.extensions_dir(install)
+        assert target.startswith(profile)
         placed = bgt_ghidra.install_extension(install, ext)
     finally:
-        if os.path.isdir(os.path.join(target, "MyExt")):
-            shutil.rmtree(os.path.join(target, "MyExt"), ignore_errors=True)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(profile, ignore_errors=True)
     assert placed.startswith(target)
     assert not placed.startswith(install)
 
