@@ -1389,7 +1389,7 @@ def structure(lifted):
 # readability: fold compiler-materialised temporaries
 # --------------------------------------------------------------------------
 
-_ASSIGN = re.compile(r"^(\s*)(v\d+) = (.+);$")
+_ASSIGN = re.compile(r"^(\s*)(v\d+|ret) = (.+);$")
 _STMT_KEYWORD = re.compile(r"^(if|while|do|for|switch|case|goto|break|continue|else)\b")
 _STRING_CTOR = re.compile(r'string\("((?:\\.|[^"\\])*)"\)')
 # A right-hand side safe to substitute for its variable at another point: it
@@ -1433,7 +1433,7 @@ def _lhs_var(line: str) -> Optional[str]:
     `@vN = ...`, `aN = ...`, `vN++`, `vN += ...`), or None. A parameter counts
     because a pure RHS may read one (`string(a0)`), and that read must block if
     the parameter is then changed. `this.c_form[vN].x = y` does not assign vN."""
-    m = re.match(r"^\s*@?((?:v|a)\d+)\s*(?:=|\+\+|--|\+=|-=|\*=|/=|%=|&=|\|=|\^=)", line)
+    m = re.match(r"^\s*@?((?:v|a)\d+|ret)\s*(?:=|\+\+|--|\+=|-=|\*=|/=|%=|&=|\|=|\^=)", line)
     return m.group(1) if m else None
 
 
@@ -1455,8 +1455,6 @@ def _fold_segment(seg: List[str]) -> List[str]:
                 continue
             var, rhs = m.group(2), m.group(3)
             reads = _pure_rhs_reads(rhs)
-            if reads is None:
-                continue
             word = re.compile(r"(?<![\w.@])%s\b" % re.escape(var))
             uses = []
             for j in range(k + 1, len(seg)):
@@ -1465,15 +1463,27 @@ def _fold_segment(seg: List[str]) -> List[str]:
                 for hit in word.finditer(_mask_strings(seg[j])):
                     # `&v` (by reference) must keep its own storage; skip it.
                     uses.append((j, hit.start(), seg[j][hit.start() - 1:hit.start()] == "&"))
-            byref = any(ref for _, _, ref in uses)
-            if len(uses) != 1 or byref:
+            if len(uses) != 1 or uses[0][2]:            # not single, or by-reference
                 continue
             j, pos, _ = uses[0]
+            # A pure value moves anywhere in the block. Anything else moves only
+            # into a use that consumes it whole and stands right after it -- a
+            # copy `L = var;` or `return var;` as the very next statement -- so
+            # no other subexpression is evaluated between and nothing reorders.
+            # That folds `ret = f(); v1 = ret;` to `v1 = f();`.
+            if reads is None and not (j == k + 1 and _is_whole_value_copy(seg[j], var)):
+                continue
             seg[j] = seg[j][:pos] + rhs + seg[j][pos + len(var):]
             del seg[k]
             changed = True
             break
     return seg
+
+
+def _is_whole_value_copy(line: str, var: str) -> bool:
+    """True if `line` is `<lvalue> = var;` or `return var;` -- var is the entire
+    value produced, so replacing it with var's definition reorders nothing."""
+    return bool(re.fullmatch(r"\s*(?:[^=;]+= |return )%s;" % re.escape(var), line))
 
 
 def fold_temporaries(lines: List[str]) -> List[str]:

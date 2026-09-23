@@ -1014,19 +1014,37 @@ Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
 **Stack balance is complete on the four titles** -- 14,300 / 14,300 bodies --
-so it no longer points at anything. The open work is readability. One half is
-done: `as_lift.fold_temporaries` folds a compiler-materialised temporary back
-into its single use, so `v5 = string(""); v6 = string("&"); v7 = string(a0);
-v8 = string_replace(v7, v6, v5, v1)` reads `string_replace(string(a0), "&", "",
-v1)`, and `string("x")` collapses to `"x"`. It moves **only pure right-hand
-sides** (string and numeric literals, a `string(param)` copy), confined to a
-basic block and blocked by any reassignment of the temporary or what it reads,
-so a call is never reordered and no side effect moves. That makes it invisible
-to `bgt libcheck`: on Psycho Strike the call sequences (153 / 155) and literal
-multisets (155 / 155) are **identical** with folding on or off, per function,
-while 8.8% of body lines disappear. All 14,300 bodies fold without error. The
-other half is not done: `bool` tests compiled as `!v1 != !v2` could fold to the
-comparison they are. `bgt libcheck` is the check to run for either.
+so it no longer points at anything. The open work was readability, and
+`as_lift.fold_temporaries` now does it: it folds a compiler-materialised
+temporary back into its single use. Two folds, each with its own safety
+argument:
+
+- **A pure value** (a string or numeric literal, or a `string(param)` copy)
+  folds into its one by-value use anywhere in the basic block. `v5 = string("");
+  v6 = string("&"); v7 = string(a0); v8 = string_replace(v7, v6, v5, v1)` reads
+  `string_replace(string(a0), "&", "", v1)`, and `string("x")` collapses to
+  `"x"`. A pure value has no side effect, so moving it reorders nothing.
+- **A whole-value copy** folds a value-register or variable copy into the
+  assignment above it: `ret = f(); v1 = ret` becomes `v1 = f()`, and
+  `ret = f(); return ret` becomes `return f()`. This one may move a *call*, so
+  it fires only when the use consumes the value whole (`L = var;` or
+  `return var;`) and stands immediately after the definition -- no other
+  subexpression is evaluated in between, so again nothing reorders.
+
+Both are confined to a basic block and blocked by any reassignment of the
+temporary or of what its right-hand side reads; a string literal is masked when
+scanning for uses so a name inside it is never taken for one. Because only these
+two safe shapes move, the fold is **invisible to `bgt libcheck`**: per function,
+the call sequences (153 / 155 on Psycho Strike) and literal multisets (155 /
+155) are identical with folding on or off. It removes **18-25% of body lines**
+(strike 18.7, paladin 25.4, sbyw 24.3, manamon2 23.1), and all 14,300 bodies
+fold without error.
+
+The `!v1 != !v2` bool-test pattern an earlier note listed as remaining work does
+not actually occur in any title's lifted output -- the two-part `CMP`-plus-jump
+handling already renders those as the comparison they are. `bgt libcheck` is the
+check to run for any further readability change: one that alters a call sequence
+or a literal is wrong.
 
 **0.88% residual gotos.** Irreducible flow, switch tails and multi-entry loops
 stay labelled `goto` rather than being forced into a shape they do not have.

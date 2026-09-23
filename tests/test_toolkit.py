@@ -1461,6 +1461,30 @@ def test_fold_does_not_move_a_call_result_across_statements():
         == ['v2 = f(x);', 'y = k();', 'z = g(v2);']
 
 
+def test_fold_collapses_a_register_copy_into_the_assignment():
+    # `ret = call(); vN = ret;` is the compiler's value-register copy; the
+    # source wrote `vN = call();`. The use consumes ret whole and stands right
+    # after it, so folding the call in reorders nothing.
+    assert _fold('ret = this.shortcut(a0);', 'v1 = ret;') \
+        == ['v1 = this.shortcut(a0);']
+    assert _fold('ret = f();', 'return ret;') == ['return f();']
+    assert _fold('v5 = g(x);', 'this.title = v5;') == ['this.title = g(x);']
+
+
+def test_fold_keeps_a_call_result_used_inside_a_larger_expression():
+    # ret is not the whole value here -- k() is evaluated too, and folding would
+    # swap the order of the call and k(). It must stay.
+    assert _fold('ret = f();', 'v1 = h(ret, k());') \
+        == ['ret = f();', 'v1 = h(ret, k());']
+
+
+def test_fold_keeps_a_non_adjacent_call_copy():
+    # the copy is not the next statement, so folding the call down past the
+    # statement between it could reorder side effects
+    assert _fold('ret = f();', 'x = a;', 'v1 = ret;') \
+        == ['ret = f();', 'x = a;', 'v1 = ret;']
+
+
 def test_callers_of_finds_the_body_that_calls_an_engine_function():
     """The function you want to read is often not the one you can name. Engine
     functions have no body of their own -- what names the key is whatever CALLS
