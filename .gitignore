@@ -38,3 +38,7 @@ desktop.ini
 work/
 out/
 scratch/
+
+# ...except the owned NVGT test fixtures, which are source, not game files.
+!tests/nvgt/fixtures/*.as
+tests/nvgt/fixtures/build/

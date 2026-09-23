@@ -426,11 +426,38 @@ public class BgtDumpString extends GhidraScript {
 '''
 
 
+# Characters cmd.exe treats as syntax even inside a quoted argument once it is
+# expanded inside a parenthesised `if (...)` block -- which analyzeHeadless.bat
+# does. A `)` in "C:\Program Files (x86)\BGT\bgt.exe" closes the block early and
+# the launcher dies with "\BGT\bgt.exe was unexpected at this time."
+_BATCH_UNSAFE = set("()&^%!")
+
+
+def batch_safe_path(path: str, scratch: str) -> str:
+    """Return `path`, or a copy of it under `scratch` if cmd.exe would mangle it.
+
+    Only matters on Windows, where the launcher is a batch file. The copy keeps
+    the original base name when that name is itself safe, so the Ghidra
+    program -- and the default project name derived from it -- still reads as
+    the file the user asked for.
+    """
+    if os.name != "nt" or not (_BATCH_UNSAFE & set(os.path.abspath(path))):
+        return path
+    base = os.path.basename(path)
+    if _BATCH_UNSAFE & set(base):
+        base = "".join("_" if c in _BATCH_UNSAFE else c for c in base)
+    os.makedirs(scratch, exist_ok=True)
+    dest = os.path.join(scratch, base)
+    shutil.copyfile(path, dest)
+    return dest
+
+
 def decompile(install: str, jdk: str, binary: str, out: str,
               addrs: Optional[str] = None, needle: Optional[str] = None,
               project_dir: Optional[str] = None, max_mem: str = "2G") -> int:
     """Import `binary` headless and decompile the functions asked for."""
     scripts = tempfile.mkdtemp(prefix="bgt_ghidra_")
+    binary = batch_safe_path(binary, os.path.join(scripts, "input"))
     if addrs:
         script, body = "BgtDumpAt.java", DUMP_AT
     else:

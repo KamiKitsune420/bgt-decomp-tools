@@ -1,6 +1,9 @@
 """
-bgt -- one entry point for the whole toolkit.
+bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
 
+    bgt identify game.exe                  which engine built this: BGT or NVGT?
+
+  BGT
     bgt unpack game.exe -o work/           recover the AngelScript module
     bgt info game.exe                      trailer, seed and container only
     bgt opcodes game.exe                   dump asBCInfo[]
@@ -16,12 +19,23 @@ bgt -- one entry point for the whole toolkit.
     bgt ghidra status                      is Ghidra + a JDK 21+ available?
     bgt ghidra decompile game.exe --string _builtin_function_
 
+  NVGT
+    bgt nvgt recover game.exe -o src.zip   complete, browsable source project
+    bgt nvgt decompile game.exe -o game.nvgt
+    bgt nvgt disasm game.exe -o game.asm
+    bgt nvgt extract game.exe out.bin --packs packs/
+    bgt nvgt inspect game.exe              engine identity evidence
+    bgt nvgt pack list|extract sounds.dat --key <key>
+    bgt nvgt library | probe | keyscan | gen-opcodes   (see --help on each)
+
 Every subcommand is a thin wrapper: it parses arguments, calls the library, and
 formats the result. The logic lives in the modules, so `bgt unpack` and
-`python tools/bgt_unpack.py` do the same work by the same path.
+`python tools/bgt_unpack.py` do the same work by the same path -- and
+`bgt nvgt recover` and `python tools/nvgt/recover.py` likewise.
 """
 
 import argparse
+import importlib
 import os
 import sys
 from typing import List, Optional
@@ -29,7 +43,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_crack, bgt_ghidra, bgt_pack, bgt_repack, bgt_unpack,
-                   bgt_validate, bgtlib)
+                   bgt_validate, bgtlib, engine)
 except ImportError:       # run directly from a checkout
     import as_disasm
     import as_lift
@@ -43,6 +57,7 @@ except ImportError:       # run directly from a checkout
     import bgt_unpack
     import bgt_validate
     import bgtlib
+    import engine
 
 
 def _fail(message: str) -> int:
@@ -84,7 +99,9 @@ def cmd_info(args: argparse.Namespace) -> int:
         flag, blob = bgtlib.parse_container(plaintext)
         _comp, declared = bgtlib.lz77_split(blob)
     except bgtlib.BgtError as exc:
-        return _fail("%s: %s" % (os.path.basename(args.exe), exc))
+        hint = engine.redirect_hint(args.exe, engine.BGT)
+        return _fail("%s: %s%s" % (os.path.basename(args.exe), exc,
+                                   "\n" + hint if hint else ""))
 
     print("%s   (%d bytes)" % (os.path.basename(args.exe), len(data)))
     print("  overlay offset   0x%08X  (%d bytes)"
@@ -309,14 +326,79 @@ def cmd_pack(args: argparse.Namespace) -> int:
     return 0 if not skipped else 1
 
 
-def _run(main_fn, argv: List[str]) -> int:
+def cmd_identify(args: argparse.Namespace) -> int:
+    return engine.main(list(args.exe) + (["--json"] if args.json else []))
+
+
+# `bgt nvgt <tool>` -> (module in the nvgt package, how its main takes argv).
+# "argv" mains accept a list; "sys" mains read sys.argv, as the NVGT tools were
+# written. Either way the tool's own parser owns its options, so `--help` on
+# each one is the real reference and nothing here can drift out of step.
+NVGT_TOOLS = {
+    "recover":     ("recover", "sys",
+                    "complete source project: .zip or folder, browser, manifest"),
+    "decompile":   ("decompile", "sys", "single-file source (or --disasm)"),
+    "disasm":      ("decompile", "sys", "annotated disassembly"),
+    "extract":     ("extract", "argv", "decrypt the payload; --packs dumps embedded packs"),
+    "inspect":     ("inspect_exe", "sys", "engine identity evidence, as JSON"),
+    "pack":        ("nvgt_pack", "argv", "list / extract / create NVGT asset packs"),
+    "library":     ("library_recovery", "sys", "verified reuse of installed includes"),
+    "probe":       ("native_probe", "argv", "compile-only check in a copied stub"),
+    "keyscan":     ("keyscan", "argv", "find AES-256 key schedules in a memory dump"),
+    "gen-opcodes": ("gen_opcodes", "sys", "regenerate opcodes.py from angelscript.h"),
+}
+
+
+def _nvgt_module(name: str):
+    """Import one module of the nvgt subpackage, installed or from a checkout."""
+    if __package__:
+        return importlib.import_module("%s.nvgt.%s" % (__package__, name))
+    return importlib.import_module("nvgt.%s" % name)
+
+
+def cmd_nvgt(args: argparse.Namespace) -> int:
+    rest = list(args.rest)
+    if not rest or rest[0] in ("-h", "--help", "help"):
+        print("usage: bgt nvgt <tool> [options]\n")
+        print("Source recovery for games built with NVGT. Tools:\n")
+        for tool, (_mod, _style, blurb) in NVGT_TOOLS.items():
+            print("  %-12s %s" % (tool, blurb))
+        print("\n`bgt identify game.exe` says whether a file is NVGT or BGT.")
+        return 0
+    tool, argv = rest[0], rest[1:]
+    if tool not in NVGT_TOOLS:
+        return _fail("unknown nvgt tool %r (have: %s)"
+                     % (tool, ", ".join(NVGT_TOOLS)))
+    module_name, style, _blurb = NVGT_TOOLS[tool]
+    if tool == "disasm" and "--disasm" not in argv:
+        argv = argv + ["--disasm"]
+    module = _nvgt_module(module_name)
+    if style == "argv":
+        try:
+            return module.main(argv) or 0
+        except SystemExit as exc:
+            return _exit_code(exc)
+    return _run(module.main, argv, prog="bgt nvgt %s" % tool)
+
+
+def _exit_code(exc: SystemExit) -> int:
+    """SystemExit carries an int, None, or -- from parser.exit -- a message."""
+    if exc.code is None:
+        return 0
+    if isinstance(exc.code, int):
+        return exc.code
+    print(exc.code, file=sys.stderr)
+    return 1
+
+
+def _run(main_fn, argv: List[str], prog: str = "bgt") -> int:
     """Call a module's main() with a synthetic argv."""
     saved = sys.argv
-    sys.argv = ["bgt"] + argv
+    sys.argv = [prog] + argv
     try:
         return main_fn() or 0
     except SystemExit as exc:
-        return int(exc.code or 0)
+        return _exit_code(exc)
     finally:
         sys.argv = saved
 
@@ -330,6 +412,17 @@ def build_parser() -> argparse.ArgumentParser:
         prog="bgt", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", metavar="<command>")
+
+    p = sub.add_parser("identify", help="which engine built this: BGT or NVGT")
+    p.add_argument("exe", nargs="+")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_identify)
+
+    p = sub.add_parser("nvgt", help="NVGT source recovery (bgt nvgt --help)",
+                       add_help=False)
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="recover | decompile | disasm | extract | inspect | pack | ...")
+    p.set_defaults(func=cmd_nvgt)
 
     p = sub.add_parser("unpack", help="recover the AngelScript module")
     p.add_argument("exe", nargs="+")
@@ -419,7 +512,16 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+# Command groups whose own parsers own everything after the group name. argparse's
+# REMAINDER cannot capture a leading option, so `bgt nvgt --help` would be
+# rejected as an unknown top-level flag; these are dispatched before parsing.
+_PASSTHROUGH = {"nvgt": cmd_nvgt, "ghidra": cmd_ghidra}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] in _PASSTHROUGH:
+        return _PASSTHROUGH[argv[0]](argparse.Namespace(rest=argv[1:]))
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "command", None):

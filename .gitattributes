@@ -1,0 +1,9 @@
+# The NVGT recovery code hashes the files it generates and compiles its test
+# fixtures, so those paths stay LF on every platform. The rest of the repository
+# keeps the line endings it already has.
+tools/nvgt/** text eol=lf
+tests/nvgt/** text eol=lf
+tests/test_integration.py text eol=lf
+tools/engine.py text eol=lf
+extra/nvgt/*.cpp text eol=lf
+extra/nvgt/*.bat text eol=crlf

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bgtdecomp"
-version = "0.2.0"
-description = "Recover code and assets from games built with BGT (BlastBay Gaming Toolkit)"
+version = "0.3.0"
+description = "Recover code and assets from games built with BGT (BlastBay Gaming Toolkit) and NVGT"
 readme = "README.md"
-requires-python = ">=3.8"
-license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
-license-files = ["LICENSE.md"]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE.md", "NOTICE.md"]
 authors = [{ name = "KamiKitsune420 (Adel Spence)" }]
 dependencies = ["pycryptodome>=3.15"]
 
@@ -22,6 +22,8 @@ Homepage = "https://github.com/KamiKitsune420/bgt-decomp-tools"
 # it -- as_opcodes reads the engine's own opcode table and decodes directly.
 x86 = ["capstone>=5.0"]
 dev = ["pytest>=7"]
+# Only for the optional memory-dump key scanner (bgt nvgt keyscan).
+scan = ["numpy>=1.22"]
 
 [project.scripts]
 bgt = "bgtdecomp.cli:main"
@@ -34,12 +36,14 @@ bgt-crack = "bgtdecomp.bgt_crack:main"
 bgt-validate = "bgtdecomp.bgt_validate:main"
 bgt-ghidra = "bgtdecomp.bgt_ghidra:main"
 bgt-lift = "bgtdecomp.as_lift:main"
+nvgt-recover = "bgtdecomp.nvgt.recover:main"
+nvgt-pack = "bgtdecomp.nvgt.nvgt_pack:main"
 
 [tool.setuptools]
 # The modules live in tools/ and are also runnable as plain scripts from there;
 # this maps that directory onto an importable package without moving anything.
 package-dir = { bgtdecomp = "tools" }
-packages = ["bgtdecomp"]
+packages = ["bgtdecomp", "bgtdecomp.nvgt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

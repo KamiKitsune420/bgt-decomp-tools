@@ -1,5 +1,6 @@
 """
-bgtdecomp -- tooling for games built with BGT (BlastBay Gaming Toolkit).
+bgtdecomp -- tooling for games built with BGT (BlastBay Gaming Toolkit) and its
+successor NVGT (the `bgtdecomp.nvgt` subpackage).
 
 Every module here works two ways on purpose:
 
@@ -12,4 +13,4 @@ the modules try the relative import first and fall back -- neither form needs a
 `sys.path` fixup at call sites, which used to break under test runners.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -67,6 +67,13 @@ def report(path, outdir=None, seed=None):
         u = bgtlib.unpack_file(path, seed=seed)
     except bgtlib.BgtError as e:
         print("  FAILED: %s" % e)
+        try:                  # installed as a package
+            from . import engine
+        except ImportError:   # run directly from a checkout
+            import engine
+        hint = engine.redirect_hint(path, engine.BGT)
+        if hint:
+            print("  %s" % hint)
         return None
 
     print("  overlay offset      0x%08X  (%d bytes)" % (u.overlay_offset, u.overlay_size))
