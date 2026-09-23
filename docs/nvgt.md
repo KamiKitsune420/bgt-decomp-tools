@@ -105,9 +105,14 @@ maps BGT's token ids onto the current ones. BGT's `?` (59) becomes NVGT's 60,
 which is how the two halves' `?&in` rules line up.
 
 `decompile` simulates each body's stack and registers, and structures loops,
-`switch`, `try`/`catch`, ternaries and short-circuit logic. `recover` wraps it
-into a project, and `source_evidence.json` separates what the bytecode retained
-from what was synthesised.
+`switch`, `try`/`catch`, ternaries and short-circuit logic. A counted `while`
+whose last statement increments the variable its condition tests is folded back
+into a `for` -- `for (i = 0; (i < n); i = (i + 1))` rather than an `i = 0;` and a
+`while` -- but only where that is behaviour-preserving: a loop containing
+`continue` is left as a `while`, because `continue` skips the increment in a
+`while` and runs it in a `for`. `recover` wraps it into a project, and
+`source_evidence.json` separates what the bytecode retained from what was
+synthesised.
 
 Both toolkits decode AngelScript's encoded integers independently, from
 different builds of `asCReader`. `tests/test_integration.py` requires them to

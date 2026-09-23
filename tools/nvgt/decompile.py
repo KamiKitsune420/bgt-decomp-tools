@@ -2359,6 +2359,58 @@ class Structurer:
 # module rendering
 # --------------------------------------------------------------------------
 
+_FOR_WHILE = re.compile(r"while (\(.+\)) \{$")
+_FOR_INIT = re.compile(r"((?:[\w:<>@\[\], ]+? )?([A-Za-z_]\w*) = .+);$")
+
+
+def _reconstruct_for_loops(lines: list[str]) -> list[str]:
+    """`init; while (cond) { body; incr; }` -> `for (init; cond; incr) { body; }`.
+
+    A cosmetic, behaviour-preserving rewrite, applied only where it is safe: the
+    loop must contain no `continue` (which skips the increment in a while but
+    runs it in a for), the line before the while must assign the variable the
+    condition tests, and the loop's last statement must increment that same
+    variable. The matching close brace is found by indentation, so `{}` inside
+    an initializer never confuses it.
+    """
+    out = list(lines)
+    i = 0
+    while i < len(out):
+        m = _FOR_WHILE.match(out[i].strip())
+        if not m or i == 0:
+            i += 1
+            continue
+        cond = m.group(1)
+        indent = len(out[i]) - len(out[i].lstrip())
+        pad = " " * indent
+        init_line = out[i - 1]
+        im = _FOR_INIT.match(init_line.strip())
+        if not im or len(init_line) - len(init_line.lstrip()) != indent:
+            i += 1
+            continue
+        var = im.group(2)
+        if not re.search(r"(?<![\w.])" + re.escape(var) + r"\b", cond):
+            i += 1
+            continue
+        close = next((j for j in range(i + 1, len(out)) if out[j] == pad + "}"), None)
+        if close is None or close == i + 1:
+            i += 1
+            continue
+        body = out[i + 1:close]
+        if any(re.search(r"(?<!\w)continue\s*;", b) for b in body):
+            i += 1
+            continue
+        incm = re.match(r"(" + re.escape(var) + r"(?:\+\+|--)|"
+                        + re.escape(var) + r" [-+*/%|&^]?= .+);$", body[-1].strip())
+        if not incm:
+            i += 1
+            continue
+        for_line = pad + "for (%s; %s; %s) {" % (im.group(1), cond, incm.group(1))
+        out = out[:i - 1] + [for_line] + body[:-1] + out[close:]
+        i += 1
+    return out
+
+
 class ModuleDecompiler:
     def __init__(self, module: Module, comments: bool = False):
         self.m = module
@@ -2585,7 +2637,7 @@ class ModuleDecompiler:
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
             scopes = _recover_plain_scopes(ev, f, self.m.classes)
             st = Structurer(ev, f, scopes)
-            return declarations + st.render(indent)
+            return _reconstruct_for_loops(declarations + st.render(indent))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
 
