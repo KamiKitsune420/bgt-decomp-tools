@@ -113,6 +113,99 @@ Both toolkits decode AngelScript's encoded integers independently, from
 different builds of `asCReader`. `tests/test_integration.py` requires them to
 agree on every width, including the sign flag.
 
+### Checked against NVGT's own library
+
+NVGT ships its standard library as source, so it is the one body of code whose
+original is known and which nobody here wrote. `bgt nvgt libcheck` builds a
+corpus from it: for every `include/*.nvgt`, a harness has nvgt.exe export the
+module twice (`get_bytecode(false)`, with debug information, and
+`get_bytecode(true)`, stripped the way a release ships). Each is decompiled
+into a project, and the project has to compile with the same nvgt.exe.
+
+```
+bgt nvgt libcheck                  # ~3 minutes; nvgt.exe from NVGT_COMPILER or C:\nvgt
+50 / 50 library modules recompile after decompilation
+  debug  25 / 25
+  strip  25 / 25
+  decompiler errors 0, unhandled opcodes 0, gotos 0
+  not scored (include does not compile as shipped): db_props, int_to_byte, legacy_sound_pool, logger
+```
+
+The decompiler started this work at **21 / 50**. The four unscored includes don't
+build as shipped against 0.90.0-dev: the missing `sqlite3` and `pack` types, and
+`string_reverse` / `string_trim_left`. They are named in the report rather than
+counted against the decompiler.
+
+Compiling proves valid AngelScript, not the same meaning. Three of the bugs
+below compiled cleanly and computed something else, so
+`tests/nvgt/test_roundtrip_behavior.py` goes a step further. It **runs** a
+decompiled program and compares its result with the original's. Its fixture,
+`fixtures/decompiler_patterns.nvgt`, holds one instance of each construct.
+Undoing any one of those three fixes on its own fails that test.
+
+What had to change, grouped by what it broke:
+
+**Classes and inheritance.**
+- A derived class's vftable lists the inherited methods it does not override.
+  Methods are now paired with their bodies by signature, not by name alone
+  (name, parameter types, in/out flags, `const`). Inherited methods are not
+  re-emitted, since a re-emitted copy is a redefinition.
+- Inherited properties are written `this.x`. A private inherited member is
+  reachable that way and not by its bare name (checked against nvgt.exe).
+- A call to the base-class constructor is `super(...)`.
+- Constructors of namespaced classes use the qualified name (`spec::path`).
+- A `const` method calling a non-const method on `this` uses the bare name.
+  Through `this.` it is "No matching signatures" (touch.nvgt's
+  `get_available() const`).
+
+**Handles.**
+- **`@h.item = b` was dropped.** `REFCPY` through a member address had no case.
+  It now emits the assignment, but only for members *declared* as handles. A
+  by-value member of a reference type (`mixer music_mixer;`) is REFCPY'd too,
+  by the constructor's generated initialisation, which the source never wrote.
+- **`?&in` arguments keep their `@`.** The hidden TYPEID says what the source
+  passed. A handle type id means `d.set("k", @b)`. Written as `d.set("k", b)`,
+  it stores a *copy*, and later changes through `b` no longer show.
+- Reassigning a handle variable is `@x = y`. Without the `@` it is a value
+  copy into the object, which most types refuse.
+- `CmpPtr` conditions read `is` / `!is`.
+- `cast<T@>` recognises the compiler's null-safe cast sequence. `SwapPtr` is
+  modelled.
+- A `?&out` receiving a reference type declares `T@ tmp` and passes `@tmp`.
+  Declared by value, it needs a default constructor the type may not have.
+
+**Evaluation order.**
+- **An out argument is read after the call that writes it.** A call whose value
+  feeds a later condition is deferred into that condition, but its out argument
+  is copied into place straight after the call. In
+  `if (!d.get("k", @fetched))` that copy printed *before* the call. The call is
+  now declared into a `__nvgt_ret_N` local as soon as a statement reads its
+  output.
+- Assignment operators leave their receiver in the value register, and
+  by-value results are bound to their slots.
+
+**Types.**
+- An integer constant meeting a by-value enum or application type is written
+  `Type(value)`.
+- Ternary arms are normalised to the target type.
+- `opConv` renders as `target(obj)`. Called by name, it is ambiguous when a
+  type converts to several things.
+- Enums keep `shared` / `external`.
+- **Slots shared between `bool` and a number.** In a stripped build one frame
+  slot can hold `bool inside` in one scope and `float d` in another. Nothing
+  says where the switch happens. The slot takes the numeric type (int, uint,
+  double, then float). A bool is stored as `(b ? 1 : 0)` and tested as
+  `x != 0`. This last fix covered `float` and `double` too, which took
+  touch.nvgt's stripped build (`bool in_bounds` / `float dist_sq_start`) from
+  failing to passing.
+- In debug builds a variable is redeclared at each `declared_at` its
+  information records. Hoisted declarations are deduplicated by name, with
+  `const` stripped.
+
+**Conditions.** Negation works on the whole expression, splitting at depth-0
+comparisons and flipping the operator (including `is`/`!is`), instead of
+prefixing `!` to text that may not be one term.
+
 ---
 
 ## Changes in the merged toolkit

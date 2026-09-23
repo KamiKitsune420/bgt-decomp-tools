@@ -27,6 +27,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt nvgt extract game.exe out.bin --packs packs/
     bgt nvgt inspect game.exe              engine identity evidence
     bgt nvgt pack list|extract sounds.dat --key <key>
+    bgt nvgt libcheck                      decompile NVGT's include/, recompile it
     bgt nvgt library | probe | keyscan | gen-opcodes   (see --help on each)
 
 Every subcommand is a thin wrapper: it parses arguments, calls the library, and
@@ -356,6 +357,7 @@ NVGT_TOOLS = {
     "inspect":     ("inspect_exe", "sys", "engine identity evidence, as JSON"),
     "pack":        ("nvgt_pack", "argv", "list / extract / create NVGT asset packs"),
     "library":     ("library_recovery", "sys", "verified reuse of installed includes"),
+    "libcheck":    ("libcheck", "argv", "decompile NVGT's own include/ and recompile it"),
     "probe":       ("native_probe", "argv", "compile-only check in a copied stub"),
     "keyscan":     ("keyscan", "argv", "find AES-256 key schedules in a memory dump"),
     "gen-opcodes": ("gen_opcodes", "sys", "regenerate opcodes.py from angelscript.h"),

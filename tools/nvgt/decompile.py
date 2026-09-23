@@ -90,7 +90,7 @@ ASSIGN_OPS = {"opAddAssign": "+=", "opSubAssign": "-=", "opMulAssign": "*=",
               "opOrAssign": "|=", "opXorAssign": "^=", "opShlAssign": "<<=",
               "opShrAssign": ">>=", "opUShrAssign": ">>>="}
 SKIP_OPS = {"CHKREF", "ChkRefS", "ChkNullS", "ChkNullV", "SUSPEND", "ClrHi",
-            "SwapPtr", "JitEntry",
+            "JitEntry",
             "LINE", "LABEL", "ObjInfo", "Block", "VarDecl", "TryBlock",
             "SetListSize", "SetListType", "PshListElmnt", "AllocMem"}
 CTORS = {"$beh0", "$beh1"}     # default ctor / copy ctor
@@ -134,22 +134,79 @@ def _jump_target(ins: Instr) -> int:
     return ins.pos + 2 + _s32(ins.dw_arg)
 
 
+_FLIP = {"<=": ">", ">=": "<", "<": ">=", ">": "<=", "==": "!=", "!=": "==",
+         "is": "!is", "!is": "is"}
+# Longest first, so `<=` is not read as `<` and `!is` not as `is`.
+_COMPARISONS = ("!is", "<=", ">=", "==", "!=", "is", "<", ">")
+
+
+def _scan_depth0(text: str):
+    """Yield (index, char) for characters outside brackets and string literals."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            yield i, ch
+        i += 1
+
+
+def _outer_wrapped(c: str) -> bool:
+    """Is `c` one parenthesised expression -- does its first `(` close last?
+
+    `(a - b) < (c + d)` starts with `(` and ends with `)` but is NOT wrapped;
+    treating it as wrapped negated it to `!(a - b) < (c + d` -- a different
+    condition, which NVGT rejects as "Illegal operation on this datatype".
+    """
+    if not (c.startswith("(") and c.endswith(")")):
+        return False
+    depth = 0
+    for i, ch in enumerate(c):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and i != len(c) - 1:
+                return False
+    return depth == 0
+
+
+def _split_comparison(c: str):
+    """(lhs, op, rhs) when `c` is a single top-level comparison, else None."""
+    tops = "".join(ch for _, ch in _scan_depth0(c))
+    if "&&" in tops or "||" in tops or "?" in tops:
+        return None
+    for i, _ch in _scan_depth0(c):
+        for op in _COMPARISONS:
+            token = " %s " % op
+            if c.startswith(token, i - 1) and i > 0:
+                return c[:i - 1], op, c[i - 1 + len(token):]
+    return None
+
+
 def _negate_cond(c: str) -> str:
-    """Negate a comparison like (a <= b) -> (a > b); fall back to !(...)."""
-    import re as _re
+    """Negate a condition, flipping a comparison where there is one."""
     if c in ("0", "false"):
         return "true"
     if c in ("1", "true"):
         return "false"
-    if c.startswith("!(") and c.endswith(")"):
+    if c.startswith("!") and _outer_wrapped(c[1:]):
         return c[2:-1]
-    m = _re.match(r"^\((.+) (<=|>=|<|>|==|!=) (.+)\)$", c)
-    if m and all(part.count("(") == part.count(")") for part in (m.group(1), m.group(3))):
-        a, op, b = m.groups()
-        flip = {"<=": ">", ">=": "<", "<": ">=", ">": "<=",
-                "==": "!=", "!=": "=="}
-        return f"({a} {flip[op]} {b})"
-    return f"!({c[1:-1]})" if c.startswith("(") and c.endswith(")") else f"!({c})"
+    inner = c[1:-1] if _outer_wrapped(c) else c
+    parts = _split_comparison(inner)
+    if parts is not None:
+        a, op, b = parts
+        return f"({a} {_FLIP[op]} {b})"
+    return f"!({inner})"
 
 
 def _condition(c: str) -> str:
@@ -162,6 +219,16 @@ def _type_stack_size(dt: DataType) -> int:
     if dt.is_reference or dt.is_object_handle or dt.obj_type is not None:
         return 1
     return 2 if dt.format().replace("const ", "") in ("int64", "uint64", "double") else 1
+
+
+def _method_key(fn: Function) -> tuple:
+    """A method's identity for overriding: name, parameter types, const-ness.
+
+    The owner is deliberately left out -- an override and the stub it replaces
+    belong to different classes but are the same method.
+    """
+    return (fn.name, tuple(dt.format() for dt in fn.param_types),
+            tuple(fn.in_out_flags), bool(fn.flags_byte & 1))
 
 
 def _parameter_layout(fn: Function) -> list[tuple[int, str]]:
@@ -244,9 +311,17 @@ class FuncDecompiler:
             slot_types.setdefault(variable.stack_offset, []).append(variable.type)
         for off, types in slot_types.items():
             tokens = {t.token_type for t in types}
-            if off > 0 and 67 in tokens and tokens & {70, 77} and all(
-                    t.obj_type is None and t.token_type in (67, 70, 77) for t in types):
-                self.var_types[off] = DataType(token_type=70 if 70 in tokens else 77)
+            # A slot a stripped build shares between a bool and a number. With
+            # no debug positions there is no telling which declaration is
+            # live where, so the slot takes the numeric type and bools are
+            # written as 1/0 and read back as `!= 0`. Floats and doubles
+            # included: touch.nvgt reuses one slot for `bool in_bounds` and
+            # `float dist_sq_start`.
+            numeric = (70, 77, 94, 81)                   # int, uint, double, float
+            if off > 0 and 67 in tokens and tokens & set(numeric) and all(
+                    t.obj_type is None and t.token_type in (67,) + numeric for t in types):
+                chosen = next(tok for tok in numeric if tok in tokens)
+                self.var_types[off] = DataType(token_type=chosen)
                 self.mixed_boolean_slots.add(off)
         self.global_types = {(g.namespace_ + "::" if g.namespace_ else "") + g.name: g.type
                              for g in module.globals + module.used_globals}
@@ -311,6 +386,7 @@ class FuncDecompiler:
         self.obj_reg: Atom | None = None
         self.pending_global: str | None = None  # LdGRdR4 target for WRTV4
         self.cmp_pair: tuple[Atom, Atom] | None = None
+        self.cmp_is_handle = False
         rt = fn.return_type.format() if fn.return_type else "void"
         self.returns_value = rt not in ("", "void")
         self.return_slot = -1 if fn.object_type and _needs_out_ref(fn.return_type) else 0
@@ -319,6 +395,8 @@ class FuncDecompiler:
         self.skip_indexes: set[int] = set()
         self.bool_merges: list[dict] = []
         self.pending_value_call: str | None = None
+        # deferred call text -> (return type, its out-argument locals, position)
+        self.deferred_out_calls: dict[str, tuple] = {}
         self.pending_value_call_pos: int = 0
         self.consumed_temps: set[int] = set()
         self.list_values: dict[int, dict[int, Atom]] = {}
@@ -401,15 +479,57 @@ class FuncDecompiler:
                 text = f"{name}{a.text[len(tn):]};"
             else:
                 text = f"{name} = {a.text};"
-            self.events.append(Event("stmt", self._pos(), (tn, text)))
+            self._append_stmt(tn, text)
         else:
-            self.events.append(Event("stmt", self._pos(), ("", f"{name} = {a.text};")))
+            # A handle variable is REASSIGNED with `@`. Without it the statement
+            # is a value copy into the object the handle points at, which
+            # `sound` and every funcdef type refuse: "No appropriate opAssign
+            # method found in 'sound' for value assignment".
+            dt = self.var_types.get(off)
+            prefix = "@" if dt is not None and dt.is_object_handle else ""
+            self._append_stmt("", f"{prefix}{name} = {a.text};")
 
     def _pos(self) -> int:
         return self.instrs[self.k].pos
 
     def _stmt(self, text: str) -> None:
-        self.events.append(Event("stmt", self._pos(), ("", text)))
+        self._append_stmt("", text)
+
+    def _append_stmt(self, type_name: str, text: str) -> None:
+        self._order_out_arguments(text)
+        self.events.append(Event("stmt", self._pos(), (type_name, text)))
+
+    def _order_out_arguments(self, text: str) -> None:
+        """Run a deferred call before the first statement that reads its output.
+
+        A call whose value is used later -- typically as a condition -- is
+        deferred and folded into that later expression. When it also writes an
+        `out` argument, the compiler copies the output into its destination
+        straight after the call, *before* the condition is tested:
+
+            if (!d.get("item", @fetched)) return -4;
+
+        compiles to call; copy output into `fetched`; test. Folding the call
+        into the condition put the copy first, reading `fetched` before `get`
+        had written it. So when a statement mentions a deferred call's output
+        local, the call is declared into a local of its own here, and every
+        pending expression that embedded it reads that local instead.
+        """
+        for calltxt, (ret, locals_, pos) in list(self.deferred_out_calls.items()):
+            if not any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text)
+                       for name in locals_):
+                continue
+            del self.deferred_out_calls[calltxt]
+            holders = [a for a in [self.value_reg, *self.temps.values()]
+                       if a is not None and calltxt in a.text]
+            if not holders:
+                continue                     # already consumed, in order
+            local = f"__nvgt_ret_{pos}"
+            dt = copy.copy(ret)
+            dt.is_reference = dt.is_readonly = False
+            self.events.append(Event("stmt", pos, (dt.format(), f"{local} = {calltxt};")))
+            for a in holders:
+                a.text = a.text.replace(calltxt, local)
 
     # -- main loop ------------------------------------------------------------
 
@@ -422,11 +542,40 @@ class FuncDecompiler:
         for pos, off, opt in self.fn.obj_variable_info:
             if opt == 0 and off:
                 self.objvar_ends[pos] = off
+        # Sibling scopes reuse a slot: form.bgt declares `dictionary args =
+        # {...}` in several blocks, all at one offset. Declaring a slot only on
+        # its first assignment left every later block writing `args = ...`
+        # with no declaration in scope ("No matching symbol 'args'"). Debug
+        # info records each declaration separately, so each one starts a new
+        # declaration here.
+        redeclare: dict[int, list] = {}
+        if self.fn.has_debug_info:
+            by_slot: dict[int, list] = {}
+            for v in self.fn.variables:
+                if v.name and v.stack_offset > 0:
+                    by_slot.setdefault(v.stack_offset, []).append(v)
+            for off, decls in by_slot.items():
+                if len({v.declared_at for v in decls}) > 1:
+                    for v in decls:
+                        redeclare.setdefault(v.declared_at, []).append(v)
         while self.k < n:
             if self.k in self.skip_indexes:
                 self.k += 1
                 continue
             ins = self.instrs[self.k]
+            for v in redeclare.pop(ins.pos, ()):
+                off = v.stack_offset
+                self.declared.discard(off)
+                # The declaration's own name and type -- touch.nvgt's `bool
+                # in_bounds` and `float dist_sq_start` share a slot in sibling
+                # blocks, and one type per slot assigned a bool to a float.
+                # Not for the bool/int slots merged deliberately above, and
+                # without `const`: the slot is still written more than once.
+                if off not in self.mixed_boolean_slots:
+                    self.var_names[off] = v.name
+                    vt = copy.copy(v.type)
+                    vt.is_readonly = False
+                    self.var_types[off] = vt
             # Linear simulation visits cleanup on a returning then-path before
             # the else-path. That cleanup cannot erase an object still alive
             # on the branch which jumps over it.
@@ -441,6 +590,43 @@ class FuncDecompiler:
         # Ignored non-void calls can be recognized only after later opcodes
         # overwrite their result. Keep their original location in the CFG.
         return sorted(self.events, key=lambda event: event.pos)
+
+    def _is_reference_type(self, dt: DataType) -> bool:
+        """Is this a reference type -- one that is only ever held by handle?
+
+        Every script class is (script objects are ref types). A registered
+        type is when its values were seen coming back through the object
+        register (asreader infers that from STOREOBJ after a call).
+        """
+        ti = dt.obj_type
+        if ti is None or ti.kind in ("enum", "typedef"):
+            return False
+        if any(ti is c or (ti.name == c.name and ti.namespace_ == c.namespace_)
+               for c in self.m.classes):
+            return True
+        return bool(ti.flags & 1 or ti.return_via_object_register)
+
+    def _inherited_property(self, name: str) -> bool:
+        """Is `name` a property this class inherits rather than declares?
+
+        AngelScript accepts an inherited PRIVATE property through `this.` and
+        rejects the bare name ("Illegal access to inherited private property"),
+        which the owned test `this.secret = true;` vs `secret = true;` shows.
+        `this.` is always valid for an inherited member, so it is always used.
+        """
+        cls = self.fn.object_type
+        if cls is None:
+            return False
+        return any(prop == name and flags & 4 for prop, _dt, flags in cls.properties)
+
+    def _is_base_of_current(self, ti) -> bool:
+        cls = self.fn.object_type
+        base = cls.derived_from if cls is not None else None
+        while base is not None:
+            if base is ti or base.format_name() == ti.format_name():
+                return True
+            base = base.derived_from
+        return False
 
     def _short_prop(self, prop_name: str | None, w: int) -> str:
         """Reader-side prop names are 'Class.member'; inside a method the
@@ -477,6 +663,17 @@ class FuncDecompiler:
                                    offset=_s16(ins.w_arg), list_index=ins.dw_arg))
             return
         if name in SKIP_OPS:
+            return
+
+        if name == "SwapPtr":
+            # Exchanges the two pointers on top of the stack (asBC_SwapPtr).
+            # The compiler uses it to put an object back on top as the
+            # receiver after pushing a hidden result address:
+            # `ADDSi val / PSF 7 / SwapPtr / CALLSYS var::opImplConv`. As a
+            # no-op the receiver and the result slot traded places, and the
+            # converted value was lost ("No matching symbol 'tmp7'").
+            if len(self.stack) >= 2:
+                self.stack[-1], self.stack[-2] = self.stack[-2], self.stack[-1]
             return
 
         if name == "ClrVPtr":
@@ -615,18 +812,24 @@ class FuncDecompiler:
         if name in ("CMPi", "CMPi64", "CMPu", "CMPu64", "CMPf", "CMPd"):
             self._flush_pending_call()
             dt = _numeric_type(name)
-            self.cmp_pair = (self._normalize_arg(self._slot_atom(_s16(ins.w_arg)), dt),
-                             self._normalize_arg(self._slot_atom(_s16(ins.w_arg2)), dt))
+            self.cmp_pair = (self._normalize_arg(self._compared(_s16(ins.w_arg)), dt),
+                             self._normalize_arg(self._compared(_s16(ins.w_arg2)), dt))
+            return
+        if name == "CmpPtr" and self._begin_ref_cast(ins):
             return
         if name == "CmpPtr":
             self._flush_pending_call()
-            self.cmp_pair = (self._slot_atom(_s16(ins.w_arg)),
-                             self._slot_atom(_s16(ins.w_arg2)))
+            self.cmp_pair = (self._compared(_s16(ins.w_arg)),
+                             self._compared(_s16(ins.w_arg2)))
+            # Handle identity: `a !is b`, not `a != b`, which asks the type
+            # for an opEquals -- "No matching operator that takes the types
+            # 'music_track@&' and 'music_track@&'".
+            self.cmp_is_handle = True
             return
         if name in ("CMPIi", "CMPIi64", "CMPIu", "CMPIu64", "CMPIf", "CMPIf64"):
             self._flush_pending_call()
             off = _s16(ins.w_arg)
-            self.cmp_pair = (self._slot_atom(off),
+            self.cmp_pair = (self._compared(off),
                              self._typed_constant(_s32(ins.dw_arg), _numeric_type(name)))
             return
         if name in ("EQi", "EQf", "EQu", "EQi64", "EQu64", "EQd", "EQPtr"):
@@ -635,6 +838,9 @@ class FuncDecompiler:
             return
         if name in TEST_OPS:
             op = TEST_OPS[name]
+            if self.cmp_pair is not None and self.cmp_is_handle and op in ("==", "!="):
+                op = "is" if op == "==" else "!is"       # handle identity
+            self.cmp_is_handle = False
             if self.cmp_pair is not None:
                 a, b = self.cmp_pair
                 self.cmp_pair = None
@@ -691,7 +897,7 @@ class FuncDecompiler:
             pname = self._short_prop(ins.prop_name, ins.w_arg)
             if self.fn.object_type is None:
                 pname = f"{self._slot_atom(0).text}.{pname}"
-            elif pname in self.var_names.values():
+            elif pname in self.var_names.values() or self._inherited_property(pname):
                 pname = f"this.{pname}"
             self.value_reg = Atom("prop", pname, 1, is_ptr=True,
                                   data_type=self.property_types.get(ins.prop_name))
@@ -708,7 +914,8 @@ class FuncDecompiler:
                 pname = self._short_prop(ins.prop_name, ins.w_arg)
                 base = self._deref(self.stack[-1]).text
                 text = pname if base in ("this", pname) else f"{base}.{pname}"
-                if base == "this" and pname in self.var_names.values():
+                if base == "this" and (pname in self.var_names.values()
+                                       or self._inherited_property(pname)):
                     text = f"this.{pname}"
                 self.stack[-1] = Atom("prop", text, 1, is_ptr=True,
                                        data_type=self.property_types.get(ins.prop_name))
@@ -819,7 +1026,9 @@ class FuncDecompiler:
             self._refcpy(ins)
             return
         if name == "Cast":
-            t = ins.type_ref.format_name() if ins.type_ref else f"type#{ins.dw_arg}"
+            # Cast's operand is the target handle type (`sword@`); the result
+            # is always a handle, so write it as one.
+            t = (ins.type_ref.format_name() + "@") if ins.type_ref else f"type#{ins.dw_arg}"
             src = self.stack.pop() if self.stack else Atom("raw", "<?>")
             self.value_reg = Atom("call", f"cast<{t}>({self._deref(src).text})")
             return
@@ -855,6 +1064,18 @@ class FuncDecompiler:
 
     # -- helpers ------------------------------------------------------------
 
+    def _compared(self, off: int) -> Atom:
+        """A slot's value as read by a comparison -- which USES it.
+
+        A call result held in a temp and then compared is consumed by the
+        condition. Unmarked, the FREE that ends the temp's life emitted the call
+        again as a statement, so `if (get_sound_default_pack() is null)` came
+        out preceded by a second, standalone `get_sound_default_pack();`.
+        """
+        if off in self.temps:
+            self.consumed_temps.add(off)
+        return self._slot_atom(off)
+
     def _slot_atom(self, off: int) -> Atom:
         """Value of a frame slot: temp alias if bound, else the variable."""
         if off in self.temps:
@@ -888,6 +1109,17 @@ class FuncDecompiler:
                 for name, enum_value in dt.obj_type.enum_values:
                     if enum_value == value:
                         return Atom("const", name)
+            # An integer constant meeting a by-value object type can only be an
+            # enum -- a real object would have been constructed first. Engine
+            # enums (`spec::path_style`, `sound`'s positioning mode) have no
+            # values in the module to name, and a bare `3` does not convert
+            # implicitly: "No matching signatures to 'path::to_string(const
+            # int)'". `Enum(3)` is AngelScript's explicit conversion, checked
+            # against the installed compiler.
+            if (dt.obj_type is not None and not dt.is_object_handle
+                    and dt.obj_type.kind in ("enum", "app")):
+                return Atom("const", f"{dt.obj_type.format_name()}({value})",
+                            constant_bits=bits)
         return Atom("const", str(value), 2 if wide else 1, constant_bits=bits)
 
     def _normalize_arg(self, atom: Atom, dt: DataType) -> Atom:
@@ -896,12 +1128,17 @@ class FuncDecompiler:
                 and any(source.obj_type is cls for cls in self.m.classes) and not source.is_object_handle
                 and not atom.text.startswith("@")):
             return Atom(atom.kind, "@" + atom.text, data_type=dt)
-        if dt.token_type == 67 and atom.ternary:
+        # Each arm of a ternary takes the target type: bool, or an enum whose
+        # constants have names -- `right ? HANDEDNESS_RIGHT : ..._LEFT` is two
+        # ints in bytecode, and ints do not convert to the enum.
+        enum_target = (dt.obj_type is not None and not dt.is_object_handle
+                       and dt.obj_type.kind in ("enum", "app"))
+        if (dt.token_type == 67 or enum_target) and atom.ternary:
             condition, yes, no = atom.ternary
             yes = self._normalize_arg(yes, dt)
             no = self._normalize_arg(no, dt)
             return Atom("call", f"({condition} ? {yes.text} : {no.text})", data_type=dt)
-        if dt.token_type == 67 and source and source.obj_type is None and source.token_type in (70, 77):
+        if dt.token_type == 67 and source and source.obj_type is None and source.token_type in (70, 77, 81, 94):
             return Atom("call", f"({atom.text} != 0)", data_type=dt)
         if atom.kind != "const":
             return atom
@@ -964,7 +1201,13 @@ class FuncDecompiler:
             a = self.stack[idx]
             size = 1 if a.is_ptr or a.kind == "null" else a.dw_size
             if acc <= want < acc + size:
-                if a.is_ptr:
+                # GETOBJREF passes a REFERENCE to the object a variable holds
+                # -- how an `out` argument receives its target -- so the slot's
+                # address is kept for the output-argument handling in _call.
+                # Dereferencing it here turned `dictionary.get(key, tmp)` into
+                # `d.get(key, array<string>())`: "Output argument expression
+                # is not assignable". Arguments are dereferenced later anyway.
+                if a.is_ptr and ins.name != "GETOBJREF":
                     self.stack[idx] = self._deref(a)
                 return
             acc += size
@@ -988,12 +1231,27 @@ class FuncDecompiler:
                 self._stmt(f"{prefix}{dest.text} = {value.text};")
             elif dest.is_ptr and dest.offset is not None:
                 self._emit_assign(dest.offset, value)
+            elif dest.kind == "prop" and dest.data_type is not None                     and dest.data_type.is_object_handle:
+                # `@h.item = b`: PshVPtr h / ADDSi item / REFCPY. The address
+                # is a member, not a frame slot, and without this branch the
+                # assignment vanished -- and the output still compiled.
+                # Only for members DECLARED as handles: a by-value member of
+                # a reference type (music.nvgt's `mixer music_mixer;`) is
+                # also REFCPY'd, by the constructor's generated member
+                # initialisation, which the source never wrote.
+                self._stmt(f"@{dest.text} = {value.text};")
             self.value_reg = value
 
     # -- calls ----------------------------------------------------------------
 
     def _call(self, ins: Instr) -> None:
         self._flush_pending_call()
+        # Whatever the object register held belongs to code before this call.
+        # A call returning an object replaces it; leaving the old value there
+        # let a LOADOBJ from one branch reach the STOREOBJ after a call on the
+        # other: settings::keys() returned the empty-list branch's temporary
+        # from its `data_helper.list_keys()` branch too.
+        self.obj_reg = None
         fr = ins.func_ref
         if fr is not None and fr.name == "$dlgte":
             method = self.stack.pop() if self.stack else Atom("raw", "<?method>")
@@ -1018,6 +1276,8 @@ class FuncDecompiler:
         pop_this = self.stack.pop() if has_this and self.stack else None
         pop_out = self.stack.pop() if has_out and self.stack else None
         args = []
+        out_locals = []
+        handle_any_args = set()
         for index in range(nparams):
             arg = self.stack.pop() if self.stack else Atom("raw", "<?>")
             dt = fr.param_types[index]
@@ -1027,6 +1287,12 @@ class FuncDecompiler:
                 typeid = self.stack.pop() if self.stack else None
                 if typeid is not None and typeid.kind == "typeid" and typeid.data_type:
                     output_type = typeid.data_type
+                    # The hidden TYPEID says what the source passed. A handle
+                    # type id means `@b` -- written as plain `b` the compiler
+                    # passes the OBJECT instead, and `dictionary.set("k", b)`
+                    # stores a copy where the original stored a reference.
+                    if output_type.is_object_handle:
+                        handle_any_args.add(index)
             direction = fr.in_out_flags[index] if index < len(fr.in_out_flags) else 0
             if direction & 2 and arg.is_ptr and arg.offset is not None and arg.offset > 0:
                 off = arg.offset
@@ -1035,6 +1301,14 @@ class FuncDecompiler:
                     local = f"__nvgt_out_{off}_{ins.pos}"
                     output_type = copy.copy(output_type)
                     output_type.is_reference = output_type.is_readonly = False
+                    # A `?&out` receiving a REFERENCE type receives a handle:
+                    # the source declares `ini_section@ tmp` and passes `@tmp`.
+                    # Declared by value it needs a default constructor the
+                    # type does not have ("No default constructor for object
+                    # of type 'ini_section'") and would copy, not hand over.
+                    as_handle = (dt.token_type == 60 and self._is_reference_type(output_type))
+                    if as_handle:
+                        output_type.is_object_handle = True
                     # Scratch slots are reused with different types later;
                     # give an output argument its own source-level lifetime.
                     if direction & 3 == 3 and value and value.kind != "raw":
@@ -1042,8 +1316,10 @@ class FuncDecompiler:
                         self._stmt(f"{output_type.format()} {local} = {value.text};")
                     else:
                         self._stmt(f"{output_type.format()} {local};")
-                    arg = Atom("var", local, data_type=output_type)
-                    self.temps[off] = arg
+                    arg = Atom("var", ("@" if as_handle else "") + local,
+                               data_type=output_type)
+                    out_locals.append(local)
+                    self.temps[off] = Atom("var", local, data_type=output_type)
                 else:
                     arg = self.var_atom(off)
             args.append(arg)
@@ -1052,6 +1328,10 @@ class FuncDecompiler:
         if fr is not None:
             args = [self._normalize_arg(a, fr.param_types[i])
                     for i, a in enumerate(args)]
+        args = [Atom(a.kind, "@" + a.text, a.dw_size, data_type=a.data_type)
+                if i in handle_any_args and a.kind != "null"
+                and not a.text.startswith("@") and a.text != "null" else a
+                for i, a in enumerate(args)]
         # Release NVGT exposes several convenience APIs as long fixed-arity
         # signatures whose trailing parameters default to null.  The compiler
         # materializes bookkeeping slots for those defaults; source does not
@@ -1084,10 +1364,14 @@ class FuncDecompiler:
         # address on the stack for the following ALLOC (dest pushed deepest).
         if meth in CTORS and (ret is None or ret.format() == "void"):
             dst = pop_this
-            typename = fr.object_type.name if fr and fr.object_type else "string"
+            # Qualified: a registered type in a namespace is only reachable by
+            # its full name -- `spec::path(temppath)` rendered as `path(...)`
+            # is "No matching symbol 'path'".
+            typename = fr.object_type.format_name() if fr and fr.object_type else "string"
+            bare = fr.object_type.name if fr and fr.object_type else "string"
             copy_ctor = (len(args) == 1 and fr is not None and
                          fr.param_types[0].obj_type is not None and
-                         fr.param_types[0].obj_type.name == typename)
+                         fr.param_types[0].obj_type.name == bare)
             if dst is not None and dst.kind == "list_elem":
                 value = args[0] if copy_ctor else Atom("call", f"{typename}({', '.join(a.text for a in args)})")
                 self.list_values.setdefault(dst.offset, {})[dst.list_index] = value
@@ -1138,12 +1422,54 @@ class FuncDecompiler:
         if meth in DTORS or meth.startswith("$list") or meth.startswith("$dlgte"):
             return
 
+        # A base-class constructor called on `this` from a derived constructor
+        # is `super(...)` in source. Rendered as a method call it read
+        # `this.settings_helper(parent);`, which does not compile -- and the
+        # compiler then also demands an explicit base constructor call.
+        if (has_this and pop_this is not None and fr is not None
+                and fr.object_type is not None and meth == fr.object_type.name
+                and self._deref(pop_this).text == "this"
+                and self._is_base_of_current(fr.object_type)):
+            self._stmt(f"super({', '.join(a.text for a in args)});")
+            return
+
         # operator methods on the object
         if has_this and pop_this is not None:
             obj = self._deref(pop_this)
+            # `cast<T@>(value)` on a dictionaryValue (or any type with a
+            # `?&out` opCast) compiles to `value.opCast(@tmp)`. Called by name
+            # it does not resolve -- "No matching signatures to
+            # 'dictionaryValue::opCast(stat@&) const'" -- so say what it is.
+            if (meth == "opCast" and len(args) == 1 and args[0].text.startswith("@")
+                    and args[0].data_type is not None):
+                target = args[0].data_type.format().rstrip("@")
+                self._stmt(f"{args[0].text} = cast<{target}@>({obj.text});")
+                return
             result: Atom | None = None          # value produced, if any
+            # Assignment operators return a reference to their receiver, and
+            # code uses it: `var@ opAssign(const string&in v) { return val =
+            # v; }` compiles to the call, then PshRPtr of its result. Leaving
+            # the register empty rendered `return <?reg>;`.
+            receiver = Atom("prop" if obj.kind == "prop" else "var", obj.text, 1,
+                            is_ptr=True, offset=pop_this.offset if pop_this.is_ptr else None,
+                            data_type=obj.data_type)
             if meth in ASSIGN_OPS and args:
                 self._stmt(f"{obj.text} {ASSIGN_OPS[meth]} {args[0].text};")
+                self.value_reg = receiver
+                # A result returned BY VALUE goes through the hidden out slot
+                # (`var::opAddAssign` returns a string). The value of `x += y`
+                # is x's new value, so the slot holds x -- left unset, `return
+                # var(val += value)` came out as `var(tmp1)`.
+                if (has_out and pop_out is not None and pop_out.is_ptr
+                        and pop_out.offset is not None):
+                    # ...converted to what the operator returns: `var::
+                    # opAddAssign` returns a string, and `var(val)` with val a
+                    # var is ambiguous where `var(string(val))` is not.
+                    rtype = ret.format().removeprefix("const ").rstrip("&") if ret else ""
+                    same = obj.data_type is not None and \
+                        obj.data_type.format().removeprefix("const ").rstrip("@&") == rtype
+                    text = obj.text if same or not rtype else f"{rtype}({obj.text})"
+                    self._bind(pop_out.offset, Atom("call", text, data_type=ret))
                 return
             if meth == "opAssign" and args:
                 if pop_this.kind == "list_elem":
@@ -1152,6 +1478,7 @@ class FuncDecompiler:
                     self._bind(pop_this.offset, args[0])
                 else:
                     self._stmt(f"{obj.text} = {args[0].text};")
+                self.value_reg = receiver
                 return
             if meth == "opAdd" and len(args) == 1:
                 result = Atom("call", f"({obj.text} + {args[0].text})")
@@ -1175,6 +1502,14 @@ class FuncDecompiler:
                 result = Atom("call", f"(!{obj.text})")
             elif meth == "opImplConv":
                 result = obj
+            elif meth == "opConv" and not args and ret is not None:
+                # An explicit conversion. Called by name it is ambiguous when
+                # the type converts to several things -- dictionaryValue has
+                # one opConv per target, so `args["key"].opConv()` is
+                # "Multiple matching signatures". The return type is the
+                # conversion the source wrote: `int(args["key"])`.
+                target = ret.format().removeprefix("const ").rstrip("&")
+                result = Atom("call", f"{target}({obj.text})")
             elif meth == "opCmp" and len(args) == 1:
                 self.cmp_pair = (obj, args[0])
                 calltxt = f"{obj.text}.opCmp({args[0].text})"
@@ -1195,6 +1530,15 @@ class FuncDecompiler:
                 return
             # plain method call
             calltxt = f"{obj.text}.{meth}({', '.join(a.text for a in args)})"
+            # From a const method, a non-const method is callable by its bare
+            # name but not through `this.` (whose type is const there) --
+            # touch.nvgt's `get_available() const` calls `is_available()`, and
+            # the explicit form is "No matching signatures to
+            # 'touch_gesture_manager::is_available() const'". Write it the way
+            # the compiler accepted it.
+            if (obj.text == "this" and self.fn.flags_byte & 1
+                    and fr is not None and not fr.flags_byte & 1):
+                calltxt = f"{meth}({', '.join(a.text for a in args)})"
         else:
             qualified = (fr.namespace_ + "::" if fr and fr.namespace_ else "") + base
             calltxt = f"{qualified}({', '.join(a.text for a in args)})"
@@ -1207,6 +1551,8 @@ class FuncDecompiler:
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)
             self.pending_value_call = calltxt
             self.pending_value_call_pos = self._pos()
+            if out_locals:
+                self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         else:
             self._stmt(f"{calltxt};")
 
@@ -1362,6 +1708,9 @@ class FuncDecompiler:
     def _taken_condition(self, ins: Instr) -> str:
         """Condition under which a jump instruction transfers control."""
         op = JUMP_OPS[ins.name]
+        if self.cmp_pair is not None and self.cmp_is_handle and op in ("==", "!="):
+            op = "is" if op == "==" else "!is"
+        self.cmp_is_handle = False
         if self.cmp_pair is not None:
             a, b = self.cmp_pair
             self.cmp_pair = None
@@ -1387,6 +1736,48 @@ class FuncDecompiler:
     def _emit_global_write_special(self) -> None:  # pragma: no cover
         pass
 
+    def _begin_ref_cast(self, ins: Instr) -> bool:
+        """Recognise the compiler's null-safe reference cast, `cast<T@>(x)`.
+
+            CmpPtr x, null / JZ L          x null?  then the result is null
+            PshVPtr x / CALL* opCast       else ask x to convert itself
+            STOREOBJ d / JMP J
+            L: ClrVPtr d
+            J: ...                          d is the cast result
+
+        Walked linearly the null arm is simulated last and wins, so
+        `cast<pack_file@>(sound_default_pack).pack_name` read
+        `null.get_pack_name()`. Every instruction of the shape is checked; any
+        deviation leaves it to the general branch handling.
+        """
+        k, code = self.k, self.instrs
+        if k + 6 >= len(code):
+            return False
+        x, null_slot = _s16(ins.w_arg), _s16(ins.w_arg2)
+        jz, push, call, store, jmp, clear = code[k + 1:k + 7]
+        held = self.temps.get(null_slot)      # ClrVPtr binds a `null` constant
+        null_known = held is not None and (held.kind == "null" or held.text == "null")
+        if not (null_known and jz.name == "JZ" and push.name == "PshVPtr"
+                and _s16(push.w_arg) == x
+                and call.name in ("CALL", "CALLSYS", "CALLINTF")
+                and call.func_ref is not None
+                and call.func_ref.name in ("opCast", "opImplCast")
+                and store.name == "STOREOBJ" and jmp.name == "JMP"
+                and clear.name == "ClrVPtr" and _s16(clear.w_arg) == _s16(store.w_arg)
+                and _jump_target(jz) == clear.pos
+                and k + 7 < len(code) and _jump_target(jmp) == code[k + 7].pos):
+            return False
+        ret = call.func_ref.return_type
+        target = ret.format().removeprefix("const ").rstrip("&")
+        if not target.endswith("@"):
+            target += "@"
+        source = self._compared(x)            # the cast consumes x
+        self._flush_pending_call()
+        self._bind(_s16(store.w_arg),
+                   Atom("call", f"cast<{target}>({source.text})", data_type=ret))
+        self.skip_indexes.update(range(k + 1, k + 7))
+        return True
+
     def _begin_bool_merge(self, ins: Instr) -> bool:
         """Recognize the compiler's short-circuit A&&B / A||B value merge."""
         if ins.name not in JUMP_OPS or self.k + 2 >= len(self.instrs):
@@ -1403,6 +1794,28 @@ class FuncDecompiler:
             return False
         merge_ins = self.instrs[merge_idx]
         result_dest = _s16(setv.w_arg)
+        # `&&` / `||` produce a bool. The same shape with a non-bool
+        # destination is a ternary over constants -- basic_character_
+        # controller's `right ? HANDEDNESS_RIGHT : HANDEDNESS_LEFT` (1 and 0)
+        # read as `is_right_handed || 0`, which does not convert to the enum.
+        # Only an ENUM or object destination rules it out: the compiler reuses
+        # int temporaries for bools, so an int-typed slot is still an `&&`
+        # (form.bgt's `@cb != null && cb(f, ..., {...}) == 1`).
+        dest_type = self.var_types.get(result_dest)
+        if dest_type is not None and dest_type.obj_type is not None:
+            return False
+        # ...and neither does type alone: basic_character_controller's
+        # `right ? RIGHT : LEFT` has an int temporary too. Structure settles
+        # it -- in `a || b` the other arm COMPUTES b, while a ternary over
+        # constants has a single constant store there. (`x || false` is not
+        # something anyone writes.)
+        other_start = self.pos_of.get(_jump_target(ins))
+        if other_start is not None:
+            other = [op for op in self.instrs[other_start:merge_idx]
+                     if op.name != "SUSPEND"]
+            if (len(other) == 1 and other[0].name in ("SetV1", "SetV2", "SetV4")
+                    and _s16(other[0].w_arg) == result_dest):
+                return False
         finish_pos = merge_pos
         if merge_ins.name == "CpyVtoV4" and _s16(merge_ins.w_arg2) == result_dest:
             if merge_idx + 1 >= len(self.instrs):
@@ -1936,7 +2349,11 @@ class ModuleDecompiler:
 
         for e in m.enums:
             start = len(self.lines)
-            self.emit(f"enum {e.name} {{")
+            # `shared` is part of the declaration: shared code may only use
+            # shared types, so dropping it made every shared class using this
+            # enum fail ("Shared code cannot use non-shared type").
+            modifiers = ("external " if e.is_external else "") + ("shared " if e.is_shared else "")
+            self.emit(f"{modifiers}enum {e.name} {{")
             for n, v in e.enum_values:
                 self.emit(f"    {n} = {v},")
             self.emit("}")
@@ -2018,14 +2435,25 @@ class ModuleDecompiler:
         for f in c.methods:
             if "$" in f.name:
                 continue
-            # asFUNC_VIRTUAL stubs carry no bytecode; the VFT copy of the
-            # same method holds the real body (and param names).
+            # A class's method list is ALL its virtual methods, inherited ones
+            # included, as asFUNC_VIRTUAL stubs owned by whichever class first
+            # declared them; the bodies live in the VFT, each owned by the
+            # class that implements it. Pair them by name, parameters and
+            # const-ness -- NOT by owner-qualified signature, which never
+            # matches an override (`ini_settings_helper::raw_dump` vs the stub
+            # `settings_helper::raw_dump`): the override's body was lost to
+            # `// (no code)` while inherited bodies were copied into the
+            # derived class, touching the base's private members.
             body_f = f
             if not body_f.bytecode:
-                for vf in c.vft:
-                    if vf.signature(False) == f.signature(False) and vf.bytecode:
-                        body_f = vf
-                        break
+                impl = next((vf for vf in c.vft if vf.bytecode
+                             and _method_key(vf) == _method_key(f)), None)
+                if impl is not None:
+                    body_f = impl
+            owner = body_f.object_type
+            if (not c.is_interface and owner is not None and owner is not c
+                    and owner.format_name() != c.format_name()):
+                continue            # inherited, not overridden: the base declares it
             key = body_f.signature(False)
             if key in seen_methods:
                 continue
@@ -2073,6 +2501,7 @@ class ModuleDecompiler:
             # Keep one declaration in the function and initialization at its
             # original position, rather than declaring in just the first arm.
             declarations = []
+            hoisted_names: set[str] = set()
             scalar_names = {fd.name_of(off) for off, dt in fd.var_types.items()
                             if off > 0 and fd.is_named(off) and
                             (dt.obj_type is None or dt.obj_type.kind == "enum"
@@ -2085,7 +2514,18 @@ class ModuleDecompiler:
                     continue
                 name = text.split(" ", 1)[0].rstrip(";")
                 if name in scalar_names:
-                    declarations.append("    " * indent + f"{typename} {name};")
+                    # One hoisted declaration per name: a slot declared in
+                    # several sibling scopes shows up here once per scope.
+                    # Hoisted WITHOUT its initialiser, so a `const` local
+                    # would then be assigned: "Expression is not an l-value"
+                    # (basic_character_controller's `const float idx = ...`).
+                    decl = "    " * indent + f"{typename.removeprefix('const ')} {name};"
+                    # One per NAME, not per text: two loops can each declare
+                    # `i` -- one `uint`, one `int` -- and both hoisted is
+                    # "'i' is already declared".
+                    if name not in hoisted_names:
+                        hoisted_names.add(name)
+                        declarations.append(decl)
                     off = next(off for off in fd.var_names if fd.name_of(off) == name)
                     prefix = "@" if fd.var_types.get(off) and fd.var_types[off].is_object_handle and text != name + ";" else ""
                     event.data = ("", "" if text == name + ";" else prefix + text)

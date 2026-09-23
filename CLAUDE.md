@@ -101,6 +101,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
 | `engine.py` | `bgt identify`: BGT or NVGT, decided by each engine's own verifying layer |
 | `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
+| `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it -- 50 / 50 |
 
 `docs/ghidra_workflow.md` covers how to find `asCReader::ReadInner`, `asBCInfo[]`,
 the KDF and `pack::create` in a binary, and how to verify a transcription.
@@ -509,8 +510,12 @@ literals as a multiset. On Psycho Strike, built with the same library version as
 BGT 1.3's include folder, **153 of 155** functions have the source's exact call
 sequence (107 before the fixes it drove) and **155 of 155** its exact literals.
 Of the two left, `dynamic_menu::run_extended` is the game's own library edit (it
-checks `alts_pressed` where 1.3 checks joystick buttons); `control::focus`
-differs by one `length()` call's position and is not yet explained. Manamon 2
+checks `alts_pressed` where 1.3 checks joystick buttons). `control::focus`
+differs by one `length()` call's position, and the bytecode settles it in the
+lifter's favour: `input_box_speak(mask) + " times " + text.length()` compiles
+to `.opAdd` calls whose ARGUMENT is evaluated before the receiver is pushed, so
+`text.length()` genuinely runs first. The comparison's "order by closing
+parenthesis" is the approximation there, not the lift. Manamon 2
 and SBYW ship modified library versions, so they score lower for reasons that
 are not the lifter's.
 
@@ -965,6 +970,12 @@ parsed unchanged but used opcodes none of the others did. Run `bgt validate`
 before assuming a new title matches, and check the lifter's passthrough count
 as well as the stages.
 
+**The NVGT library corpus is checked for compiling, not meaning.** All 50
+library builds recompile. But only `test_roundtrip_behavior`'s fixture is
+*run* and compared, and three NVGT decompiler bugs compiled cleanly while
+computing something else. A new construct belongs in that fixture, not only in
+the corpus.
+
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified
 profile are reported as unsupported (see `docs/nvgt.md`). That is deliberate. A
@@ -976,6 +987,10 @@ profile is added only after it has been verified against real samples.
   game's own `asCReader` / `pack::create` in Ghidra -- or, for NVGT, its published
   source. `bgt.exe` itself is worth opening: it settled the template-stub question
   (`bgt ghidra decompile "<BGT>/bgt.exe" --string factstub`).
+- **Compiling is not meaning; run it.** Output that recompiles is valid, not
+  equivalent. A dropped `@h.item = b`, an out argument copied before the call
+  that fills it, and a `?&in` handle passed as a copy all compiled cleanly.
+  Running the result and comparing it with the original caught each one.
 - **Make each layer self-verifying.** Exact declared lengths, exact EOF landings,
   identifier-shaped names. A parser that "mostly works" is a parser that is silently
   desynchronised.

@@ -14,8 +14,14 @@ is not owned source.
 |---|---|
 | owned compile / decompile / recompile / run round trips (`test_behavior`, much of `test_regressions`, `test_project`, `test_source_evidence`, `test_signatures`) | build `fixtures/build/bcdump.exe` with `extra/nvgt/build_bcdump.bat` (needs `NVGT_SOURCE` pointing at an NVGT checkout with its AngelScript SDK built, and MinGW `g++`) |
 | compiler-backed library reuse, project compilation | `NVGT_COMPILER` = path to `nvgt.exe`, `NVGT_INCLUDE` = its `include/` folder |
+| behavioural round trip: decompiled `fixtures/decompiler_patterns.nvgt`, debug and stripped, must RUN to the same result as the original (`test_roundtrip_behavior`) | `NVGT_COMPILER` = path to `nvgt.exe` |
 | game-specific regressions | `NVGT_BOPIT_EXE`, `NVGT_BOPIT_SOURCE`, `NVGT_NUMBER_EXE`, `NVGT_LIBRARY_PROBE` |
 | key-schedule scan across chunk boundaries | NumPy installed (`pip install -e .[scan]`) |
 
 `conftest.py` puts `tools/nvgt` on `sys.path`, so these tests import the modules
 flat (`import extract`), exactly as they did in the upstream project.
+
+The whole NVGT standard library is checked by a command rather than a test,
+because it takes minutes: `bgt nvgt libcheck` decompiles every
+`include/*.nvgt` in debug and stripped form and recompiles the result (see
+`docs/nvgt.md`).

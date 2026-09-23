@@ -1,0 +1,86 @@
+// Written for the toolkit's tests. Every construct below once decompiled to
+// source that nvgt.exe refused to compile, or -- worse -- to source that
+// compiled and computed something else. Run it and it writes its own module
+// out as debug.bin and strip.bin, and its result to result.txt, in the working
+// directory. A decompiled copy must write the same result.
+shared enum shade { shade_dark, shade_mid, shade_light }
+
+namespace inventory {
+	class slot {
+		string value;
+		slot(const string&in v) { value = v; }
+	}
+}
+
+class base_item {
+	int weight;
+	private int secret;
+	base_item(int w) { weight = w; secret = w * 2; }
+	int get_secret() const { return secret; }
+	void touch() { weight += 1; }
+	int describe() const { return weight; }
+}
+
+class sword : base_item {
+	shade tint;
+	sword(int w, shade s) { super(w); tint = s; }     // base constructor -> super()
+	int heavier() { return weight + 5; }              // inherited property
+	void polish() { touch(); }                        // inherited, not overridden
+	int opConv() const { return weight; }
+}
+
+class holder {
+	base_item@ item;
+	holder() {}
+}
+
+int paint(shade s) { return int(s); }
+
+float distance_squared(float x, float y) { return x * x + y * y; }
+bool in_box(float x, float y) { return x >= 0 && y >= 0 && x < 10 && y < 10; }
+
+// Stripped builds reuse one slot for a bool and a float in disjoint scopes.
+float mixed_slots(float x, float y) {
+	float total = 0;
+	if (x > 1) {
+		bool inside = in_box(x, y);
+		if (inside) total += 1;
+	} else {
+		float d = distance_squared(x, y);
+		if (d > 4) total += d;
+	}
+	return total;
+}
+
+int handles() {
+	sword s(3, shade_light);
+	base_item@ b = s;
+	holder h;
+	@h.item = b;
+	if (h.item is null) return -1;
+	if (h.item !is b) return -2;
+	sword@ back = cast<sword@>(h.item);
+	if (back is null) return -3;
+	dictionary d;
+	d.set("item", @b);                                // a handle: not a copy
+	b.touch();                                        // visible through `fetched`
+	base_item@ fetched;
+	if (!d.get("item", @fetched)) return -4;
+	@b = null;
+	int conv = int(s);
+	return conv * 1000 + back.heavier() * 100 + fetched.weight * 10 + fetched.get_secret();
+}
+
+shade choose(bool bright) { return bright ? shade_light : shade_dark; }
+
+void main() {
+	inventory::slot p("x");
+	sword s(1, shade_mid);
+	s.polish();
+	int total = paint(shade_mid) + paint(choose(true)) + handles();
+	total += int(mixed_slots(2, 3) + mixed_slots(0, 5));
+	total += s.describe() + p.value.length();
+	file_put_contents("result.txt", "" + total);
+	file_put_contents("debug.bin", script_get_module("nvgt_game", 0).get_bytecode(false));
+	file_put_contents("strip.bin", script_get_module("nvgt_game", 0).get_bytecode(true));
+}
