@@ -1014,11 +1014,19 @@ Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
 **Stack balance is complete on the four titles** -- 14,300 / 14,300 bodies --
-so it no longer points at anything. The open work is readability: temporaries
-the compiler materialises (`v5 = string(""); v6 = string("&");
-string_replace(v7, v6, v5, v1)`) could fold back into their single use, and
-`bool` tests compiled as `!v1 != !v2` could fold to the comparison they are.
-`bgt libcheck` is the check to run for either.
+so it no longer points at anything. The open work is readability. One half is
+done: `as_lift.fold_temporaries` folds a compiler-materialised temporary back
+into its single use, so `v5 = string(""); v6 = string("&"); v7 = string(a0);
+v8 = string_replace(v7, v6, v5, v1)` reads `string_replace(string(a0), "&", "",
+v1)`, and `string("x")` collapses to `"x"`. It moves **only pure right-hand
+sides** (string and numeric literals, a `string(param)` copy), confined to a
+basic block and blocked by any reassignment of the temporary or what it reads,
+so a call is never reordered and no side effect moves. That makes it invisible
+to `bgt libcheck`: on Psycho Strike the call sequences (153 / 155) and literal
+multisets (155 / 155) are **identical** with folding on or off, per function,
+while 8.8% of body lines disappear. All 14,300 bodies fold without error. The
+other half is not done: `bool` tests compiled as `!v1 != !v2` could fold to the
+comparison they are. `bgt libcheck` is the check to run for either.
 
 **0.88% residual gotos.** Irreducible flow, switch tails and multi-entry loops
 stay labelled `goto` rather than being forced into a shape they do not have.

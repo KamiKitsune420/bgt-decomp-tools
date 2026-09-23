@@ -1385,6 +1385,82 @@ def test_negate_folds_comparisons_rather_than_stacking_bangs():
     assert as_lift._negate("f()") == "!(f())"
 
 
+def _fold(*lines):
+    return [l.strip() for l in as_lift.fold_temporaries(["    " + l for l in lines])]
+
+
+def test_fold_pulls_a_literal_temporary_into_its_single_use():
+    # The compiler materialises each string argument in its own temporary; the
+    # source wrote them inline. A pure single-use temp folds into its use.
+    assert _fold('v5 = string("");', 'v6 = string("&");', 'v7 = string(a0);',
+                 'v8 = string_replace(v7, v6, v5, v1);') \
+        == ['v8 = string_replace(string(a0), "&", "", v1);']
+    assert _fold('v1 = -1;', 'return v1;') == ['return -1;']
+    assert _fold('v2 = 1;', 'this.c_form[v1].type = v2;') \
+        == ['this.c_form[v1].type = 1;']
+
+
+def test_fold_leaves_a_by_reference_use_alone():
+    # `&v2` passes the variable's storage; it must keep a home, so the temp
+    # stays. (prepare_audio's `get(&v2)` depends on this.)
+    assert _fold('v2 = string("x");', 'v3 = get(&v2);') \
+        == ['v2 = "x";', 'v3 = get(&v2);']
+
+
+def test_fold_needs_exactly_one_use():
+    # used twice: folding would duplicate the value and read oddly
+    assert _fold('v1 = 5;', 'a = v1;', 'b = v1;') == ['v1 = 5;', 'a = v1;', 'b = v1;']
+    # used zero times: a dead literal store is left as-is (not this pass's job)
+    assert _fold('v1 = 5;', 'a = b;') == ['v1 = 5;', 'a = b;']
+
+
+def test_fold_does_not_cross_a_control_flow_boundary():
+    # the use is in a different basic block; the value might reach it on more
+    # than one path, so the temp is not folded across the branch
+    assert _fold('v1 = 5;', 'if (c) {', 'x = v1;', '}') \
+        == ['v1 = 5;', 'if (c) {', 'x = v1;', '}']
+
+
+def test_fold_stops_at_a_reassignment_of_the_temp_or_its_source():
+    # The first v1 is dead (overwritten before any read), so it is left alone;
+    # the live v1 = 9 is what folds into the read. Crucially, x is not 5.
+    assert _fold('v1 = 5;', 'v1 = 9;', 'x = v1;') == ['v1 = 5;', 'x = 9;']
+    # string(a0) reads a0; if a0 changes first, the folded read would differ
+    assert _fold('v1 = string(a0);', 'a0 = other;', 'x = f(v1);') \
+        == ['v1 = string(a0);', 'a0 = other;', 'x = f(v1);']
+
+
+def test_fold_only_moves_pure_right_hand_sides():
+    # a call result is not pure: moving it past the reads between could change
+    # what it observes, so it is left in place
+    assert _fold('v1 = this.count();', 'x = a;', 'y = v1;') \
+        == ['v1 = this.count();', 'x = a;', 'y = v1;']
+
+
+def test_fold_ignores_the_variable_name_inside_a_string_literal():
+    # "v1" appears inside a literal; it is not a use of the variable v1, so the
+    # real single use (n = v1) still folds and the literal is untouched.
+    assert _fold('v1 = 5;', 'log("v1 raised");', 'n = v1;') \
+        == ['log("v1 raised");', 'n = 5;']
+
+
+def test_fold_simplifies_a_redundant_string_constructor():
+    assert _fold('this.title = string("Menu");') == ['this.title = "Menu";']
+    # v10 is a whole word: folding v1 must not touch it
+    assert _fold('v1 = 3;', 'f(v1, v10);') == ['f(3, v10);']
+
+
+def test_fold_pulls_several_temporaries_into_one_call():
+    assert _fold('v1 = "a";', 'v2 = "b";', 'f(v1, v2);') == ['f("a", "b");']
+
+
+def test_fold_does_not_move_a_call_result_across_statements():
+    # A call result is not pure: reordering it past other statements could
+    # change evaluation order, so it stays even for a single use.
+    assert _fold('v2 = f(x);', 'y = k();', 'z = g(v2);') \
+        == ['v2 = f(x);', 'y = k();', 'z = g(v2);']
+
+
 def test_callers_of_finds_the_body_that_calls_an_engine_function():
     """The function you want to read is often not the one you can name. Engine
     functions have no body of their own -- what names the key is whatever CALLS

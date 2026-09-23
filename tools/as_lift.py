@@ -156,6 +156,7 @@ currently **zero across all 1,111,490 instructions** in the four titles.
 
 import argparse
 import json
+import re
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1374,14 +1375,132 @@ def structure(lifted):
     lifted["block_count"] = len(blocks)
 
     if not em.labels_used:
-        return em.out
+        return fold_temporaries(em.out)
 
     # Place the labels that were actually referenced, at their block's first
     # emitted statement. A label nobody jumps to is noise, so only these appear.
     out = []
     for line in em.out:
         out.append(line)
-    return _place_labels(out, em, blocks)
+    return fold_temporaries(_place_labels(out, em, blocks))
+
+
+# --------------------------------------------------------------------------
+# readability: fold compiler-materialised temporaries
+# --------------------------------------------------------------------------
+
+_ASSIGN = re.compile(r"^(\s*)(v\d+) = (.+);$")
+_STMT_KEYWORD = re.compile(r"^(if|while|do|for|switch|case|goto|break|continue|else)\b")
+_STRING_CTOR = re.compile(r'string\("((?:\\.|[^"\\])*)"\)')
+# A right-hand side safe to substitute for its variable at another point: it
+# reads nothing that a statement in between could change, so moving it (and, for
+# a single use, deleting the original) cannot alter behaviour.
+_PURE_RHS = (
+    re.compile(r'^"(?:\\.|[^"\\])*"$'),             # a string literal
+    re.compile(r'^string\("(?:\\.|[^"\\])*"\)$'),   # string("...") -- a literal
+    re.compile(r'^-?\d+$'),                         # int
+    re.compile(r'^-?\d+\.\d+$'),                    # float
+    re.compile(r'^-?0x[0-9a-fA-F]+$'),              # hex
+    re.compile(r'^string\((a\d+)\)$'),              # a copy of a parameter
+)
+
+
+def _is_plain_statement(line: str) -> bool:
+    """A straight-line statement -- no block, label or control-flow keyword.
+
+    `return x;` counts: it is a valid place to fold a value into. `break;`,
+    `goto Bn;` and the loop/branch heads do not, so a run of these lines is a
+    basic block within which local copy-propagation is sound.
+    """
+    s = line.strip()
+    if not s.endswith(";") or "{" in s or "}" in s:
+        return False
+    return not _STMT_KEYWORD.match(s)
+
+
+def _pure_rhs_reads(rhs: str) -> Optional[str]:
+    """The parameter a pure RHS reads (so a later change to it blocks the fold),
+    or "" for one that reads nothing. None if the RHS is not pure."""
+    for pattern in _PURE_RHS:
+        m = pattern.match(rhs)
+        if m:
+            return m.group(1) if m.groups() else ""
+    return None
+
+
+def _lhs_var(line: str) -> Optional[str]:
+    """The variable or parameter a statement assigns to as a whole (`vN = ...`,
+    `@vN = ...`, `aN = ...`, `vN++`, `vN += ...`), or None. A parameter counts
+    because a pure RHS may read one (`string(a0)`), and that read must block if
+    the parameter is then changed. `this.c_form[vN].x = y` does not assign vN."""
+    m = re.match(r"^\s*@?((?:v|a)\d+)\s*(?:=|\+\+|--|\+=|-=|\*=|/=|%=|&=|\|=|\^=)", line)
+    return m.group(1) if m else None
+
+
+def _mask_strings(line: str) -> str:
+    """The line with every string literal's body blanked, so a variable name is
+    never matched inside a literal (`"\\0\\0able"` must not look like a use)."""
+    return re.sub(r'"(?:\\.|[^"\\])*"', lambda m: '"' + " " * (len(m.group(0)) - 2) + '"',
+                  line)
+
+
+def _fold_segment(seg: List[str]) -> List[str]:
+    """Local copy-propagation of pure, single-use temporaries in one block."""
+    changed = True
+    while changed:
+        changed = False
+        for k, line in enumerate(seg):
+            m = _ASSIGN.match(line)
+            if not m:
+                continue
+            var, rhs = m.group(2), m.group(3)
+            reads = _pure_rhs_reads(rhs)
+            if reads is None:
+                continue
+            word = re.compile(r"(?<![\w.@])%s\b" % re.escape(var))
+            uses = []
+            for j in range(k + 1, len(seg)):
+                if _lhs_var(seg[j]) == var or (reads and _lhs_var(seg[j]) == reads):
+                    break                   # the temp, or what it reads, changes
+                for hit in word.finditer(_mask_strings(seg[j])):
+                    # `&v` (by reference) must keep its own storage; skip it.
+                    uses.append((j, hit.start(), seg[j][hit.start() - 1:hit.start()] == "&"))
+            byref = any(ref for _, _, ref in uses)
+            if len(uses) != 1 or byref:
+                continue
+            j, pos, _ = uses[0]
+            seg[j] = seg[j][:pos] + rhs + seg[j][pos + len(var):]
+            del seg[k]
+            changed = True
+            break
+    return seg
+
+
+def fold_temporaries(lines: List[str]) -> List[str]:
+    """Fold single-use literal/constant temporaries into their use, and drop the
+    redundant `string(...)` wrapper around a literal.
+
+    Only pure right-hand sides move, so the call sequence and the string-literal
+    multiset a reader (and `bgt libcheck`) sees are unchanged -- a compiler
+    temporary vanishes, nothing else. Folding is confined to a basic block: a
+    maximal run of plain statements, so a value never crosses a branch or label.
+    """
+    out: List[str] = []
+    segment: List[str] = []
+
+    def flush():
+        out.extend(_fold_segment(segment))
+        segment.clear()
+
+    for line in lines:
+        if _is_plain_statement(line):
+            segment.append(line)
+        else:
+            flush()
+            out.append(line)
+    flush()
+    # `string("x")` is just `"x"`; the explicit constructor is compiler noise.
+    return [_STRING_CTOR.sub(r'"\1"', line) for line in out]
 
 
 def _place_labels(lines, em, blocks):
