@@ -167,6 +167,19 @@ class ShortCircuitTests(_BehaviourFixture):
         self.assertRegex(source, r"\(arg0 > 0\) \|\| \(arg1 > 0\)")  # in_if
 
 
+class BooleanComparisonTests(_BehaviourFixture):
+    FIXTURE = "boolean_comparison.nvgt"
+
+    def test_stripped_build_simplifies_comparisons_with_bool_literals(self):
+        project = self._decompiled("strip")
+        source = "\n".join(p.read_text(encoding="utf-8")
+                           for p in project.rglob("*.nvgt"))
+        # no `== true` / `== false` survives; the value or its negation is used
+        self.assertNotRegex(source, r"[=!]= (?:true|false)")
+        self.assertRegex(source, r"if \(!\(getf\(arg0\)\)\)")   # == false -> !x
+        self.assertRegex(source, r"if \(getf\(arg0\)\)")        # == true  -> x
+
+
 class ReusedLoopVariableTests(_BehaviourFixture):
     FIXTURE = "reused_loop_variable.nvgt"
 

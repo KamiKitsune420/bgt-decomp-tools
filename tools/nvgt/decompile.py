@@ -1728,6 +1728,15 @@ class FuncDecompiler:
         if self.cmp_pair is not None:
             a, b = self.cmp_pair
             self.cmp_pair = None
+            # A comparison against a bool literal is just the value or its
+            # negation: `x == true` -> x, `x == false` -> !x, `x != true` -> !x,
+            # `x != false` -> x. _negate_cond also cancels a double negation, so
+            # `!(getf()) == false` collapses to `getf()`.
+            if op in ("==", "!="):
+                for lit, other in ((b.text, a.text), (a.text, b.text)):
+                    if lit in ("true", "false"):
+                        keep = (op == "==") == (lit == "true")
+                        return other if keep else _negate_cond(other)
             cond = f"({a.text} {op} {b.text})"
             # drop the wrapping parens the binop simulation added
             if a.text.startswith("(") and a.text.endswith(")"):
