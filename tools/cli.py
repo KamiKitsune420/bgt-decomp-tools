@@ -17,6 +17,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt repack game.exe modified.bin -o patched.exe
     bgt validate game.exe patched.exe
     bgt libcheck work/game_bytecode.bin game.exe   lifted code vs BGT's own library source
+    bgt files work/game_bytecode.bin game.exe      which source files it was built from
     bgt ghidra status                      is Ghidra + a JDK 21+ available?
     bgt ghidra decompile game.exe --string _builtin_function_
 
@@ -45,7 +46,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_crack, bgt_ghidra, bgt_libcheck, bgt_pack, bgt_repack,
-                   bgt_unpack, bgt_validate, bgtlib, engine)
+                   bgt_unpack, bgt_validate, bgtlib, engine, script_files)
 except ImportError:       # run directly from a checkout
     import as_disasm
     import as_lift
@@ -61,6 +62,7 @@ except ImportError:       # run directly from a checkout
     import bgt_validate
     import bgtlib
     import engine
+    import script_files
 
 
 def _fail(message: str) -> int:
@@ -257,6 +259,11 @@ def cmd_crack(args: argparse.Namespace) -> int:
 def cmd_ghidra(args: argparse.Namespace) -> int:
     """Everything after `bgt ghidra` is handled by bgt_ghidra's own parser."""
     return bgt_ghidra.main(args.rest)
+
+
+def cmd_files(args: argparse.Namespace) -> int:
+    """Everything after `bgt files` is handled by script_files' own parser."""
+    return _run(script_files.main, args.rest, prog="bgt files")
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -527,6 +534,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_libcheck)
 
+    p = sub.add_parser("files",
+                       help="which source files a module was built from (BGT or NVGT)")
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="module [exe] [--nvgt] [--include DIR] [--json FILE]")
+    p.set_defaults(func=cmd_files)
+
     p = sub.add_parser("validate", help="run the pipeline over several titles")
     p.add_argument("exe", nargs="+")
     p.add_argument("--deep", action="store_true")
@@ -539,7 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Command groups whose own parsers own everything after the group name. argparse's
 # REMAINDER cannot capture a leading option, so `bgt nvgt --help` would be
 # rejected as an unknown top-level flag; these are dispatched before parsing.
-_PASSTHROUGH = {"nvgt": cmd_nvgt, "ghidra": cmd_ghidra}
+_PASSTHROUGH = {"nvgt": cmd_nvgt, "ghidra": cmd_ghidra, "files": cmd_files}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -100,6 +100,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_kdf.py` | BGT's password → AES-key derivation for encrypted asset packs |
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
 | `engine.py` | `bgt identify`: BGT or NVGT, decided by each engine's own verifying layer |
+| `script_files.py` | `bgt files`: which source files a stripped module was built from -- library files by name, the game's own as segments |
 | `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
 | `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it -- 50 / 50 |
 
@@ -745,6 +746,70 @@ Unmodelled opcodes are emitted as `/* OPCODE ... */` and counted rather than
 dropped — a lifter that silently omits what it cannot model reads better and means
 less, so the passthrough count is the number that says how much is really
 recovered.
+
+# Source file names
+
+**The game's own file names are not recoverable, and nothing will change that.**
+They live only in AngelScript's debug information -- each function's script
+section -- and BGT always strips it. NVGT strips it too in release builds
+(`SaveByteCode(stream, !g_debug)`), so no stripped build stores them, hidden or
+otherwise. A search of four BGT modules for script-file names in string
+literals found one, which was the name of a sound in a list, not a record of
+the game's source. NVGT *debug* builds do keep them, and `bgt nvgt recover`
+uses them.
+
+What survives is **structure**, and `bgt files` recovers it:
+
+```bash
+bgt files work/game_bytecode.bin game.exe      # BGT: module + exe
+bgt files game.exe                             # NVGT: executable or module
+```
+
+- **Declarations come out in file order.** The builder handles script sections
+  one after another. Types come in one pass and global functions in another,
+  and both walk the files in the same order. So any change of file along the
+  module's order is a real file boundary. Two of the game's own files side by
+  side are still indistinguishable, which gives *where* files split, but never
+  how many unnamed files a run holds.
+- **Library files are named exactly.** A run that declares what a shipped
+  `include/*.bgt` or `*.nvgt` declares *is* that file. A class counts only when
+  its methods agree with the source's in both directions, so a game's own
+  `menu` isn't claimed. A file counts only when most of what it declares is
+  present *and* it explains something no other file does.
+- **The two passes merge into one file order.** A file seen in only one pass is
+  placed by its neighbours there. The library's own `#include` graph settles
+  what they leave open, because an included file is processed straight after
+  its includer, so nothing sits between them. That usually pins the main
+  file's functions exactly.
+
+**Checked against ground truth.** An NVGT debug build records every
+declaration's true file, so the stripped build of the same module can be scored
+against it. On all 26 modules of the library corpus that is **439 / 439**, and
+the recovered `#include` list matches the harness exactly in **24 of 25**. The
+25th, `clear_compiled_basename.nvgt`, is only a `#pragma`, so it compiles to
+nothing any build could show. On the four BGT titles the passes never
+disagree, and each game's `main()` lands in the first segment.
+
+Every one of these was wrong first, and read plausibly:
+
+- **Inherited methods:** an NVGT class's method list includes them, so no
+  derived class matched its source. A class's own methods are the vftable
+  entries it owns.
+- **Two library files declaring one class** (`sound_pool.nvgt` and
+  `legacy_sound_pool.nvgt`): the tie went to alphabetical order. It now goes
+  to the better method match, and a file whose every match another file
+  explains as well is not claimed at all.
+- **Namespaces:** a game's namespaced copy of library code
+  (`rhythm::position_sound_1d`) matched the library. The gap-fill between the
+  two copies then absorbed the game code in between.
+- **Lambdas** are compiled after every declaration, so their position says
+  nothing. They belong to the file of the function whose `FuncPtr` creates
+  them.
+- **Source quirks:** `pack@open_pack(` and `#include"form.nvgt"` have no space
+  where a regex expected one. `form.nvgt` and `speech.nvgt` include each other,
+  so "nested" means included by a file *earlier* in the order, not by any file.
+- **Direct evidence first:** the order a pass shows outranks the include
+  graph, which only settles what the pass order leaves open.
 
 # Repacking
 

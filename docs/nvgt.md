@@ -208,6 +208,15 @@ prefixing `!` to text that may not be one term.
 
 ---
 
+### File names in stripped builds
+
+A release build strips the script sections, and with them every file name.
+`recover` then names include files after the classes they hold. `bgt files
+game.exe` recovers what is left: which shipped `include/*.nvgt` files the game
+used, by name, and where its own code splits between them. Scored against debug
+builds of the library corpus, it gets 439 / 439 declarations right (see "Source
+file names" in `CLAUDE.md`).
+
 ## Changes in the merged toolkit
 
 Relative to nvgt-source-recovery at `eaa176b`:
