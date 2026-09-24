@@ -176,7 +176,7 @@ class BooleanComparisonTests(_BehaviourFixture):
                            for p in project.rglob("*.nvgt"))
         # no `== true` / `== false` survives; the value or its negation is used
         self.assertNotRegex(source, r"[=!]= (?:true|false)")
-        self.assertRegex(source, r"if \(!\(getf\(arg0\)\)\)")   # == false -> !x
+        self.assertRegex(source, r"if \(!getf\(arg0\)\)")       # == false -> !x
         self.assertRegex(source, r"if \(getf\(arg0\)\)")        # == true  -> x
 
 

@@ -193,20 +193,44 @@ def _split_comparison(c: str):
     return None
 
 
+def _atomic(s: str) -> bool:
+    """True if `s` has no top-level operator -- an identifier, member access,
+    call or index -- so it needs no parentheses after a `!`. A top-level space
+    (outside parens, brackets and string literals) marks a binary operator or a
+    ternary; there is none in `getf(x)` or `a.b[i]`."""
+    depth = 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == '"' or c == "'":
+            i += 1
+            while i < len(s) and s[i] != c:
+                i += 2 if s[i] == "\\" else 1
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == " " and depth == 0:
+            return False
+        i += 1
+    return True
+
+
 def _negate_cond(c: str) -> str:
     """Negate a condition, flipping a comparison where there is one."""
     if c in ("0", "false"):
         return "true"
     if c in ("1", "true"):
         return "false"
-    if c.startswith("!") and _outer_wrapped(c[1:]):
-        return c[2:-1]
+    if c.startswith("!"):
+        rest = c[1:]                 # negating `!x` or `!(x)` gives `x`
+        return rest[1:-1] if _outer_wrapped(rest) else rest
     inner = c[1:-1] if _outer_wrapped(c) else c
     parts = _split_comparison(inner)
     if parts is not None:
         a, op, b = parts
         return f"({a} {_FLIP[op]} {b})"
-    return f"!({inner})"
+    return f"!{inner}" if _atomic(inner) else f"!({inner})"
 
 
 def _condition(c: str) -> str:

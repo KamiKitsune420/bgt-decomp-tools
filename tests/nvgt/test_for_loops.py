@@ -7,6 +7,28 @@ from decompile import _reconstruct_for_loops as fold
 from decompile import _use_compound_assignment as compound
 from decompile import _drop_redundant_parens as unparen
 from decompile import _encloses
+from decompile import _negate_cond, _atomic
+
+
+class NegationTests(unittest.TestCase):
+    def test_atomic(self):
+        for s in ("active", "getf(x)", "a.b[i]", "int64(i)", "arr[f(x)]"):
+            self.assertTrue(_atomic(s), s)
+        for s in ("a && b", "a == b", "a ? b : c", "a + b"):
+            self.assertFalse(_atomic(s), s)
+
+    def test_negation_drops_parens_around_a_single_term(self):
+        self.assertEqual(_negate_cond("active"), "!active")
+        self.assertEqual(_negate_cond("getf(x)"), "!getf(x)")
+        self.assertEqual(_negate_cond("a && b"), "!(a && b)")
+
+    def test_double_negation_cancels_either_form(self):
+        self.assertEqual(_negate_cond("!active"), "active")
+        self.assertEqual(_negate_cond("!(a && b)"), "a && b")
+
+    def test_comparison_is_flipped_not_wrapped(self):
+        self.assertEqual(_negate_cond("(a == b)"), "(a != b)")
+        self.assertEqual(_negate_cond("(x < 6)"), "(x >= 6)")
 
 
 def run(*lines):

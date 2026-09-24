@@ -118,7 +118,8 @@ paren inside a literal is never touched. A comparison against a bool
 literal is simplified to the value or its negation -- `x == true` to `x`,
 `x == false` to `!x` -- whether it is the branch condition or a term inside a
 larger `&&` / `||`, and a resulting double negation cancels, so `!(getf()) ==
-false` reads `getf()`. `recover` wraps it into a project, and
+false` reads `getf()`. A negation of a single term drops its parentheses
+(`!(active)` reads `!active`), while a compound stays wrapped (`!(a && b)`). `recover` wraps it into a project, and
 `source_evidence.json` separates what the bytecode retained from what was
 synthesised.
 
