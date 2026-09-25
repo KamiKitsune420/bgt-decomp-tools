@@ -56,7 +56,9 @@ boundary and silently point at the wrong one.
 """
 
 import argparse
+import decimal
 import json
+import struct
 import sys
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -462,11 +464,17 @@ def _escape_char(c: str) -> str:
     carriage return followed by `\\n`, which is a different string to anyone
     reading it. The truncation marker now sits OUTSIDE the quotes, so a cut
     literal is not mistaken for one that ends in three dots.
+
+    The same goes for bytes that are there but cannot be seen: 0x80-0x9F
+    decode (as latin1) to C1 control characters, which terminals and editors
+    drop silently, 0xA0 looks like a space and 0xAD (soft hyphen) is invisible.
+    A 16-byte binary key printed raw read as eleven characters.
     """
     if c in _ESCAPES:
         return _ESCAPES[c]
-    if ord(c) < 0x20 or ord(c) == 0x7F:
-        return "\\x%02x" % ord(c)
+    o = ord(c)
+    if o < 0x20 or 0x7F <= o <= 0xA0 or o == 0xAD:
+        return "\\x%02x" % o
     return c
 
 
@@ -619,6 +627,99 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
             "resolved": resolved, "unresolved": unresolved}
 
 
+def float_literal(bits: int, width: int) -> Optional[str]:
+    """An IEEE-754 bit pattern as an AngelScript literal: `16.0`, `-1.0f`.
+
+    AngelScript has no float-constant opcode. `16.0` compiles to SetV8 / PshC8
+    carrying the double's bits, and `-1.0f` to SetV4 / PshC4 / CMPIf carrying
+    the float's -- so read as integers they print as 4625196817309499392 and
+    -1082130432. The shortest text that round-trips to the same bits is used,
+    so nothing is rounded. None for NaN and infinities, which have no literal.
+    """
+    if width == 4:
+        raw = struct.pack("<I", bits & 0xFFFFFFFF)
+        v = struct.unpack("<f", raw)[0]
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+        for p in range(1, 10):
+            s = "%.*g" % (p, v)
+            if struct.pack("<f", float(s)) == raw:
+                break
+    else:
+        v = struct.unpack("<d", struct.pack("<Q", bits & 0xFFFFFFFFFFFFFFFF))[0]
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+        s = repr(v)
+    # Same digits, written out in full unless the magnitude makes that silly:
+    # `100.0f`, not `1e+02f`.
+    if v == 0 or 1e-5 <= abs(v) < 1e16:
+        s = format(decimal.Decimal(s), "f")
+        if "." not in s:
+            s += ".0"
+    else:
+        mant, _, exp = s.partition("e")
+        s = "%s%se%d" % (mant, "" if "." in mant else ".0", int(exp))
+    return s + ("f" if width == 4 else "")
+
+
+# Immediates that are floats by the opcode's own definition: operand index.
+FLOAT_IMMEDIATES = {"CMPIf": 1, "ADDIf": 2, "SUBIf": 2, "MULIf": 2}
+
+# Opcodes whose variable operands are read as float or double, and which
+# operand positions those reads are. A constant stored into a slot takes the
+# type of the first instruction that reads it.
+_TYPED_READS = {}
+for _op in ("ADD", "SUB", "MUL", "DIV", "MOD"):
+    _TYPED_READS[_op + "f"] = ("float", (1, 2))
+    _TYPED_READS[_op + "d"] = ("double", (1, 2))
+_TYPED_READS.update({"CMPf": ("float", (0, 1)), "CMPd": ("double", (0, 1)),
+                     "NEGf": ("float", (0,)), "NEGd": ("double", (0,)),
+                     "CMPIf": ("float", (0,)), "ADDIf": ("float", (1,)),
+                     "SUBIf": ("float", (1,)), "MULIf": ("float", (1,))})
+_CONVERSION_SOURCE = {"f": "float", "d": "double"}
+
+
+def constant_type(instrs: List[Dict[str, Any]], at: int, slot: int) -> Optional[str]:
+    """'float' / 'double' when the value stored into `slot` by instrs[at] is
+    next read as one, else None.
+
+    Deliberately conservative: the scan follows straight-line code only, and
+    stops at the first instruction that mentions the slot in any other way --
+    an overwrite, an untyped copy, or an immediate that merely equals the slot
+    number. Stopping early leaves the integer rendering, which is what every
+    constant got before; it never assigns a type the bytecode does not show.
+    """
+    for ins in instrs[at + 1:at + 32]:
+        name = ins["name"]
+        vals = [a["value"] for a in ins["args"]]
+        typed = _TYPED_READS.get(name)
+        if typed is None and "TO" in name and name[:1].islower():
+            src = name.partition("TO")[0]
+            typed = (_CONVERSION_SOURCE.get(src), (1,) if len(vals) > 1 else (0,))
+        if typed is not None:
+            if any(k < len(vals) and vals[k] == slot for k in typed[1]):
+                return typed[0]
+        if name in JUMP_OPCODES or name in ("RET", "JMPP"):
+            return None
+        if slot in vals:
+            return None
+    return None
+
+
+def _constant_comment(instrs: List[Dict[str, Any]], pos: int) -> Optional[str]:
+    """The float/double reading of an immediate, when the bytecode shows one."""
+    ins = instrs[pos]
+    name, vals = ins["name"], [a["value"] for a in ins["args"]]
+    k = FLOAT_IMMEDIATES.get(name)
+    if k is not None and k < len(vals):
+        return float_literal(vals[k], 4)
+    if name in ("SetV4", "SetV8") and len(vals) > 1:
+        typ = constant_type(instrs, pos, vals[0])
+        if typ:
+            return float_literal(vals[1], 4 if typ == "float" else 8)
+    return None
+
+
 def format_function(dis: Dict[str, Any]) -> str:
     """Render one disassembled function as text."""
     f = dis["function"]
@@ -641,7 +742,8 @@ def format_function(dis: Dict[str, Any]) -> str:
     out.append("%s:" % dis["label"])
 
     labels = dis["labels"]
-    for ins in dis["instructions"]:
+    instrs = dis["instructions"]
+    for pos, ins in enumerate(instrs):
         if ins["index"] in labels:
             out.append("L%d:" % labels[ins["index"]])
         operands, comments = [], []
@@ -649,6 +751,9 @@ def format_function(dis: Dict[str, Any]) -> str:
             operands.append(str(item["value"]))
             if item.get("text"):
                 comments.append(item["text"])
+        lit = _constant_comment(instrs, pos)
+        if lit:
+            comments.append(lit)
         line = "    %-10s %s" % (ins["name"], " ".join(operands))
         if comments:
             line = "%-32s ; %s" % (line.rstrip(), "  ".join(comments))

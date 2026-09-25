@@ -202,19 +202,41 @@ class Expr:
     and nothing but the variable's type says how many that is.
     """
 
-    __slots__ = ("text", "is_ref", "dtype", "settled")
+    __slots__ = ("text", "is_ref", "dtype", "settled", "bits")
 
     def __init__(self, text: str, is_ref: bool = False,
-                 dtype: Optional[Dict[str, Any]] = None) -> None:
+                 dtype: Optional[Dict[str, Any]] = None,
+                 bits: Optional[Tuple[int, int]] = None) -> None:
         self.text = text
         self.is_ref = is_ref
         self.dtype = dtype
         # True for a value the bytecode itself leaves behind on purpose (a
         # REFCPY source nothing pops, which RET discards). Not residue.
         self.settled = False
+        # (value, width) of a pushed constant, so a call whose parameter is
+        # declared float/double can print it as the literal it was.
+        self.bits = bits
 
     def __repr__(self) -> str:
         return "Expr(%r)" % self.text
+
+
+# Parameter type tokens whose constant arguments are IEEE bit patterns.
+_FLOAT_TOKENS = {79: 4, 92: 8}                 # float, double
+
+
+def _argument_text(arg: "Expr", param: Any) -> str:
+    """An argument as source text: a pushed constant bound to a parameter
+    declared float or double (by value) prints as that literal, not as the
+    integer its bits spell."""
+    if arg.bits is not None and isinstance(param, dict) and param.get("type") is None \
+            and not param.get("reference") and not param.get("handle"):
+        width = _FLOAT_TOKENS.get(param.get("token"))
+        if width == arg.bits[1]:
+            lit = as_disasm.float_literal(arg.bits[0], width)
+            if lit:
+                return lit
+    return arg.text
 
 
 class Lifter:
@@ -294,8 +316,9 @@ class Lifter:
         return as_disasm.variable_name(self.func, slot, self.layout)
 
     def push(self, text: str, is_ref: bool = False,
-             dtype: Optional[Dict[str, Any]] = None) -> None:
-        self.stack.append(Expr(text, is_ref, dtype))
+             dtype: Optional[Dict[str, Any]] = None,
+             bits: Optional[Tuple[int, int]] = None) -> None:
+        self.stack.append(Expr(text, is_ref, dtype, bits))
 
     def top(self) -> Optional[Expr]:
         return self.stack[-1] if self.stack else None
@@ -321,7 +344,11 @@ class Lifter:
         return self.stack.pop().text
 
     def popn(self, n: int) -> List[str]:
-        """Pop n values from the TOP, keeping their source order.
+        """Pop n values from the TOP, keeping their source order."""
+        return [e.text for e in self.popn_exprs(n)]
+
+    def popn_exprs(self, n: int) -> List[Expr]:
+        """popn, keeping the values themselves rather than only their text.
 
         Asking for more than the stack holds is a modelling error -- something
         upstream pushed too little -- so the shortfall is counted as residue.
@@ -334,7 +361,7 @@ class Lifter:
             self.residue += n - len(self.stack)
         taken = self.stack[-n:] if len(self.stack) >= n else list(self.stack)
         del self.stack[len(self.stack) - len(taken):]
-        return [e.text for e in taken]
+        return taken
 
     def callee(self, index: int) -> Optional[Dict[str, Any]]:
         f = self.mod.used_functions
@@ -385,19 +412,20 @@ class Lifter:
         widths = [2 if isinstance(p, dict) and p.get("token") == as_disasm.VAR_TYPE_TOKEN
                   else 1 for p in params]
         want = (1 if owner else 0) + (1 if on_stack else 0) + sum(widths)
-        raw = self.popn(want)                  # bottom -> top
-        frame = list(reversed(raw))            # top -> bottom: the order above
+        exprs = self.popn_exprs(want)          # bottom -> top
+        raw = [e.text for e in exprs]
+        frame = list(reversed(exprs))          # top -> bottom: the order above
 
-        this = frame.pop(0) if owner and frame else ""
-        result = frame.pop(0) if on_stack and frame else ""
+        this = frame.pop(0).text if owner and frame else ""
+        result = frame.pop(0).text if on_stack and frame else ""
         args: List[str] = []
-        for width in widths:
+        for param, width in zip(params, widths):
             if not frame:
                 # Fewer values than the callee takes: something upstream was
                 # modelled short. Say so rather than inventing an operand.
                 args.append("?")
                 continue
-            args.append(frame.pop(0))
+            args.append(_argument_text(frame.pop(0), param))
             if width == 2 and frame:
                 frame.pop(0)                   # the TYPEID beneath a ?& value
 
@@ -517,10 +545,15 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
             L.push(L.var(a0), dtype=L.slot_types.get(a0))
         return
     if name in ("PshC4", "PshC8", "SetV4", "SetV8", "SetV1", "SetV2"):
+        width = {"4": 4, "8": 8}.get(name[-1])        # SetV1/SetV2: never float
         if name.startswith("Psh"):
-            L.push(str(a0))
+            L.push(str(a0), bits=(a0, width))
         else:
-            emit(i, "%s = %s;" % (L.var(a0), a1))
+            # A float/double constant is only its bit pattern here; print it
+            # as the literal when the slot's next reader says which it is.
+            typ = as_disasm.constant_type(L.code, i, a0) if width else None
+            lit = as_disasm.float_literal(a1, 4 if typ == "float" else 8) if typ else None
+            emit(i, "%s = %s;" % (L.var(a0), lit or a1))
         return
     if name == "STR":
         # STR has stackInc +2: it pushes the constant AND its length, and the
@@ -765,8 +798,10 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
     _ARITH_IMM = {"ADDIi": "+", "SUBIi": "-", "MULIi": "*",
                   "ADDIf": "+", "SUBIf": "-", "MULIf": "*"}
     if name in _ARITH_IMM:
-        emit(i, "%s = %s %s %s;" % (L.var(a0), L.var(a1), _ARITH_IMM[name],
-                                    args[2] if len(args) > 2 else "?"))
+        imm = args[2] if len(args) > 2 else "?"
+        if name.endswith("f") and len(args) > 2:
+            imm = as_disasm.float_literal(args[2], 4) or imm
+        emit(i, "%s = %s %s %s;" % (L.var(a0), L.var(a1), _ARITH_IMM[name], imm))
         return
 
     # bitwise / shifts, same three-address shape as the arithmetic group.
@@ -881,7 +916,10 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         L.cmp = (L.var(a0), L.var(a1))
         return
     if name in ("CMPIi", "CMPIu", "CMPIf", "CMPIi64", "CMPIu64", "CMPId"):
-        L.cmp = (L.var(a0), str(a1))
+        imm = str(a1)
+        if name == "CMPIf":
+            imm = as_disasm.float_literal(a1, 4) or imm
+        L.cmp = (L.var(a0), imm)
         return
     if name in ("TZ", "TNZ", "TS", "TNS", "TP", "TNP"):
         op = {"TZ": "==", "TNZ": "!=", "TS": "<",
@@ -1147,6 +1185,18 @@ class _Emitter:
                 best = c
         return best
 
+    def _through_empty(self, bid, body):
+        """Skip blocks that hold nothing but a jump. A `break` compiles to one
+        (`JMP exit`), and taking it for the loop's exit made the real exit
+        look like ordinary code inside the loop."""
+        seen = set()
+        while (bid is not None and bid not in body and bid not in seen
+               and not self.b[bid].stmts and self.b[bid].kind in ("fall", "goto")
+               and len(self.b[bid].succ) == 1 and self.b[bid].succ[0] is not None):
+            seen.add(bid)
+            bid = self.b[bid].succ[0]
+        return bid
+
     def _is_exit(self, target, loop):
         return loop is not None and target is not None and target in (loop[0],
                                                                       loop[1])
@@ -1165,13 +1215,19 @@ class _Emitter:
             self._line(depth, "goto B%d;" % target)
         self.gotos += 1
 
-    def region(self, entry, stop, depth, loop):
+    def region(self, entry, stop, depth, loop, body=False):
         cur = entry
         guard = 0
         while cur is not None and cur != stop:
             guard += 1
             if guard > len(self.b) * 4:          # safety net; should not fire
                 break
+            # The loop's exit block belongs AFTER the loop. Reaching it from
+            # inside the body is a `break`; walking on into it printed the code
+            # that follows a loop as part of the loop's last iteration.
+            if loop is not None and cur == loop[1]:
+                self._emit_exit(depth, cur, loop)
+                return
             if cur in self.emitted:
                 self._emit_goto(depth, cur, loop)
                 return
@@ -1194,7 +1250,12 @@ class _Emitter:
                 continue
             nxt = blk.succ[0] if blk.succ else None
             if self._is_exit(nxt, loop):
-                self._emit_exit(depth, nxt, loop)
+                # Falling back to the header at the very end of the loop's own
+                # body is just the loop going round; `continue;` there says
+                # nothing. Only the body walk itself: inside an arm the same
+                # jump skips whatever follows the `if`, and must stay.
+                if not (body and nxt == loop[0] and nxt == stop):
+                    self._emit_exit(depth, nxt, loop)
                 return
             cur = nxt
 
@@ -1206,6 +1267,7 @@ class _Emitter:
         exits = []
         for m in sorted(body):
             for s in self.b[m].succ:
+                s = self._through_empty(s, body)
                 if s is not None and s not in body and s not in exits:
                     exits.append(s)
         exit_block = exits[0] if exits else stop
@@ -1236,12 +1298,12 @@ class _Emitter:
                     for st in blk.stmts:
                         self._line(depth + 1, st)
                     self._line(depth + 1, "if (%s) break;" % _negate(cond))
-                    self.region(keep, header, depth + 1, (header, leave))
+                    self.region(keep, header, depth + 1, (header, leave), body=True)
                     self._line(depth, "}")
                     return leave
 
                 self._line(depth, "while (%s) {" % cond)
-                self.region(keep, header, depth + 1, (header, leave))
+                self.region(keep, header, depth + 1, (header, leave), body=True)
                 self._line(depth, "}")
                 return leave
 
@@ -1255,7 +1317,7 @@ class _Emitter:
             self._line(depth + 1, "return;")
         else:
             nxt = blk.succ[0] if blk.succ else None
-            self.region(nxt, header, depth + 1, (header, exit_block))
+            self.region(nxt, header, depth + 1, (header, exit_block), body=True)
         self._line(depth, "}")
         return exit_block
 
@@ -1264,6 +1326,12 @@ class _Emitter:
         taken, fall = blk.succ[0], blk.succ[1]
         follow = self._follow(bid)
         if follow == bid:
+            follow = None
+        # Inside a loop, arms whose only common successor is the loop's exit do
+        # not reconverge in the body: one of them leaves (`if (c) break;` and
+        # then more code). Treating the exit as the join nested the rest of the
+        # body in an `else` and then carried on into the exit block.
+        if loop is not None and follow == loop[1]:
             follow = None
 
         # `if (cond) break;` / `continue;` -- one arm leaves the loop.

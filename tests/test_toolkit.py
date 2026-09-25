@@ -588,6 +588,14 @@ def test_string_literals_escape_every_control_byte():
     assert as_disasm._quote(b"abcdef", limit=3) == '"abc"...'
 
 
+def test_string_literals_escape_bytes_that_cannot_be_seen():
+    """0x80-0x9F are C1 controls in latin1 and vanish in a terminal; 0xA0 looks
+    like a space and 0xAD is invisible. A 16-byte key printed as eleven
+    characters. Visible latin1 letters stay as they are."""
+    assert as_disasm._quote(b"\x9d\x81\xa0\xad\x7f") == '"\\x9d\\x81\\xa0\\xad\\x7f"'
+    assert as_disasm._quote(b"\xd7\xe9") == '"\xd7\xe9"'
+
+
 def test_globalptr_is_a_plain_index_in_the_tagged_dialect():
     """No tag bit in the older build -- string literals have their own STR
     opcode, so the field is a plain usedGlobalProps index. Applying the len2
@@ -1377,6 +1385,102 @@ def test_structure_never_drops_a_statement():
     assert any("orphan();" in l for l in out)
     assert any("a();" in l for l in out)
     assert any("b();" in l for l in out)
+
+
+def _for_loop_with_break_then_code():
+    """`i = 0; for (; i < 100; i++) { work(); if (ret) break; } after();`
+    compiled as a jump to the test at the bottom, with the break as a
+    stand-alone `JMP exit` block."""
+    lines = [(0, "i = 0;"), (1, "@goto L2"),
+             (2, "work();"), (3, "@if !ret -> L3"),
+             (4, "@goto L4"),
+             (5, "i++;"),
+             (6, "@if i < 100 -> L5"),
+             (7, "after();"), (8, "return 1;")]
+    return _structured(lines, {2: 5, 5: 3, 6: 2, 7: 4}, 9)
+
+
+def test_code_after_a_loop_is_not_printed_inside_it():
+    """The `if` holding the break has only the loop's exit as a common
+    successor. Taking that as the join walked on into the exit block and
+    printed after() and the return inside the loop, with a goto after it."""
+    out, lifted = _for_loop_with_break_then_code()
+    assert lifted["gotos"] == 0
+    assert out[:2] == ["i = 0;", "while (i < 100) {"]
+    close = out.index("}", out.index("break;") + 2)     # the while's own brace
+    assert out.index("i++;") < close < out.index("after();")
+    assert out[-1] == "return 1;"
+
+
+def test_no_continue_at_the_end_of_a_loop_body():
+    out, _ = _for_loop_with_break_then_code()
+    assert "continue;" not in out
+
+
+def test_continue_inside_an_arm_is_kept():
+    """Jumping back to the header from inside an `if` skips what follows the
+    `if` -- there the continue carries meaning and must stay."""
+    lines = [(0, "@goto L1"),
+             (1, "@if !a -> L2"), (2, "x();"), (3, "@goto L1"),
+             (4, "y();"),
+             (5, "@if c -> L0"),
+             (6, "done();")]
+    out, _ = _structured(lines, {1: 0, 4: 2, 5: 1}, 7)
+    assert "continue;" in out
+    assert out.index("x();") < out.index("continue;") < out.index("y();")
+
+
+def test_float_literal_is_the_shortest_exact_text():
+    f = lambda x: struct.unpack("<I", struct.pack("<f", x))[0]
+    d = lambda x: struct.unpack("<Q", struct.pack("<d", x))[0]
+    assert as_disasm.float_literal(f(-1.0), 4) == "-1.0f"
+    assert as_disasm.float_literal(-1082130432, 4) == "-1.0f"       # signed operand
+    assert as_disasm.float_literal(f(1000.0), 4) == "1000.0f"
+    assert as_disasm.float_literal(f(0.1), 4) == "0.1f"
+    assert as_disasm.float_literal(d(16.0), 8) == "16.0"
+    assert as_disasm.float_literal(d(1 / 3), 8) == repr(1 / 3)
+    assert as_disasm.float_literal(0x7F800000, 4) is None           # inf: no literal
+
+
+def _ins(index, name, *vals):
+    return {"index": index, "name": name, "args": [{"value": v} for v in vals]}
+
+
+def test_a_constant_takes_the_type_of_the_instruction_that_reads_it():
+    """`size - 16.0` is SetV8 8 <bits>; SUBd 6 6 8. The integer reading of
+    those bits is 4625196817309499392."""
+    bits = struct.unpack("<Q", struct.pack("<d", 16.0))[0]
+    L, _ = _lifter()
+    L.code = [_ins(0, "SetV8", 8, bits), _ins(1, "SUBd", 6, 6, 8)]
+    out = []
+    as_lift._step(L, lambda i, t: out.append(t), 0, "SetV8", [8, bits], [None, None])
+    assert out == ["v8 = 16.0;"]
+
+
+def test_a_constant_with_no_typed_reader_stays_an_integer():
+    L, _ = _lifter()
+    L.code = [_ins(0, "SetV4", 3, 1065353216), _ins(1, "PshV4", 3)]
+    out = []
+    as_lift._step(L, lambda i, t: out.append(t), 0, "SetV4", [3, 1065353216], [None, None])
+    assert out == ["v3 = 1065353216;"]
+
+
+def test_float_immediates_render_as_floats():
+    L, _ = _lifter()
+    out = []
+    as_lift._step(L, lambda i, t: out.append(t), 0, "CMPIf", [1, -1082130432], [None, None])
+    as_lift._step(L, lambda i, t: out.append(t), 1, "JS", [4], ["L0"])
+    as_lift._step(L, lambda i, t: out.append(t), 2, "MULIf", [1, 1, 1148846080], [None] * 3)
+    assert out == ["@if v1 < -1.0f -> L0", "v1 = v1 * 1000.0f;"]
+
+
+def test_a_constant_argument_prints_as_its_parameters_type():
+    fn = {"name": "set_volume", "owner": None,
+          "params": [{"token": 79}, {"token": 68}], "returns": {"token": 80}}
+    L, _ = _lifter(functions=[fn])
+    L.push("5", bits=(5, 4))                          # int parameter: untouched
+    L.push("1092616192", bits=(1092616192, 4))        # 10.0f
+    assert L._call(0, "CALLSYS") == "set_volume(10.0f, 5)"
 
 
 def test_negate_folds_comparisons_rather_than_stacking_bangs():
