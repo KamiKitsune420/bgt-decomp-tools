@@ -74,6 +74,35 @@ Note the container header is **fixed-shape but not fixed-length**: the declared
 length is decimal, so a larger module means a longer header. Compute it, never
 hardcode it.
 
+## UPX-packed runtimes
+
+Some titles ship the runtime compressed with UPX. The overlay is untouched --
+UPX leaves anything past the last section alone -- so unpacking the script
+does not care. What breaks is everything that reads the *engine*: `asBCInfo[]`
+is inside the compressed blob. `upx.py` rebuilds the memory image following UPX
+3.96's own `PeFile::unpack0`, and `as_opcodes.extract()` reads from that:
+
+1. PackHeader (`UPX!`, just before the second section's raw data) names the
+   method, filter and lengths.
+2. NRV2B/2D/2E decode to exactly `u_len`; `c_adler` and `u_adler` must match.
+   (`u_adler` is taken before unfiltering, so it proves decoding only.)
+3. The stream's last dword locates the original PE header and section table.
+4. The code range `[codebase, codebase+codesize)` is unfiltered (`filter/ct.h`,
+   `filter/cto.h`; ids 0x11-0x16, 0x24-0x26). Unimplemented filters leave code
+   filtered and say so -- data sections, where the opcode table lives, are
+   never filtered.
+5. Relocations are replayed: UPX stores each relocated dword big-endian as
+   `value - imagebase - rvamin`. Missing this step leaves every pointer in
+   `.rdata` wrong while the data *looks* plausible.
+
+Checked against `upx -d` on a shipped title: `.text` and `.data` identical, and
+`.rdata` differs only in the import descriptors, which are deliberately not
+rebuilt. `bgt opcodes` on the packed file and on the `upx -d` copy give the
+same table. The trailer stores an **absolute** overlay offset, so a `upx -d`
+copy (or any PE rewrite) has a stale trailer; `split_overlay` then looks for the
+overlay at the end of the PE image, and `bgt identify` reports the staleness,
+because BGT's own loader will not find the script in such a copy.
+
 ---
 
 # Tools
@@ -100,6 +129,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_kdf.py` | BGT's password → AES-key derivation for encrypted asset packs |
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
 | `engine.py` | `bgt identify`: BGT or NVGT, decided by each engine's own verifying layer |
+| `upx.py` | the memory image of a UPX-packed runtime, so `asBCInfo[]` can be read without `upx -d` (see below) |
 | `script_files.py` | `bgt files`: which source files a stripped module was built from -- library files by name, the game's own as segments |
 | `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
 | `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it -- 50 / 50 |

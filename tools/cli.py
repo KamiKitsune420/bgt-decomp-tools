@@ -7,7 +7,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt unpack game.exe -o work/           recover the AngelScript module
     bgt info game.exe                      trailer, seed and container only
     bgt opcodes game.exe                   dump asBCInfo[]
-    bgt disasm game.exe work/game_bytecode.bin -o game.asm
+    bgt disasm work/game_bytecode.bin game.exe -o game.asm
     bgt lift   work/game_bytecode.bin game.exe -o game.as
     bgt pack list sounds.dat
     bgt pack extract sounds.dat -o sounds/ --key <hex>
@@ -128,8 +128,10 @@ def cmd_opcodes(args: argparse.Namespace) -> int:
         info = as_opcodes.extract(args.exe)
     except (ValueError, OSError) as exc:
         return _fail(str(exc))
-    print("asBCInfo at file offset 0x%X -- %d opcodes"
-          % (info["file_offset"], info["count"]))
+    if info.get("upx"):
+        print("%s: read from the unpacked image" % info["upx"])
+    print("asBCInfo at %s offset 0x%X -- %d opcodes"
+          % ("image" if info.get("upx") else "file", info["file_offset"], info["count"]))
     if args.output:
         import json
         with open(args.output, "w") as fh:

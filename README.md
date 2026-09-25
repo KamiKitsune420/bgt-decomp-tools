@@ -99,7 +99,8 @@ bgt unpack game.exe -o work/
 ```
 
 Writes `work/game_bytecode.bin`, the game's compiled script, decrypted and
-decompressed.
+decompressed. The file is named after the executable: `strike.exe` gives
+`work/strike_bytecode.bin`.
 
 ### 2. Read it
 
@@ -306,6 +307,14 @@ profile has not been verified. See [docs/nvgt.md](docs/nvgt.md).
 
 **`bgt lift` says "no function bodies were recovered"**: the module parsed but
 its function records did not. It will tell you the dialect and where it stopped.
+
+**The executable is UPX-packed**: nothing to do. `bgt identify` says so, and
+the commands that read the engine (`lift`, `disasm`, `opcodes`, ...) unpack
+its image in memory, checked against UPX's own checksums (NRV2B/2D/2E; LZMA
+builds still need `upx -d` on a copy). If you did run `upx -d`, that copy
+works too, but the game itself will no longer start from it: the overlay
+moved and its trailer still points at the old offset. `bgt identify` reports
+that.
 
 **`bgt crack` finds nothing**: that only rules out the candidates it tried, and
 it prints how many. The password is probably computed; see step 4 above.

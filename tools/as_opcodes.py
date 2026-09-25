@@ -26,6 +26,11 @@ import struct
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from . import upx
+except ImportError:
+    import upx
+
 # opcodes whose names are distinctive enough to anchor the table
 ANCHORS = (b"PshVPtr", b"CALLSYS", b"SUSPEND", b"SetV4", b"PopPtr", b"CALLINTF")
 
@@ -60,6 +65,12 @@ def _sections(exe: bytes) -> Tuple[int, List[Tuple[int, int, int]]]:
 def extract(path: str, max_ops: int = 256) -> Dict[str, Any]:
     with open(path, "rb") as f:
         exe = f.read()
+    # A UPX-packed runtime holds only the stub and a compressed blob; read the
+    # table out of the image UPX's stub would have unpacked instead. The
+    # overlay (the script) is untouched by UPX, so nothing else changes.
+    packed = upx.find_header(exe)
+    if packed is not None:
+        exe = upx.mapped_pe(upx.decompress(exe))
     base, secs = _sections(exe)
 
     def v2r(va):
@@ -141,7 +152,9 @@ def extract(path: str, max_ops: int = 256) -> Dict[str, Any]:
                      "stackInc": e["stackInc"],
                      "operands": ops,
                      "dwords": size}
-    return {"file_offset": pos, "count": len(table), "table": table}
+    return {"file_offset": pos, "count": len(table), "table": table,
+            # with upx set, file_offset is into the unpacked image, not the file
+            "upx": packed.describe() if packed is not None else None}
 
 
 def _anchor_on_bc_zero(exe: bytes, pos: int, entries: List[Dict[str, Any]],
@@ -248,7 +261,10 @@ def disassemble(bc: bytes, table: Dict[int, Dict[str, Any]], start: int = 0,
 
 if __name__ == "__main__":
     info = extract(sys.argv[1])
-    print("asBCInfo at file offset 0x%X -- %d opcodes" % (info["file_offset"], info["count"]))
+    if info.get("upx"):
+        print("%s: read from the unpacked image" % info["upx"])
+    print("asBCInfo at %s offset 0x%X -- %d opcodes"
+          % ("image" if info.get("upx") else "file", info["file_offset"], info["count"]))
     for op in sorted(info["table"])[:24]:
         e = info["table"][op]
         print("  %3d  %-12s type=%-3d ops=%d stackInc=%+d"

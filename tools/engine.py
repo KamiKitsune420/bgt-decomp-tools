@@ -31,9 +31,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 try:                      # installed as a package
-    from . import bgtlib
+    from . import bgtlib, upx
 except ImportError:       # run directly from a checkout
     import bgtlib
+    import upx
 
 BGT = "bgt"
 NVGT = "nvgt"
@@ -61,9 +62,16 @@ class Identity:
     def summary(self) -> str:
         name = os.path.basename(self.path)
         if self.engine == BGT:
-            return ("%s: BGT (overlay 0x%X, key seed 0x%02X%s)"
+            notes = ""
+            if self.facts.get("upx"):
+                notes += ", runtime packed with %s" % self.facts["upx"]
+            if self.facts.get("stale_trailer"):
+                notes += (", trailer still points at 0x%X -- this copy was "
+                          "rewritten and BGT itself will not load it"
+                          % self.facts["stale_trailer"])
+            return ("%s: BGT (overlay 0x%X, key seed 0x%02X%s%s)"
                     % (name, self.facts["overlay_offset"], self.facts["seed"],
-                       "" if self.facts["seed"] == 0x11 else ", NON-STOCK"))
+                       "" if self.facts["seed"] == 0x11 else ", NON-STOCK", notes))
         if self.engine == NVGT:
             packs = self.facts.get("embedded_packs") or []
             return ("%s: NVGT (%s profile, %d bytes of bytecode%s)"
@@ -83,6 +91,11 @@ def _probe_bgt(data: bytes, ident: Identity) -> bool:
         ident.rejected[BGT] = str(exc)
         return False
     ident.engine = BGT
+    packed = upx.find_header(data)
+    ident.facts.update(
+        upx=packed.describe() if packed is not None else None,
+        stale_trailer=bgtlib.read_trailer(data)
+        if bgtlib.trailer_is_stale(data, offset) else None)
     ident.facts.update(overlay_offset=offset, seed=seed,
                        embedded_pack_bytes=len(embedded),
                        ciphertext_bytes=len(ciphertext))

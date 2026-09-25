@@ -61,6 +61,34 @@ def read_trailer(data: bytes) -> int:
     return offset
 
 
+def pe_image_end(data: bytes) -> int:
+    """File offset just past the last section's raw data, or 0 if unreadable."""
+    try:
+        e = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[e:e + 4] != b"PE\0\0":
+            return 0
+        n = struct.unpack_from("<H", data, e + 6)[0]
+        optsz = struct.unpack_from("<H", data, e + 20)[0]
+        end = 0
+        for k in range(n):
+            b = e + 24 + optsz + 40 * k
+            rsize, raw = struct.unpack_from("<II", data, b + 16)
+            if rsize:
+                end = max(end, raw + rsize)
+        return end
+    except struct.error:
+        return 0
+
+
+def trailer_is_stale(data: bytes, offset: int) -> bool:
+    """True when the overlay was found somewhere other than where the trailer
+    says -- the file was rewritten, and BGT's own loader will not find it."""
+    try:
+        return read_trailer(data) != offset
+    except BgtError:
+        return False
+
+
 def split_overlay(data: bytes) -> Tuple[int, bytes, bytes]:
     """Split the overlay into (embedded_pack, ciphertext).
 
@@ -73,8 +101,20 @@ def split_overlay(data: bytes) -> Tuple[int, bytes, bytes]:
     body = data[offset:len(data) - TRAILER_LEN]
 
     i = body.find(b" ", 0, 16)
-    if i < 0:
-        raise BgtError("no space-terminated length field at the start of the overlay")
+    if i < 0 or not body[:i].isdigit() and body[:i]:
+        # The trailer stores an absolute file offset, so anything that rewrites
+        # the PE part of the file (`upx -d`, a resource editor) leaves it
+        # pointing at the wrong place while the overlay itself moves intact to
+        # the new end of the image. Look there before giving up. Nothing is
+        # trusted on this basis alone: the AES and container layers still have
+        # to verify what is found.
+        pe_end = pe_image_end(data)
+        moved = data[pe_end:len(data) - TRAILER_LEN] if pe_end else b""
+        j = moved.find(b" ", 0, 16)
+        if pe_end and pe_end != offset and j >= 0 and (moved[:j].isdigit() or j == 0):
+            offset, body, i = pe_end, moved, j
+        elif i < 0:
+            raise BgtError("no space-terminated length field at the start of the overlay")
     try:
         n = int(body[:i] or b"0")
     except ValueError:
