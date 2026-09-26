@@ -609,8 +609,16 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     resolved += 1
             rendered.append(item)
-        instrs.append({"index": i, "offset": off, "opcode": op,
-                       "name": name, "args": rendered})
+        ins = {"index": i, "offset": off, "opcode": op,
+               "name": name, "args": rendered}
+        # The declared type of what a reference load points at, so a constant
+        # written through it (WRTV4/WRTV8) can be printed as that type.
+        if name in _REF_LOADS and len(args) > _REF_LOADS[name][1]:
+            kind, k = _REF_LOADS[name]
+            lookup = (mod.object_property_type if kind == "objprop"
+                      else getattr(mod, "global_property_type", lambda v: None))
+            ins["ref_type"] = lookup(args[k])
+        instrs.append(ins)
 
     for ins in instrs:                        # now that every label has a number
         for item in ins["args"]:
@@ -676,37 +684,114 @@ _TYPED_READS.update({"CMPf": ("float", (0, 1)), "CMPd": ("double", (0, 1)),
                      "NEGf": ("float", (0,)), "NEGd": ("double", (0,)),
                      "CMPIf": ("float", (0,)), "ADDIf": ("float", (1,)),
                      "SUBIf": ("float", (1,)), "MULIf": ("float", (1,))})
+# Integer arithmetic and comparisons read their operands as integers: a
+# constant one of these reads is not a float, whatever another path says.
+# (None is the "not a float" type; see constant_type.)
+for _op in ("ADD", "SUB", "MUL", "DIV", "MOD", "BAND", "BOR", "BXOR", "BSLL", "BSRL", "BSRA"):
+    for _t in ("i", "u", "i64", "u64", "64", ""):
+        if _op.startswith("B") != (_t in ("", "64")):
+            continue
+        _TYPED_READS.setdefault(_op + _t, (None, (1, 2)))
+for _op in ("CMPi", "CMPu", "CMPi64", "CMPu64"):
+    _TYPED_READS[_op] = (None, (0, 1))
+for _op in ("CMPIi", "CMPIu", "NEGi", "NEGi64", "BNOT", "BNOT64"):
+    _TYPED_READS[_op] = (None, (0,))
+for _op in ("ADDIi", "SUBIi", "MULIi"):
+    _TYPED_READS[_op] = (None, (1,))
 _CONVERSION_SOURCE = {"f": "float", "d": "double"}
 
+# Instructions that load the reference register, and which operand names the
+# property (or global) it will point at.
+_REF_LOADS = {"LoadThisR": ("objprop", 0), "LoadRObjR": ("objprop", 1),
+              "LoadVObjR": ("objprop", 1), "LDG": ("global", 0)}
 
-def constant_type(instrs: List[Dict[str, Any]], at: int, slot: int) -> Optional[str]:
+
+def _float_kind(dt: Any) -> Optional[str]:
+    """'float' / 'double' for a by-value primitive of that type, else None."""
+    if (not isinstance(dt, dict) or dt.get("type") is not None
+            or dt.get("handle") or dt.get("reference")):
+        return None
+    return {79: "float", 92: "double"}.get(dt.get("token"))
+
+
+def constant_type(instrs: List[Dict[str, Any]], at: int, slot: int,
+                  returns: Any = None) -> Optional[str]:
     """'float' / 'double' when the value stored into `slot` by instrs[at] is
     next read as one, else None.
 
-    Deliberately conservative: the scan follows straight-line code only, and
-    stops at the first instruction that mentions the slot in any other way --
-    an overwrite, an untyped copy, or an immediate that merely equals the slot
-    number. Stopping early leaves the integer rendering, which is what every
-    constant got before; it never assigns a type the bytecode does not show.
+    Control flow is followed: an unconditional jump goes to its target, a
+    conditional one down both ways. `if (h > 900) v = -100.0; if (v < -100.0)`
+    stores the constant in one arm and reads it after the join, so a
+    straight-line scan never reached the reader.
+
+    Deliberately conservative: each path stops at the first instruction that
+    mentions the slot in any other way -- an overwrite, an untyped copy, or an
+    immediate that merely equals the slot number -- and a type is returned only
+    if every typed reader that was reached agrees. Anything less leaves the
+    integer rendering, which is what every constant got before; it never
+    assigns a type the bytecode does not show.
     """
-    for ins in instrs[at + 1:at + 32]:
-        name = ins["name"]
-        vals = [a["value"] for a in ins["args"]]
-        typed = _TYPED_READS.get(name)
-        if typed is None and "TO" in name and name[:1].islower():
-            src = name.partition("TO")[0]
-            typed = (_CONVERSION_SOURCE.get(src), (1,) if len(vals) > 1 else (0,))
-        if typed is not None:
-            if any(k < len(vals) and vals[k] == slot for k in typed[1]):
-                return typed[0]
-        if name in JUMP_OPCODES or name in ("RET", "JMPP"):
-            return None
-        if slot in vals:
-            return None
-    return None
+    found = set()
+    seen = set()
+    todo = [(at + 1, frozenset((slot,)))]         # position, slots holding the value
+    budget = 96                                   # instructions visited, all paths
+    while todo and budget > 0:
+        pos, slots = todo.pop()
+        while 0 <= pos < len(instrs) and (pos, slots) not in seen and budget > 0:
+            seen.add((pos, slots))
+            budget -= 1
+            ins = instrs[pos]
+            name = ins["name"]
+            vals = [a["value"] for a in ins["args"]]
+            typed = _TYPED_READS.get(name)
+            if typed is None and "TO" in name and name[:1].islower():
+                src = name.partition("TO")[0]
+                typed = (_CONVERSION_SOURCE.get(src), (1,) if len(vals) > 1 else (0,))
+            if typed is not None and any(k < len(vals) and vals[k] in slots
+                                         for k in typed[1]):
+                found.add(typed[0])
+                break
+            if name in JUMP_OPCODES:
+                target = next((a.get("target") for a in ins["args"]
+                               if a.get("role") == "jump"), None)
+                if target is not None:
+                    todo.append((target, slots))
+                if name == "JMP":
+                    break
+            elif name in ("RET", "JMPP"):
+                break
+            elif name in ("CpyVtoR4", "CpyVtoR8") and vals and vals[0] in slots:
+                # into the value register on the way out: the function's return
+                # type. The register also carries `if` tests, so only a copy
+                # that goes straight to the exit counts.
+                nxt = instrs[pos + 1]["name"] if pos + 1 < len(instrs) else "RET"
+                found.add(_float_kind(returns) if nxt in ("JMP", "RET") else None)
+                break
+            elif name in ("WRTV4", "WRTV8") and vals and vals[0] in slots:
+                # stored through the reference register: the declared type of
+                # the property or global the instruction just before loaded
+                prev = instrs[pos - 1] if pos > 0 else {}
+                found.add(_float_kind(prev.get("ref_type")))
+                break
+            elif name in ("CpyVtoV4", "CpyVtoV8") and len(vals) == 2:
+                # `v35 = v32` moves the value on; overwriting a holder drops it
+                dst, src = vals
+                if src in slots:
+                    slots = slots | {dst}
+                elif dst in slots:
+                    slots = slots - {dst}
+                    if not slots:
+                        break
+            elif any(v in slots for v in vals):
+                break
+            pos += 1
+    if budget <= 0:
+        return None                               # an unexplored path could disagree
+    return found.pop() if len(found) == 1 and None not in found else None
 
 
-def _constant_comment(instrs: List[Dict[str, Any]], pos: int) -> Optional[str]:
+def _constant_comment(instrs: List[Dict[str, Any]], pos: int,
+                      returns: Any = None) -> Optional[str]:
     """The float/double reading of an immediate, when the bytecode shows one."""
     ins = instrs[pos]
     name, vals = ins["name"], [a["value"] for a in ins["args"]]
@@ -714,7 +799,7 @@ def _constant_comment(instrs: List[Dict[str, Any]], pos: int) -> Optional[str]:
     if k is not None and k < len(vals):
         return float_literal(vals[k], 4)
     if name in ("SetV4", "SetV8") and len(vals) > 1:
-        typ = constant_type(instrs, pos, vals[0])
+        typ = constant_type(instrs, pos, vals[0], returns)
         if typ:
             return float_literal(vals[1], 4 if typ == "float" else 8)
     return None
@@ -751,7 +836,7 @@ def format_function(dis: Dict[str, Any]) -> str:
             operands.append(str(item["value"]))
             if item.get("text"):
                 comments.append(item["text"])
-        lit = _constant_comment(instrs, pos)
+        lit = _constant_comment(instrs, pos, f.get("returns"))
         if lit:
             comments.append(lit)
         line = "    %-10s %s" % (ins["name"], " ".join(operands))

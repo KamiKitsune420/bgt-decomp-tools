@@ -225,12 +225,21 @@ class Expr:
 _FLOAT_TOKENS = {79: 4, 92: 8}                 # float, double
 
 
+def _float_param_width(param: Any) -> Optional[int]:
+    """4 / 8 for a float / double parameter (by value or `&in`), else None."""
+    if not isinstance(param, dict) or param.get("type") is not None or param.get("handle"):
+        return None
+    return _FLOAT_TOKENS.get(param.get("token"))
+
+
 def _argument_text(arg: "Expr", param: Any) -> str:
     """An argument as source text: a pushed constant bound to a parameter
-    declared float or double (by value) prints as that literal, not as the
-    integer its bits spell."""
+    declared float or double prints as that literal, not as the integer its
+    bits spell. `double &in` counts too: BGT declares many engine parameters
+    that way, and what the caller pushes is still the value (a PshC is never
+    an address)."""
     if arg.bits is not None and isinstance(param, dict) and param.get("type") is None \
-            and not param.get("reference") and not param.get("handle"):
+            and not param.get("handle"):
         width = _FLOAT_TOKENS.get(param.get("token"))
         if width == arg.bits[1]:
             lit = as_disasm.float_literal(arg.bits[0], width)
@@ -274,6 +283,12 @@ class Lifter:
         # What a variable was last handle-copied from (RefCpyV), for naming a
         # CallPtr through it after the thing the source actually called.
         self.slot_origin: Dict[int, str] = {}
+        # The statements emitted so far (lift_function shares its list), and
+        # for each slot last given a constant printed as an integer, where
+        # that statement is -- so passing the variable to a float/double
+        # parameter can print the constant as the literal it was.
+        self.lines: List[Tuple[int, str]] = []
+        self.raw_consts: Dict[int, Tuple[int, int, int]] = {}
         params = func.get("params", [])
         for off, label in self.layout.items():
             if label.startswith("a") and label[1:].isdigit():
@@ -363,6 +378,32 @@ class Lifter:
         del self.stack[len(self.stack) - len(taken):]
         return taken
 
+    def retype_constant_variable(self, text: str, param: Any) -> None:
+        """`v2 = <bits>; tone.set_volume(v2)`: the engine's `double &in`
+        parameters take a temporary's address (SetV8 / VAR / GETREF), so the
+        constant's reader is the call, not an arithmetic opcode. Rewrite the
+        assignment when nothing has assigned the variable since."""
+        width = _float_param_width(param)
+        if width is None:
+            return
+        name = text.lstrip("&")
+        slot = next((s for s in self.raw_consts if self.var(s) == name), None)
+        if slot is None:
+            return
+        pos, bits, w = self.raw_consts[slot]
+        if w != width or pos >= len(self.lines):
+            return
+        idx, stmt = self.lines[pos]
+        if stmt != "%s = %s;" % (name, bits):
+            return
+        later = re.compile(r"(?<![\w.])%s\s*(=[^=]|\+\+|--|[-+*/%%]=)" % re.escape(name))
+        if any(later.search(t) for _i, t in self.lines[pos + 1:]):
+            return
+        lit = as_disasm.float_literal(bits, width)
+        if lit:
+            self.lines[pos] = (idx, "%s = %s;" % (name, lit))
+            del self.raw_consts[slot]
+
     def callee(self, index: int) -> Optional[Dict[str, Any]]:
         f = self.mod.used_functions
         return f[index] if 0 <= index < len(f) else None
@@ -425,7 +466,9 @@ class Lifter:
                 # modelled short. Say so rather than inventing an operand.
                 args.append("?")
                 continue
-            args.append(_argument_text(frame.pop(0), param))
+            arg = frame.pop(0)
+            self.retype_constant_variable(arg.text, param)
+            args.append(_argument_text(arg, param))
             if width == 2 and frame:
                 frame.pop(0)                   # the TYPEID beneath a ?& value
 
@@ -501,6 +544,7 @@ def lift_function(mod: "as_disasm.Module", func: Dict[str, Any]) -> Dict[str, An
             lines.append((idx, text))
 
     lift.code = instrs
+    lift.lines = lines
     for ins in instrs:
         i, name = ins["index"], ins["name"]
         args = [a["value"] for a in ins["args"]]
@@ -551,8 +595,13 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
         else:
             # A float/double constant is only its bit pattern here; print it
             # as the literal when the slot's next reader says which it is.
-            typ = as_disasm.constant_type(L.code, i, a0) if width else None
+            typ = (as_disasm.constant_type(L.code, i, a0, L.func.get("returns"))
+                   if width else None)
             lit = as_disasm.float_literal(a1, 4 if typ == "float" else 8) if typ else None
+            if lit is None and width:
+                L.raw_consts[a0] = (len(L.lines), a1, width)
+            else:
+                L.raw_consts.pop(a0, None)
             emit(i, "%s = %s;" % (L.var(a0), lit or a1))
         return
     if name == "STR":

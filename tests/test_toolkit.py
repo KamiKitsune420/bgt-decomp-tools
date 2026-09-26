@@ -1457,6 +1457,54 @@ def test_a_constant_takes_the_type_of_the_instruction_that_reads_it():
     assert out == ["v8 = 16.0;"]
 
 
+def _jmp(index, name, offset):
+    return {"index": index, "name": name,
+            "args": [{"value": offset, "role": "jump", "target": index + 1 + offset}]}
+
+
+def test_a_constant_set_in_a_branch_is_typed_by_its_reader_after_the_join():
+    """`if (h > 900) v35 = -100.0; if (v35 < -100.0) ...` from a game's pain
+    code: the constant goes into v32, is copied to v35 and compared after the
+    join. A straight-line scan stopped at the jump and printed
+    -4586634745500139520."""
+    bits = struct.unpack("<Q", struct.pack("<d", -100.0))[0]
+    code = [_ins(0, "SetV8", 32, bits), _ins(1, "CpyVtoV8", 35, 32),
+            _jmp(2, "JMP", 1),
+            _ins(3, "SetV8", 35, 0),                     # skipped by the jump
+            _ins(4, "SetV8", 30, bits), _ins(5, "CMPd", 35, 30)]
+    assert as_disasm.constant_type(code, 0, 32) == "double"
+
+
+def test_paths_that_disagree_leave_the_constant_an_integer():
+    code = [_ins(0, "SetV4", 3, 1065353216), _jmp(1, "JZ", 1),
+            _ins(2, "ADDf", 4, 3, 3), _ins(3, "ADDi", 4, 3, 3)]
+    assert as_disasm.constant_type(code, 0, 3) is None
+
+
+def test_a_returned_constant_takes_the_functions_return_type():
+    bits = struct.unpack("<Q", struct.pack("<d", -1.0))[0]
+    code = [_ins(0, "SetV8", 3, bits), _ins(1, "CpyVtoR8", 3), _jmp(2, "JMP", 0)]
+    assert as_disasm.constant_type(code, 0, 3, {"token": 92}) == "double"
+    assert as_disasm.constant_type(code, 0, 3, {"token": 71}) is None     # int64
+
+
+def test_a_constant_passed_by_reference_to_a_double_parameter_is_retyped():
+    """BGT declares `tone_synth::set_volume(double &in)`: the caller stores
+    the constant in a temporary and passes its address, so the call is the
+    only thing that says what type it is."""
+    bits = struct.unpack("<Q", struct.pack("<d", -6.0))[0]
+    fn = {"name": "set_volume", "owner": None,
+          "params": [{"token": 92, "reference": True}], "returns": {"token": 80}}
+    L, _ = _lifter(functions=[fn])
+    L.code = [_ins(0, "SetV8", 2, bits), _ins(1, "VAR", 2)]
+    lines = []
+    L.lines = lines
+    as_lift._step(L, lambda i, t: lines.append((i, t)), 0, "SetV8", [2, bits], [None, None])
+    L.push("&v2")
+    L._call(0, "CALLSYS")
+    assert lines == [(0, "v2 = -6.0;")]
+
+
 def test_a_constant_with_no_typed_reader_stays_an_integer():
     L, _ = _lifter()
     L.code = [_ins(0, "SetV4", 3, 1065353216), _ins(1, "PshV4", 3)]
