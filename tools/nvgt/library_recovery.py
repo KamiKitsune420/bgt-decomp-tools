@@ -289,7 +289,7 @@ def compile_reference(compiler, includes, include_root, build_dir, nvgt_info=Non
     command = [str(compiler), str(source)] if reference_mode == "runtime" else [str(compiler), "--compile-debug", str(source)]
     result = subprocess.run(command,
                             cwd=build_dir, capture_output=True, text=True,
-                            timeout=90, env=env)
+                            stdin=subprocess.DEVNULL, timeout=90, env=env)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     if reference_mode == "runtime":

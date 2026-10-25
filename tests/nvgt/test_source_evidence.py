@@ -94,13 +94,13 @@ class SourceEvidenceTests(unittest.TestCase):
             source = directory / "owned.as"
             source.write_text('namespace math_api { import int convert(int value) from "calculator"; }\nvoid main() {}\n')
             bytecode = directory / "owned.bin"
-            result = subprocess.run([str(HOST), str(source), str(bytecode), "--strip"], capture_output=True, text=True, timeout=20)
+            result = subprocess.run([str(HOST), str(source), str(bytecode), "--strip"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stderr)
             first = load_any(str(bytecode))
             self.assertEqual(len(first.imported_functions), 1)
             recovered = directory / "recovered.as"
             recovered.write_text(decompile_module(first), encoding="utf-8")
-            result = subprocess.run([str(HOST), str(recovered), str(directory / "second.bin"), "--strip"], capture_output=True, text=True, timeout=20)
+            result = subprocess.run([str(HOST), str(recovered), str(directory / "second.bin"), "--strip"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stderr)
             second = load_any(str(directory / "second.bin"))
             self.assertEqual(second.imported_functions[0].module, "calculator")
@@ -120,7 +120,7 @@ int late(int value) { return value + 2; }
             source = work / "owned.as"
             source.write_text('#include "audio_form.as"\nvoid main() { Item item(3); print("" + early(item.number) + late(1)); }\n', encoding="utf-8")
             original = subprocess.run([str(HOST), str(source), str(work / "owned.bin"), "--run"],
-                                      capture_output=True, text=True, timeout=20)
+                                      capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(original.returncode, 0, original.stderr)
             manifest = generate_project(work / "owned.bin", work / "project")
             recovered_library = (work / "project/includes/audio_form.nvgt").read_text(encoding="utf-8")
@@ -135,7 +135,7 @@ int late(int value) { return value + 2; }
             self.assertEqual(manifest["source_evidence"]["file"], "source_evidence.json")
             self.assertEqual(manifest["source_compilation"], "not_checked")
             recovered = subprocess.run([str(HOST), str(work / "project/main.nvgt"), str(work / "second.bin"), "--run"],
-                                       capture_output=True, text=True, timeout=20)
+                                       capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             self.assertEqual(recovered.stdout, original.stdout)
             with zipfile.ZipFile(work / "project/source.zip") as archive:

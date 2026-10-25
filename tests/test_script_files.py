@@ -316,7 +316,7 @@ def test_stripped_nvgt_attribution_matches_debug_information():
     try:
         (work / "game.nvgt").write_text(GAME_SCRIPT, encoding="utf-8")
         subprocess.run([str(COMPILER), "game.nvgt"], cwd=work, capture_output=True,
-                       timeout=90, check=False)
+                       timeout=90, check=False, stdin=subprocess.DEVNULL)
         assert (work / "strip.bin").exists(), "the harness did not export its module"
         library = sf.library_index([str(include)], ("*.nvgt",))
         truth = sf.nvgt_entities(decompile.load_any(str(work / "debug.bin")))

@@ -122,6 +122,10 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `as_disasm.py` | readable disassembly — resolves calls, literals, globals and members to names, and labels jumps |
 | `as_lift.py` | lifts disassembly to pseudo-source — a symbolic stack machine plus control flow |
 | `as_write.py` | writes a module back out — byte-exact round-trip, and length-changing edits |
+| `bgt_asir.py` | presents a BGT module as the AngelScript IR the NVGT decompiler reads |
+| `bgt_api.py` | `bgt api`: the engine's documented API, read out of the installed `bgt.chm` |
+| `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic |
+| `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
 | `bgt_validate.py` | run the whole pipeline over several titles and compare, stage by stage |
@@ -132,7 +136,8 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `upx.py` | the memory image of a UPX-packed runtime, so `asBCInfo[]` can be read without `upx -d` (see below) |
 | `script_files.py` | `bgt files`: which source files a stripped module was built from -- library files by name, the game's own as segments |
 | `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
-| `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it -- 50 / 50 |
+| `bgt_libcheck.py` | `bgt libcheck`: recovered code against BGT's shipped library source -- the lifter, or `--decompiler` for the `bgt recover` path |
+| `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it |
 
 `docs/ghidra_workflow.md` covers how to find `asCReader::ReadInner`, `asBCInfo[]`,
 the KDF and `pack::create` in a binary, and how to verify a transcription.
@@ -159,6 +164,13 @@ bgt asm    work/game_bytecode.bin game.exe \
            --replace sounds.dat=my.dat -o work/modified.bin
 bgt repack game.exe work/modified.bin -o patched.exe
 bgt validate game.exe patched.exe
+```
+
+Or, in one command, the whole thing as a project the compiler judges:
+
+```bash
+bgt recover game.exe -o recovered/ --compile
+bgt compile recovered/game.bgt            # just the compiler, on any script
 ```
 
 Extending the reader means reading `asCReader` out of the binary, and the Ghidra
@@ -193,17 +205,29 @@ python tests/test_toolkit.py        # the BGT known-answer tests alone
 ```
 
 `tests/test_toolkit.py` holds the BGT known-answer tests,
-`tests/test_integration.py` the checks that join the two halves (embedded-pack
-walk, NVGT packs, engine identification, the two integer codecs agreeing), and
-`tests/nvgt/` the NVGT suite, whose compiler-backed tests skip unless their
+`tests/test_recovery.py` those for project recovery — the IR adapter, the
+compiler driver and the project writer — `tests/test_integration.py` the checks
+that join the two halves (embedded-pack walk, NVGT packs, engine
+identification, the two integer codecs agreeing), and `tests/nvgt/` the NVGT
+suite, whose compiler-backed tests skip unless their
 optional fixtures are configured (`tests/nvgt/README.md`). All of it runs on
 **synthetic inputs and owned fixtures only** — no game files — so it runs
-anywhere. They deliberately target the things that fail *quietly* rather than loudly:
+anywhere. Every subprocess they and the tools launch is given an explicit
+`stdin=subprocess.DEVNULL`: a compiler run non-interactively has no use for
+stdin, and on Windows inheriting a handle the parent has closed fails the
+*spawn* with `WinError 6`, intermittently and nowhere near the real cause.
+
+They deliberately target the things that fail *quietly* rather than loudly:
 the encoded-integer boundary at 64, negative lengths rewinding the cursor, overlapping
 LZ77 matches, the keygen constant, a pack walk that does not land on EOF, the SWCR
 tag rejecting a wrong key, a tail that does not land on EOF, the low-bit table
 selector in a global-pointer operand, jump targets counted in instructions, and a
-resynchroniser that must refuse rather than run to EOF.
+resynchroniser that must refuse rather than run to EOF, the token mapping
+between the two AngelScript generations, a default-argument list stored
+last-to-first, the global-pointer shift touching only the pointer field, an
+inherited-property prefix that carries no flag, a candidate list that must not
+swallow the rest of a compiler report, and a project split that must not
+reorder declarations.
 
 Run them after any change here. The runtime checks below validate against real game
 files, but they cannot catch a regression before you have a game file in front of you.
@@ -323,6 +347,16 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | Paladin of the Sky | tagged | 47 / 47 | 926 | ends exactly at EOF |
 | Manamon 2 | len2 | 1,604 / 1,604 | 9,924 | ends exactly at EOF |
 | SBYW | tagged | 154 / 154 | 2,348 | ends exactly at EOF |
+| Super Egg Hunt | tagged | 10 / 10 | 141 | ends exactly at EOF |
+
+Super Egg Hunt is the fifth, and the first picked up cold after all of the
+above: `bgt validate` passed it on every stage, byte-exact rewrite included,
+with no reader change. It did find one thing, in the *header peek* rather than
+the reader. `bgt unpack`'s one-line dialect probe reads the first enum name's
+first byte -- and this module declares **no enums**, so the byte it read was a
+class count, and it called a `tagged` module `len2` with no sign of a problem.
+The probe now says it cannot tell, which is true and is what the trial parse
+is for. A heuristic that answers anyway is worse than one that declines.
 
 SBYW is the fourth title, and the first run after the three above were done. It
 passed every `bgt validate` stage with no reader change, byte-exact rewrite
@@ -841,6 +875,422 @@ Every one of these was wrong first, and read plausibly:
 - **Direct evidence first:** the order a pass shows outranks the include
   graph, which only settles what the pass order leaves open.
 
+# Recovering a compilable project
+
+`bgt lift` produces pseudo-source: readable, faithful to the bytecode, and not
+something a compiler accepts. `bgt recover` produces a **project** — a tree of
+`.bgt` files, an entry script that includes them, a ZIP, a report, and, where
+BGT is installed, the compiler's own verdict on the result.
+
+```bash
+bgt recover game.exe -o recovered/ --compile
+```
+
+```
+recovered/
+  game.bgt                  the entry script: #include for every file, in order
+  includes/
+    types.bgt               enums, typedefs, funcdefs
+    globals.bgt             every global, in declaration order
+    dynamic_menu.bgt        a library file, named exactly
+    classes/menu.bgt        one class per file, for the game's own classes
+    functions/part_1.bgt    the game's own global functions, in recovered segments
+  recovery.json             counts, origins, problems, compiler diagnostics
+  game_project.zip          the same tree, integrity-checked
+```
+
+The original file *names* of a game's own code are not recoverable and never
+will be (see **Source file names**), so the layout is generated and says so in
+every file header. Library files are the exception: a run that declares what a
+shipped `include/*.bgt` declares **is** that file, so those keep their real
+names — 7 of Psycho Strike's 68 classes.
+
+**The split must not reorder anything, and it is checked.** `#include` is
+textual in BGT, so a project is its files concatenated in include order, and
+`bgt_project.verify` compares that concatenation against the one-file render.
+This is not a formality: moving a declaration can change global
+initialisation order, which compiles perfectly and then behaves differently.
+The compiler agrees in practice: the project and the single file report the
+same diagnostics, from 12 of Psycho Strike's 75 files.
+
+A mismatch is reported as a **problem** rather than refused, so the project
+is still there to read — and `recovery.json` says `verified: false`.
+**Manamon 2 fails it**, on every run including a clean one in an isolated
+worktree, so its project is browsable but its include order is not proven
+faithful; the other titles pass. Read the single-file render for that title
+until the cause is found, and do not trust its file split.
+
+## Why BGT can drive the other engine's decompiler
+
+The NVGT half already had a decompiler that emits *compilable* source, checked
+by recompiling 50 library builds. BGT had a lifter. Rather than write a second
+decompiler, `bgt_asir.py` presents a BGT module as the IR that one reads. Two
+facts make that sound, and both were checked rather than assumed:
+
+- **The opcode tables are identical.** All 200 opcodes BGT's own `asBCInfo[]`
+  declares match the newer engine's numbering *and* name, exactly. The
+  decompiler dispatches on the name, so the instruction layer needs no
+  translation.
+- **BGT is the "legacy" generation `asreader` already models.** Its token ids
+  are the older `eTokenType` numbering, recovered by `t + (t>=36) + (t>=64)`:
+  BGT's 65/68/79/92 are the newer 67/70/81/94, i.e. bool/int/float/double. The
+  only three opcodes whose operand count disagrees are exactly the three that
+  reader's legacy mode overrides — `CALLSYS`, `ALLOC`, `CallPtr` — all of them
+  pointer-width differences of a 32-bit build.
+
+The agreement is **asserted per module**, not trusted: a build whose own table
+declared a different operand count would decode every later instruction of that
+body at the wrong offset while still producing real opcode names.
+
+One reader stays one reader. `as_module` remains the only thing that parses
+BGT's format — the adapter translates its dicts into dataclasses — for the same
+reason `as_write` replays a field trace instead of duplicating the format: two
+models of one format drift, and the drift is silent.
+
+## What the module does not record, and what fills the gap
+
+The newer engine saves a declaration for **every** local — offset and type
+always, name only with debug info. BGT's generation saves it only for *object*
+locals (`objVariableTypes`), so scalar slots have no type at all. That matters
+more than readability: a slot with no type cannot be declared, so the
+decompiler folds it into the expressions that read it, and folded into
+*several* reads a call is written — and run — once per read. One body came out
+as a 21,000-character expression calling `enemies_in_range` fourteen times
+where the source called it once.
+
+So `bgt_asir.slot_types()` types the scalar slots from the bytecode, which is
+a sound source for them: AngelScript has a separate opcode per operand type
+for every arithmetic, comparison and two-slot conversion. Object types come
+from the engine's own record and win; between inferences a type-tagged opcode
+beats a width-only hint, because `SetV4` is as true of an int as of a float.
+
+**A slot serves several source locals, and that has to be recorded, not
+resolved.** `clear_pathway` writes slot 1 with `SetV1`/`WRTV1` — one byte,
+through a `bool&out` parameter — and reads it with `RDR4`/`CMPIi` as the int it
+returns. Typed as either one alone it was 104 errors in that one body. Both
+declarations are recorded instead, which is exactly what the newer format holds
+for a reused slot and what the decompiler already reads to pick the numeric
+type and convert the boolean uses.
+
+Alongside that, the decompiler now refuses to duplicate an impure expression:
+a temporary whose **same value** is read twice becomes a variable. Twice means
+the same value — a slot written again between the reads is an ordinary reused
+temporary, and folding each value into its one read is both correct and what
+lets the structurer still see a loop condition as an expression rather than as
+a statement before a jump.
+
+## The compiler is the judge, and it has to be driven
+
+`bgt.exe` takes a script path and *runs* it. There is no console mode and no
+switches: it is a GUI program that reports compilation through a window of its
+own class (`bgtgame`) with no child controls. The message is exposed only to
+the accessibility tree — which is also how the engine's intended audience reads
+it — so `bgt_compile` launches the compiler, waits for the report window or for
+the process to exit, and reads the text out through UI Automation. The report
+is exactly what a developer sees, file and line and source line and message,
+and `Information: Candidates are:` carries the signatures the engine *does*
+have for a call that did not match.
+
+Three things about that are worth keeping:
+
+- **A clean exit is not the same as a clean compile.** Some modules make the
+  compiler die silently — no window, no message, exit `0xC0000005`. Read
+  as success, a module that crashes the compiler looks perfect. A
+  compile-only check also has to disarm `main`, or a *successful* compile
+  looks exactly like a hang. The reverse trap is worse, because it is
+  quiet: the engine reports through its window and *then* exits, and the
+  driver dismisses that window so it can finish — so a report and a clean
+  exit arrive together. Reading the exit code first threw the report away,
+  and Psycho Strike's 33 errors came back as `compiled cleanly`. The text
+  is parsed before the exit code is believed.
+- **Ask the compiler about the language rather than guessing.** `string[]()`
+  is valid and `weapon@[]()` is a parse error, because the parser takes
+  `weapon@[]` as the start of a declaration and nothing else; the template's
+  own name works as an expression, so a constructor is emitted as
+  `array<weapon@>()` while declarations keep the idiomatic `T[]`. Both forms
+  were put to the compiler before either was emitted.
+- **A parser that drops diagnostics flatters the result.** The first candidate
+  list swallowed every later message in the report, so 318 errors came back as
+  seven and the recovery looked almost finished. Any count that improves
+  suspiciously fast is a count worth re-deriving.
+
+## Where it stands
+
+Every title that parses recovers with **0 unmodelled opcodes and 0 bodies
+that failed to decompile**. What the compiler says, and what the project's own
+checks say:
+
+| title | lines | files | goto | unbalanced | split | compiler says |
+|---|---|---|---|---|---|---|
+| Super Egg Hunt | 6,450 | 15 | 0 | 0 | yes | **0 errors, and it runs** |
+| Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
+| Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
+| Manamon 2 | 171,755 | 1,640 | 25 | 3 | **NO** | 68, five files the engine's |
+| Crazy Party | — | — | — | — | — | does not parse yet (see below) |
+
+**Two titles compile clean and run.** `bgt compile --run` on the recovered
+project reports `compiled with 1 warning(s), and ran: it opened a window of
+its own titled 'Super Egg Hunt Version 1.53'` — which is the title the
+original executable shows, checked by launching it. Paladin does the same.
+That is the end-to-end check: executable in, source out, source back into the
+engine, game on screen. The one warning left is `The script section is empty`,
+on the generated entry script, which holds nothing but `#include` lines.
+
+**Psycho Strike's 33 are all the installed engine's.** 32 are uses of
+`elias`, a plugin type, and one is `tts_voice::speak_to_sound`, which this
+engine does not document and the game's own executable registers. Nothing
+there is the recovery's.
+
+**SBYW is absent from this table on purpose.** Its executable is no longer in
+the folder it was read from, so its numbers could not be re-measured against
+the current code and are not quoted as if they were. Everything above it in
+this document that mentions SBYW is a *parse* and *lift* result, which stands
+— it is only the recovery table that needs a run.
+
+**Manamon 2 is two different problems, and the brace count tells them apart.**
+Five files stop on `protected` or `weakref<T>`, which only its own newer
+engine has. Three more — `character.bgt`, `part_27.bgt`, `anagrams.bgt` —
+are **structurally broken**: the structurer gave up on a branch, emitted a
+`goto`, and emitted the arm anyway, so `cure_all_statuses` contains
+`} else {` with no `if`. Those files are 2, 10 and 1 braces short, while the
+`protected` file balances at zero. The compiler cannot tell you this: it
+blames a declaration hundreds of lines later with "Expected method or
+property", the same thing it says for a missing keyword. `bgt recover` now
+reports `unbalanced files` and `dangling else` for exactly that reason, and
+Manamon 2 is also the one title whose **split does not verify**, so do not
+trust its file layout either.
+
+## The engine documents itself
+
+`bgt.chm` sits next to `bgt.exe` and answers, authoritatively, every question
+of the form "does this engine have that?": one reference page per registered
+function, class and method, each carrying its signature verbatim.
+
+```bash
+bgt api garbage_collect            # void garbage_collect()
+bgt api --list sound_pool          # the type and its methods
+bgt api elias weakref --missing    # NOT documented
+```
+
+`bgt_api` unpacks it with Windows' own `hh.exe` (the only thing that reads the
+format), caches the result outside this repository, and parses the reference
+tree -- 140 functions and 25 types with 273 methods, from 413 of its 421
+pages. Tutorial pages are skipped, because example code is not an API.
+
+Three things it settles that were guesses before:
+
+- **The documented type list is the oracle for the engine gap.** Searching a
+  binary for a name is a guess; this is a list. `bgt recover` uses it, and
+  falls back to the binary search only when the help file cannot be read.
+- **The language has no `goto` and no `protected`.** Neither word appears
+  anywhere in the help file. So a residual `goto` can never compile, however
+  it is spelled -- and Manamon 2's `protected` really is a newer engine's.
+- **The command-line options are documented** (Appendix G), and match what the
+  installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
+  manager, no space before a quoted path, and a bare `-c` opens a file dialog.
+
+## Compiling without the GUI
+
+`bgt.exe` has no documented switches, and the installer's own shell verbs are
+where they are written down:
+
+```
+HKLM\SOFTWARE\Classes\bgtscript\shell\compile_debug   bgt.exe -c"%1"
+HKLM\SOFTWARE\Classes\bgtscript\shell\compile_release  bgt.exe -C"%1"
+```
+
+**No space before the path.** With a switch the engine compiles to an
+executable beside the script; without one it *runs* the script. `bgt compile`
+uses `-c` by default, which is a stronger check than running: nothing of the
+program executes, so a game cannot open a window and sit there, and the whole
+module still has to satisfy the compiler.
+
+Two things about that to keep in mind:
+
+- **The report dialog blocks it.** The engine shows one modal window for
+  warnings as well as errors and waits on it before writing the executable.
+  The driver dismisses it, which is why `_drop_unreachable` exists: a warning
+  nobody can answer is a compile that never finishes.
+- **`--run` has to look *past* that dialog.** It used to report the first
+  window with a title, which with any warning at all is the report -- so a
+  title that compiled with warnings and then ran was indistinguishable from
+  one that only compiled. Run mode now dismisses a `Compilation*` window and
+  keeps waiting, and reports the script's own window title when it appears.
+  That is what `bgt compile --run` answers: `compiled with 1 warning(s), and
+  ran: it opened a window of its own titled 'Super Egg Hunt Version 1.53'`.
+- **It hangs on a module this size.** Asked to build Psycho Strike's or
+  Paladin's recovered source into an executable, BGT 1.3's compiler dismisses
+  its dialog, holds the output file open and never completes; the partial file
+  has no `xproc10` trailer, so it starts and exits without running anything.
+  A small script builds fine, so the mechanism works -- the limit is the
+  module. Running the script is the route that works today.
+
+Each of these was found by the compiler, and the quiet bugs *behind* them were
+found by reading what it said rather than by inspection:
+
+- **The global-pointer pre-shift touched the value field too.** The older
+  dialect has no table-selector bit, so a global pointer is pre-shifted to
+  `2n + 1` — but `SetG4` carries the value being stored in the other operand,
+  and shifting that rewrote every constant assigned to a global. `const int
+  male = 1` came out as 3, which is a plausible constant and not a plausible
+  bug.
+- **A derived class re-declared its base's properties.** A derived class's
+  property table opens with its base's, in the base's order, and this
+  generation records no flag to say so. Re-declared, every one is a name
+  conflict: 1,700 of the first 1,827 errors. They are marked with the bit the
+  newer format uses rather than dropped — the entries are still needed to
+  resolve a member access by name — and only when the table really does open
+  with the base's, because marking by position would hide a real property.
+- **`STR`'s string index is a word operand here and a dword one there.** Left
+  in the word field it resolves to whichever literal sits at index 0: a real
+  string, in every body that has one.
+- **A folded short-circuit outlived its slot.** `(A && B)` is bound to its
+  slot so later reads see the whole value; left there after the slot was
+  assigned again, every later read came back as that stale expression — 104 of
+  the errors were one `clear_pathway` temporary read six times.
+- **A constructor's generated member initialisation is not source.** A member
+  declared by value but held by reference is created by code the compiler puts
+  at the top of every constructor. `_refcpy` already dropped the store for
+  exactly that reason; what was left behind was the creation, `@local_3 =
+  weapon@[]();`, which is not expressible at all. The whole eight-instruction
+  idiom is skipped now, and it is identified by the member being declared *by
+  value* — the same shape with a handle member is a real assignment.
+
+- **`CallPtr` names its variable in the other operand.** It takes one operand
+  here and two there, and the funcdef-holding variable is the *second* one --
+  which is where everything downstream looks. Left in the first, the call read
+  slot 0 as its target (`this`) and took the slot *number* as its argument
+  count: `this(local_8, <?>, <?>, ...)`, nine arguments for a nine-ary nothing,
+  in 20 of Paladin's errors.
+- **The sized array factory's length was thrown away.** The array template has
+  a factory that takes a length (`double[]@ factstub(uint)`) and another that
+  takes an initialiser-list buffer (`string[]@ factstub(int&in)`); the first
+  is by value and the second by reference, which is the only thing that tells
+  them apart. Dropping the length left two of `input_recorder`'s members
+  unsized, and its constructor then wrote past the end of them -- which the
+  engine reports as `Failed to initialize global variable 'recorder'` and
+  nothing else. The length survives only on the member's *declaration*, since
+  the store that applies it is generated prologue and is dropped.
+- **The last link of a switch chain may be a compare, not a table.** Where
+  one of those ranges holds a *single* value there is no table to build, so
+  the compiler emits `CMPIi sel, K ; JZ case ; JMP exit` instead. Read as a
+  table that is not there the chain simply stops, and the compare is left
+  behind as a branch to the switch's own exit -- a block the switch handler
+  has already consumed, so it is a `goto` to a label that is never emitted.
+  Super Egg Hunt's `submit_score` is one switch written both ways, `case 1..3`
+  as a table and `case 27` as a compare, and it was the single error in that
+  title's whole recovery.
+- **A pass with no test can stop working and nothing fails.**
+  `_drop_unreachable` deletes the statements that follow a `return` in a
+  block, because BGT reports warnings in a modal dialog and waits on it. Its
+  pattern's word boundaries were replaced by literal **backspace bytes** when
+  it was edited -- `` eaten by a shell -- which matches nothing, so
+  `return` and `goto` silently stopped terminating a block while `break;` and
+  `continue;` went on working. Output stayed valid and two "Unreachable code"
+  warnings per title looked like something the compiler had a right to say.
+  Paladin's four are gone, and both the pass and the dialect probe now have
+  tests.
+- **A constant that is only ever stored is typed by where it is stored.**
+  `slot_types` types a slot from the opcodes that *compute* with it, which
+  says nothing about `pool.pan_step = 1.5`: `SetV4 v2, 0x3FC00000` is width
+  only, no float opcode touches slot 2, and in Psycho Strike's `main` that
+  slot is a bool elsewhere -- so it compiled to `pool.pan_step = true`. The
+  destination's declared type settles it, and it has to be the *constant*
+  that gets typed, not the slot: declaring the slot makes it a variable, and a
+  variable is no longer folded into its use. Tried that way first,
+  `sound_pool::reset` went from nine lines identical to BGT's own source to
+  thirty-six lines of slot traffic -- a fix that read as a fix and made the
+  output worse. Cross-validation is what caught it, exactly as it is supposed
+  to.
+- **One source `switch` is several jump tables.** A dense `switch` compiles to
+  a bounds check, a normalisation and a computed jump into a table of jumps --
+  and a switch over scattered values becomes a *chain* of such tables, each
+  guard sending the value on to the next range. Read one table at a time, the
+  first switch's extent swallows the later ranges' bodies, which come out as
+  `return` statements with no `case` above them: `day_to_word` answered
+  "twentieth" for every day from 13 to 31. Merged, it is one switch with all
+  fourteen cases the source wrote.
+- **A `for` header may not hoist the increment** when something jumps straight
+  to the condition. That jump is a `continue` in a loop whose increment is
+  part of the body; hoisted into the header it would run on that path too.
+- **The funcdef placeholder names no funcdef.** `objVariableTypes` records a
+  funcdef-typed local as `_builtin_function_` with no signature, so with more
+  than one funcdef in the module there is nothing to resolve it to. A slot
+  recorded that way *and* used by integer opcodes is a reused slot, and the
+  placeholder is the half that cannot be declared.
+
+## A build newer than the one installed
+
+Manamon 2's 28 diagnostics are all *parse* errors, and they are not about the
+recovery: its source says `protected` and `weakref<character>`, and both
+strings are in its own `rpg.exe` and in neither BGT 1.0's nor 1.3's compiler.
+It was built with a newer BGT. A parse error stops the compiler before it
+checks anything, so those 28 are also all it can say about a 171,223-line
+module.
+
+`bgt recover` reports this from the one piece of evidence available: a type the
+module uses, does not declare, appears in the game's own executable, and does
+not appear in the installed compiler or its `exec.bin`. For Manamon 2 that
+names `weakref` and `ecdh`. (`protected` is a keyword rather than a type, so it
+is found the same way by hand and not by that check.) Saying so is the
+difference between a report and a mystery -- and it is why a diagnostic count
+is only ever a statement about *this* engine.
+
+**It can also be one method of a type the engine does have**, which is the
+same finding one level down and needs the documentation to prove: a *list* of
+a type's methods makes an absence provable where a binary search for a short
+name does not. Psycho Strike calls `tts_voice::speak_to_sound`, which returns
+the speech as a `sound@`. BGT 1.3 documents `speak`, `speak_interrupt`,
+`speak_interrupt_wait`, `speak_to_file` and `speak_wait`, and not that one --
+and `speak_to_sound` appears in the game's own `strike.exe` and in neither
+`bgt.exe` nor `exec.bin`. `method_gap` reports it next to the plugin, with the
+same corroboration `engine_gap` uses.
+
+That closes Psycho Strike out: **all 33 of its remaining diagnostics are the
+installed engine's absences** -- 32 uses of the `elias` plugin type and this
+one method -- and none of them is the recovery's.
+
+## Plugins: a type no stock engine has
+
+Psycho Strike uses `elias`, and the installed BGT 1.3 has no such type, no
+plugin directive, and no mention of either. The game's own executable has both
+`elias.dll` and the registered `elias @f()`, so the build that produced it had
+that plugin compiled in. `bgt recover` reports it — a DLL named after a type
+the module uses but does not declare is evidence, where a list of every DLL in
+the file would not be — copies the DLL into the project, and says in the entry
+script that compiling needs that engine build. It deliberately does **not**
+emit `#include "elias.dll"`: this engine's `#include` takes a script or a pack
+file, and handed a DLL it says "Expected identifier".
+
+## A clean compile is not the check that matters
+
+Compiling proves the source is valid BGT and that every call resolves. It does
+not prove the program does what the original did: an argument dropped to make
+a call match, or a condition inverted, compiles perfectly. So `bgt libcheck`
+scores this path too, against BGT's own shipped library -- source nobody here
+wrote:
+
+```bash
+bgt libcheck work/game_bytecode.bin game.exe --decompiler
+```
+
+On Psycho Strike, of the 149 library functions that appear exactly once on
+both sides: **140 have the source's exact call sequence in evaluation order**,
+3 more are within 80%, and **148 of 149 have its exact string literals**. The
+lifter, measured the same way over 155 functions, gets 153 and 155 -- it is
+still the better-validated path for reading one function, and this is the path
+that compiles.
+
+That check found the duplication the compiler cannot see:
+`sound_pool::play_extended_1d` calls `reserve_slot()` forty-five times where
+the source calls it once and keeps the result in a local. The rule that
+prevents exactly this for a dereferenced temporary (`_read_temp`) deliberately
+does **not** apply to a value pushed from a slot: applied there it promoted so
+many slots to variables that the compile went from 93 diagnostics to 400, from
+declarations landing in the wrong scope. So the duplication is known, located
+and measured rather than fixed -- which is the honest state, and the number to
+move next.
+
 # Repacking
 
 `bgt_repack.py` runs the chain backwards: compress, wrap in the container header,
@@ -1085,16 +1535,110 @@ not that your edit makes sense. Renaming a literal is safe; changing an
 instruction's stack effect or pointing a `CALL` outside `usedFunctions` yields a
 module that loads and then misbehaves.
 
+**Crazy Party does not parse, and it is the first title that does not.** It is
+the sixth, and the biggest by a wide margin: a 9.3 MB module, `tagged`
+dialect, 550 classes. Everything up to the module is unaffected -- stock key
+seed, stock container, the overlay decrypts and decompresses -- and so is most
+of the module: 11 enums, **550 / 550 class declarations, 550 / 550 class
+blocks**, 132 global properties, and **806 of its 883 module functions**, each
+decoding to exactly its declared instruction count.
+
+Then one record will not read. `void ajouteLangue()` at `0x2B3177` has a valid
+`'f'` tag, name, return type, zero parameters, funcType 1, no owner and an
+empty namespace -- and the four bytes where its instruction count belongs,
+`70 10 65 1c`, decode to 1,074,460, which is more instructions than the rest
+of the file could hold. The other 38 failures are that one desync cascading;
+the resynchroniser limps to the end of the section, and the global-function
+count after it is garbage, so `tail()` refuses at `0x2EB831`.
+
+What has been ruled out, so a next pass need not redo it: it is not the byte
+count (every alignment from `-8` to `+8` was tried, and each fails inside the
+body or on the record after it); it is not a missing flags byte, because with
+one skipped the object-variable section does not read either; and it is not a
+long body misread, because no offset anywhere near the record disassembles a
+clean run to a `RET` of the right length. The declaration sections being
+exact to the last class block means the desync starts *in this record*.
+
+So this is the case the conventions were written for: **read the reader**.
+`asCReader::ReadFunction` is statically linked into `Crazy Party.exe`, and
+the branch it takes for a funcType-1 module function in that build is the
+answer. `bgt ghidra decompile "Crazy Party.exe" --string _builtin_function_`
+is where that starts.
+
+**Crazy Party generates part of its own source**, which is worth knowing
+before reading its code and is the one real exception to the note above about
+file names. `genereHelp` and `genereAjouteLangue` emit `.bgt` text at runtime --
+the module carries literals like `// ce code est généré
+automatiquement par la fonction genereAjouteLangue`, `void ajouteLangue() {`
+and the file names `help.bgt` and `ajouteLangue.bgt`. Those are real names of
+the game's own source files, but they are a *generator's output*, not a record
+of the build, so they still do not give the compiler's file list. They do mean
+a string search for `.bgt` in this title finds source rather than a sound.
+
 **A fifth title may differ again.** Three builds produced two answers for the
 template-namespace field and two for the script-object flag. The fourth (SBYW)
 parsed unchanged but used opcodes none of the others did. Run `bgt validate`
 before assuming a new title matches, and check the lifter's passthrough count
 as well as the stages.
 
-**The NVGT library corpus is checked for compiling, not meaning.** All 50
-library builds recompile. But only `test_roundtrip_behavior`'s two fixtures are
-*run* and compared, and NVGT decompiler bugs compile cleanly while computing
-something else. A new construct belongs in a fixture, not only in the corpus.
+And run `bgt recover` on more than one, for the reason Paladin showed: the
+default-argument order was wrong from the start, and Psycho Strike has too few
+defaults for it to matter there. A title that recovers well is not evidence.
+
+**What the recovered source still does not compile.** `bgt recover --compile`
+is the measure, and the groups it leaves are known rather than mysterious:
+
+- **Residual `goto`.** The structurer labels flow it cannot shape, and
+  AngelScript has no `goto`, so every one of those lines is an error -- 50 in
+  Psycho Strike, from 9 bodies of 1,102. Either the shape gets recognised or
+  those bodies need a dispatch rewrite; a label is not an option.
+- **A call the simulation could not supply arguments for** prints `<?>` rather
+  than inventing values: 10 sites in Paladin, 1 in Psycho Strike. Marked and
+  counted is the right behaviour, but it does not compile.
+- **A funcdef-typed local.** `objVariableTypes` names the placeholder type
+  `_builtin_function_` with no signature to identify which funcdef it is, so
+  the declaration has no name source can use. 7 sites in Psycho Strike.
+- **A type no stock engine registers** (Psycho Strike's `elias`): reported,
+  with the DLL it comes from, and not compilable here at all.
+
+**The NVGT library corpus is checked for compiling, not meaning.** 40 of 52
+library builds recompile -- six modules fail, the same six at HEAD and after
+every change here, all on one generated list local that is used but not
+declared. NVGT decompiler bugs compile cleanly while computing something
+else, so a new construct belongs in a fixture, not only in the corpus.
+
+**And the fixtures that *run* have to be able to run.** `test_roundtrip_behavior`
+is the check that catches a decompile which compiles and lies, and in this
+environment it was inert: without `NVGT_COMPILER` it skips, and with it every
+case died in `subprocess` before the compiler started. So the BGT work changed
+`decompile.py` by 774 lines with that check silently not running, and three
+regressions got in. Each was found by making it run, and fixed rather than
+accommodated:
+
+- **A dense switch's default is not last.** The arms come out in bytecode
+  order, and a jump table's default target is the code right after the table
+  -- before every case body. AngelScript rejects that ("The default case must
+  be the last one"), so three fixtures and the library's `native_form` did not
+  compile at all. `_default_last` moves it, but only when it neither falls
+  through nor is fallen into: its own statements must end in `return`, `break`
+  or `continue`, and so must the arm above it. Otherwise the order stands,
+  because a switch that does not compile beats one that runs the wrong arm.
+- **A bool-literal comparison stopped simplifying.** Typing a reused slot
+  numeric renders a bool operand as `(X ? 1 : 0)`, and the simplification
+  matched only a bare `true`/`false`, so `x == false` came back as
+  `(!getf(arg0) ? 1 : 0) == (false ? 1 : 0)` -- correct, compiling, and
+  saying nothing. `_unwrap_bool` sees through the wrapper; its paren-balance
+  check is load-bearing, because `(a ? 1 : 0) + (b ? 1 : 0)` also begins with
+  `(` and ends with `)`.
+- **A generated local's declaration is hoisted**, which split
+  `bool __nvgt_ret_N = d.get(...)` into a declaration and an assignment. That
+  is the safer shape -- such a local can be read outside the block whose call
+  created it -- so the fixture now pins the intent rather than the old
+  spelling.
+
+The lesson is about the harness, not the decompiler: **a check that cannot run
+is worse than no check**, because it is counted. Every `subprocess` call in
+this repository now passes `stdin=subprocess.DEVNULL`, and that is the reason.
 
 **Two narrow NVGT constructs still decompile wrong** (repros in `docs/nvgt.md`),
 both pre-existing and found while fixing the three below: a `? :` over the

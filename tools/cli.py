@@ -15,8 +15,12 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt asm    work/game_bytecode.bin game.exe \
                --replace sounds.dat=my.dat -o modified.bin
     bgt repack game.exe modified.bin -o patched.exe
+    bgt recover game.exe -o recovered/ --compile    a whole project, compiler-checked
+    bgt compile recovered/game.bgt         BGT's own compiler, every diagnostic
+    bgt api garbage_collect                what the engine documents, from bgt.chm
     bgt validate game.exe patched.exe
-    bgt libcheck work/game_bytecode.bin game.exe   lifted code vs BGT's own library source
+    bgt libcheck work/game_bytecode.bin game.exe   recovered code vs BGT's own library
+               [--decompiler]                       source: the lifter, or `bgt recover`
     bgt files work/game_bytecode.bin game.exe      which source files it was built from
     bgt ghidra status                      is Ghidra + a JDK 21+ available?
     bgt ghidra decompile game.exe --string _builtin_function_
@@ -45,16 +49,20 @@ from typing import List, Optional
 
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
-                   bgt_crack, bgt_ghidra, bgt_libcheck, bgt_pack, bgt_repack,
-                   bgt_unpack, bgt_validate, bgtlib, engine, script_files)
+                   bgt_api, bgt_compile, bgt_crack, bgt_ghidra, bgt_libcheck,
+                   bgt_pack, bgt_project, bgt_repack, bgt_unpack, bgt_validate,
+                   bgtlib, engine, script_files)
 except ImportError:       # run directly from a checkout
     import as_disasm
     import as_lift
     import as_module
     import as_opcodes
     import as_write
+    import bgt_api
+    import bgt_compile
     import bgt_crack
     import bgt_ghidra
+    import bgt_project
     import bgt_libcheck
     import bgt_pack
     import bgt_repack
@@ -263,6 +271,28 @@ def cmd_ghidra(args: argparse.Namespace) -> int:
     return bgt_ghidra.main(args.rest)
 
 
+def cmd_api(args: argparse.Namespace) -> int:
+    """`bgt api` takes real options, so they are declared and forwarded."""
+    argv = list(args.name)
+    for flag in ("chm", "cache", "list", "json"):
+        value = getattr(args, flag)
+        if value:
+            argv += ["--" + flag, value]
+    if args.missing:
+        argv.append("--missing")
+    return _run(bgt_api.main, argv, prog="bgt api")
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Everything after `bgt recover` is handled by bgt_project's own parser."""
+    return _run(bgt_project.main, args.rest, prog="bgt recover")
+
+
+def cmd_compile(args: argparse.Namespace) -> int:
+    """Everything after `bgt compile` is handled by bgt_compile's own parser."""
+    return _run(bgt_compile.main, args.rest, prog="bgt compile")
+
+
 def cmd_files(args: argparse.Namespace) -> int:
     """Everything after `bgt files` is handled by script_files' own parser."""
     return _run(script_files.main, args.rest, prog="bgt files")
@@ -346,6 +376,8 @@ def cmd_libcheck(args: argparse.Namespace) -> int:
         argv += ["--include", folder]
     if args.verbose:
         argv.append("-v")
+    if args.decompiler:
+        argv.append("--decompiler")
     return bgt_libcheck.main(argv)
 
 
@@ -528,13 +560,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_ghidra)
 
     p = sub.add_parser("libcheck",
-                       help="compare lifted code with BGT's shipped library source")
+                       help="compare recovered code with BGT's shipped library source")
     p.add_argument("module")
     p.add_argument("exe", nargs="?")
     p.add_argument("--opcodes")
     p.add_argument("--include", action="append")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--decompiler", action="store_true")
     p.set_defaults(func=cmd_libcheck)
+
+    p = sub.add_parser("recover",
+                       help="a browsable, compilable project from an executable")
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="game.exe -o DIR [--compile] [--no-zip] [--include DIR]")
+    p.set_defaults(func=cmd_recover)
+
+    p = sub.add_parser("compile",
+                       help="compile a .bgt script with BGT's own compiler")
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="script.bgt [--compiler bgt.exe] [--build debug|release] "
+                        "[--run] [--raw]")
+    p.set_defaults(func=cmd_compile)
+
+    p = sub.add_parser("api",
+                       help="the engine's documented API, from the installed bgt.chm")
+    p.add_argument("name", nargs="*", help="names to look up")
+    p.add_argument("--chm")
+    p.add_argument("--cache")
+    p.add_argument("--list", metavar="SUBSTRING")
+    p.add_argument("--missing", action="store_true")
+    p.add_argument("--json", metavar="FILE")
+    p.set_defaults(func=cmd_api)
 
     p = sub.add_parser("files",
                        help="which source files a module was built from (BGT or NVGT)")

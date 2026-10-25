@@ -34,6 +34,13 @@ def angelscript_probe(bc):
     enum count. The string encoding that follows is what distinguishes BGT builds:
     older ones tag each string 'n' (new) / 'r' (back-reference), newer ones use
     AngelScript's len*2 savedStrings scheme.
+
+    It can only answer when the module *has* an enum, because the byte it reads
+    is the first enum name's. With no enums the next section is the class
+    declarations, which start with a count -- and Super Egg Hunt, which has
+    none, was reported as the newer dialect while being the older one. This is
+    a peek at the head, not the answer: `as_module` settles the dialect by
+    trial parse, and only accepts the one whose tail lands exactly on EOF.
     """
     if len(bc) < 8:
         return "too short to identify"
@@ -46,7 +53,11 @@ def angelscript_probe(bc):
     else:
         count, nxt = None, bc[2]
 
-    if nxt == 0x6E:
+    if count == 0:
+        # Nothing read here is a string, so neither answer would mean
+        # anything. `bgt identify` and `as_module` decide it by parsing.
+        style = "dialect not visible here (no enums) -- trial parse decides"
+    elif nxt == 0x6E:
         style = "tagged strings ('n'/'r') -- Psycho Strike lineage"
     elif nxt % 2 == 0:
         style = "len*2 savedStrings -- newer AngelScript"

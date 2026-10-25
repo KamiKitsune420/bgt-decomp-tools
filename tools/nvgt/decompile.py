@@ -30,6 +30,7 @@ import sys
 import argparse
 import re
 import struct
+import collections
 import copy
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -295,6 +296,271 @@ class Atom:
     ternary: tuple[str, Atom, Atom] | None = None
 
 
+def _is_repeatable(a: Atom) -> bool:
+    """Whether writing this value at several reads keeps the program's meaning.
+
+    A constant, a variable, `this` or a plain property read can be repeated:
+    reading it again costs nothing and yields the same thing. A call cannot --
+    repeating it calls it again -- and neither can anything built out of one,
+    which is why the test is on the text as well as the kind.
+    """
+    if a.kind in ("const", "null", "this", "typeid"):
+        return True
+    if a.kind in ("var", "global", "prop", "raw"):
+        return "(" not in a.text
+    return False
+
+
+NUMERIC_TOKENS = (70, 71, 72, 73, 77, 78, 79, 80)   # int, int8/16/64, uint...
+
+
+#   <type> <name> ;|=|(      -- a declaration, with or without an initialiser.
+# The keyword guard matters in both directions: `return local_6;` read as a
+# declaration both suppresses the declaration local_6 actually needs and makes
+# every `case` arm look as though it declares something.
+DECL_RE = re.compile(r"^\s*(?!(?:return|break|continue|case|default|else|goto|"
+                     r"while|if|for|do|switch|super|new|delete)\b)"
+                     r"(?:const\s+)?[A-Za-z_][\w:]*(?:<[^>]*>)?(?:@|\[\])*@?\s+"
+                     r"([A-Za-z_]\w*)\s*[;=(]")
+SLOT_NAME_RE = re.compile(r"\b((?:local|tmp)_?\d+)\b")
+# Locals this decompiler generates. They belong to the function, never to the
+# block they were written in.
+GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list)_")
+
+
+def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
+                                 indent: int) -> list[str]:
+    """Declare any slot the body reads but never assigns.
+
+    A frame slot the function reads before writing holds what the frame was
+    given: null for a handle, a default-constructed object. The write that
+    would have declared it may not exist at all -- a constructor's generated
+    member initialisation is dropped, and a slot zeroed at entry is never
+    assigned -- and then the reads are "'local_19' is not declared".
+
+    The declaration is emitted without an initialiser, which is exactly the
+    state the slot was in. A slot whose type cannot be named in source is left
+    alone rather than declared as something it is not.
+    """
+    declared = {match.group(1) for line in lines
+                if (match := DECL_RE.match(line))}
+    used: dict[str, int] = {}
+    for line in lines:
+        for name in SLOT_NAME_RE.findall(_mask_strings(line)):
+            used.setdefault(name, 0)
+    missing = []
+    for name in used:
+        if name in declared:
+            continue
+        off = next((o for o in fd.var_names if fd.name_of(o) == name), None)
+        dt = fd.var_types.get(off) if off is not None else None
+        if dt is None:
+            continue
+        text = dt.format().removeprefix("const ").replace("&", "").strip()
+        if (not text or "tok" in text or "$" in text
+                or text.startswith("_builtin_function_")):
+            continue                      # not a type source can name
+        missing.append("    " * indent + "%s %s;" % (text, name))
+    return missing + lines
+
+
+def _mask_strings(line: str) -> str:
+    """The line with string literals blanked, so a name inside one is not a use."""
+    out, in_str, escape = [], False, False
+    for char in line:
+        if in_str:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_str = False
+            out.append(" ")
+            continue
+        if char == '"':
+            in_str = True
+            out.append(" ")
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _member_array_sizes(c: TypeInfo) -> dict:
+    """Lengths the constructor's generated prologue gives array members.
+
+    `double[] down_count(256);` compiles to the length factory called in every
+    constructor and stored into the member. That store is generated code and
+    is dropped, so re-emitting the property declaration is what has to carry
+    the length -- and it is the only place it can go.
+    """
+    shape = ["STOREOBJ", "PshVPtr", "PshVPtr", "ADDSi", "REFCPY"]
+    out = {}
+    for f in list(c.constructors) + list(c.factories):
+        code = f.bytecode or []
+        for k, ins in enumerate(code):
+            if ins.name not in ("CALL", "CALLSYS") or ins.func_ref is None:
+                continue
+            if ins.func_ref.name != "factstub" or not ins.func_ref.param_types:
+                continue
+            parameter = ins.func_ref.param_types[0]
+            if parameter.obj_type is not None or parameter.is_reference:
+                continue                       # the list factory, not a length
+            if [i.name for i in code[k + 1:k + 1 + len(shape)]] != shape:
+                continue
+            previous = code[k - 1] if k else None
+            if previous is None or previous.name not in ("PshC4", "PshV4"):
+                continue
+            name = (code[k + 4].prop_name or "").split(".")[-1]
+            if not name:
+                continue
+            out.setdefault(name, str(_s32(previous.dw_arg))
+                           if previous.name == "PshC4" else None)
+            if out[name] is None:
+                del out[name]
+    return out
+
+
+def _drop_unreachable(lines: list[str]) -> list[str]:
+    """Remove statements that follow a terminator in the same block.
+
+    A `return`, `break` or `continue` ends its block, so anything after it at
+    the same indentation cannot run. The compiler says so -- "Unreachable
+    code" -- and a warning is not harmless in practice: BGT shows a modal
+    report for warnings as well as errors and waits on it, which stops an
+    unattended compile from ever writing its executable.
+
+    Dropping them cannot change behaviour, because nothing reaches them. It
+    can change the *source* from what the original said, which is why it is
+    the last pass and nothing else depends on it.
+    """
+    out: list[str] = []
+    dead: int | None = None
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if dead is not None:
+            if (indent < dead or stripped.startswith(("}", "case ", "default:", "else"))
+                    or indent > dead):
+                dead = None            # the block ended, or a label made it live
+            else:
+                continue
+        out.append(line)
+        if re.match(r"(return\b|break;|continue;|goto\b)", stripped):
+            dead = indent
+    return out
+
+
+BOOL_WRAP = re.compile(r"^\((.*) \? 1 : 0\)$", re.S)
+
+
+def _unwrap_bool(text: str) -> str:
+    """`(X ? 1 : 0)` is X wherever only its truth matters.
+
+    One slot serves several source locals, so a bool-valued operand stored in
+    a slot typed numeric renders with that wrapper (`_normalize_arg`). The
+    bool-literal simplification below then stopped matching, and `x == false`
+    came back as `(!getf(arg0) ? 1 : 0) == (false ? 1 : 0)` -- correct, and
+    saying nothing.
+
+    The balance check is not decoration: `"(a ? 1 : 0) + (b ? 1 : 0)"` also
+    begins with `(` and ends with `)`, and a greedy match would hand back the
+    unbalanced middle.
+    """
+    match = BOOL_WRAP.match(text)
+    if match is None:
+        return text
+    inner = match.group(1)
+    depth = 0
+    for char in inner:
+        depth += (char == "(") - (char == ")")
+        if depth < 0:
+            return text
+    return text if depth else inner
+
+
+TERMINATOR = re.compile(r"(return\b|break;|continue;)")
+
+
+def _ends_in_terminator(lines) -> bool:
+    """Whether this arm cannot fall through into the next one."""
+    for _, text in reversed(lines):
+        if text.strip() in ("", "}", "{"):
+            continue
+        return bool(TERMINATOR.match(text.strip()))
+    return False
+
+
+def _default_last(arms):
+    """Move the `default:` arm to the end, when that changes nothing.
+
+    AngelScript rejects a `default` that is not last ("The default case must
+    be the last one"), and the arms come out in bytecode order, where a dense
+    jump table's default target is the code immediately after the table --
+    physically *before* every case body. So the default is often first, and
+    the switch does not compile.
+
+    Reordering is only safe when the default arm neither falls through nor is
+    fallen into: its own statements must end in a `return`, `break` or
+    `continue`, and the arm above it (if any) must too. Both hold for the
+    common shape, where every arm returns. When they do not, the arms are left
+    in the order the bytecode gives them -- a switch that does not compile is
+    better than one that compiles and runs the wrong arm.
+    """
+    index = next((k for k, (names, _) in enumerate(arms) if "default:" in names), None)
+    if index is None or index == len(arms) - 1:
+        return arms
+    names, lines = arms[index]
+    if not _ends_in_terminator(lines):
+        return arms
+    if index > 0 and not _ends_in_terminator(arms[index - 1][1]):
+        return arms
+    return arms[:index] + arms[index + 1:] + [(names, lines)]
+
+
+def _constructor_type(dt: DataType) -> str:
+    """The type as a *constructor expression* can name it.
+
+    BGT writes an array as `T[]` in a declaration, and that form is a
+    declaration and nothing else: `weapon@[]()` is a parse error ("Expected
+    ';', instead found '@'"), because the parser takes `weapon@[]` as the start
+    of one. The template's own name works as an expression -- `array<weapon@>()`
+    compiles -- so a constructor uses that form while declarations keep the
+    idiomatic one. Both were checked against the compiler.
+    """
+    if (dt.obj_type is not None and dt.obj_type.template_syntax == "suffix"
+            and dt.template_subtypes):
+        inner = ", ".join(sub.format() for sub in dt.template_subtypes)
+        return "%s<%s>" % (dt.obj_type.name, inner)
+    return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
+
+
+def _initialiser(dt: DataType, expr: str) -> str | None:
+    """How source writes this initialiser, or None if the declaration IS it.
+
+    Two shapes cannot be written as an assignment:
+
+    * A reference type registered with a factory -- `sound`, `timer` and
+      `tts_voice` in BGT -- is created by being declared. `sound music =
+      sound();` is "No appropriate opAssign method found in 'sound'", because
+      creating one and assigning one are different things and only the first
+      exists here.
+    * An array made by the template factory stub is rendered as its own
+      construction (`character@[]()`), which the first rule then reduces to
+      the declaration: `character@[] fighters;`.
+
+    And a one-byte value reads as a bool where the declared type is an
+    integer, which will not take one: `uint8 game_diff = true;`.
+    """
+    bare = dt.format().removeprefix("const ").strip()
+    if expr in (f"{bare}()", f"{_constructor_type(dt)}()"):
+        return None
+    if dt.token_type in NUMERIC_TOKENS and expr in ("true", "false"):
+        return "1" if expr == "true" else "0"
+    if dt.token_type == 67 and expr in ("0", "1"):
+        return "true" if expr == "1" else "false"
+    return expr
+
+
 def _deref_ptr(mod: Module, a: Atom) -> Atom:
     """Turn a PSF/VAR address atom into the value it points at (var only;
     temp resolution happens in FuncDecompiler._deref which knows the temps)."""
@@ -373,6 +639,16 @@ class FuncDecompiler:
             highest = max(highest, off)
         self.sparse_switches = {index: pattern for index in range(len(self.instrs))
                                if (pattern := self._sparse_switch_pattern(index)) is not None}
+        # The dense form -- a jump table -- yields the same tuple, so the rest
+        # of the pipeline does not care which one it was.
+        for index in range(len(self.instrs)):
+            if index in self.sparse_switches:
+                continue
+            pattern = self._dense_switch_pattern(index)
+            if pattern is not None:
+                self.sparse_switches[index] = pattern
+        self.stored_const_types = self._stored_constant_types()
+        self.generated_member_init = self._generated_member_initialisers()
         for index, (_, cases, default, join, _) in self.sparse_switches.items():
             first_case = min([target for _, target in cases] + [default])
             for op in self.instrs:
@@ -423,12 +699,64 @@ class FuncDecompiler:
         self.deferred_out_calls: dict[str, tuple] = {}
         self.pending_value_call_pos: int = 0
         self.consumed_temps: set[int] = set()
+        # slots this simulation promoted from temporary to variable
+        self.forced_slots: set[int] = set()
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
         self.object_branch_snapshots: dict[int, dict[int, Atom]] = {}
 
     # -- variable helpers ---------------------------------------------------
+
+    def _generated_member_initialisers(self) -> set[int]:
+        """Instructions of the member initialisation a constructor is given.
+
+        A member declared by value but held by reference -- `timer movement;`,
+        `weapon@[] temporary_weapons;` -- is created by code the compiler puts
+        at the top of every constructor, which source never wrote:
+
+            CALLSYS $beh3()          create one
+            STOREOBJ v               keep it
+            PshVPtr v / PshVPtr 0    the new object, then `this`
+            ADDSi character.movement the member's address
+            REFCPY                   store it
+            PopPtr / FREE v          drop the temporary
+
+        `_refcpy` already drops the store itself, for exactly this reason, and
+        re-emitting the property declarations reproduces the whole prologue on
+        the way back in. What was left behind was the creation -- `@local_3 =
+        weapon@[]();` -- which is both noise and, for an array of handles,
+        not even expressible: BGT's parser takes `weapon@[]` as a declaration
+        and nothing else, so there is no constructor call to write.
+
+        The shape alone is not enough to call it generated, because
+        `@this.handle_member = timer();` compiles to the same eight
+        instructions. What settles it is the member being declared *by value*:
+        then no source statement can produce this, and the prologue is the
+        only explanation.
+        """
+        out: set[int] = set()
+        if self.fn.object_type is None:
+            return out
+        shape = ["STOREOBJ", "PshVPtr", "PshVPtr", "ADDSi", "REFCPY",
+                 "PopPtr", "FREE"]
+        for k in range(len(self.instrs) - len(shape)):
+            if self.instrs[k].name not in ("CALL", "CALLSYS"):
+                continue
+            if [i.name for i in self.instrs[k + 1:k + 1 + len(shape)]] != shape:
+                continue
+            slot = _s16(self.instrs[k + 1].w_arg)
+            if slot <= 0 or _s16(self.instrs[k + 2].w_arg) != slot:
+                continue
+            if _s16(self.instrs[k + 7].w_arg) != slot:
+                continue
+            if _s16(self.instrs[k + 3].w_arg) != 0:      # not `this`
+                continue
+            dt = self.property_types.get(self.instrs[k + 4].prop_name)
+            if dt is None or dt.is_object_handle:
+                continue                                  # a real assignment
+            out.update(range(k, k + 1 + len(shape)))
+        return out
 
     def name_of(self, off: int) -> str:
         n = self.var_names.get(off)
@@ -451,8 +779,38 @@ class FuncDecompiler:
             return self.list_values.get(a.offset, {}).get(a.list_index, Atom("raw", "<?>"))
         if a.is_ptr and a.offset is not None:
             if a.offset in self.temps:
-                self.consumed_temps.add(a.offset)
-                return self.temps[a.offset]
+                value = self._read_temp(a.offset)
+                # A slot whose value is read twice is a variable, not a
+                # temporary. Twice means the SAME value twice: a slot written
+                # again between the reads is an ordinary reused temporary, and
+                # folding each value into its one read is both correct and
+                # what lets the structurer see a loop condition as an
+                # expression rather than as a statement before the jump. Folding an expression into every read writes --
+                # and runs -- it once per read: a stripped build with no
+                # declaration for the slot turned one `enemies_in_range()`
+                # call into fourteen, in a 21,000-character expression. Only
+                # an impure value forces this; a constant or another variable
+                # can be repeated without changing what the program does.
+                return value
+            # An object slot the frame zeroed and nothing wrote holds null:
+            # a handle member's initialisation, and the default for an omitted
+            # handle argument, both read it. Rendered as the variable it is
+            # not, the reads are "'local_6' is not declared" -- 204 of
+            # Paladin's errors -- and the call then looks as though it passed
+            # an int. Only where null is what it would hold: a numeric slot
+            # read before it is written reads as 0, not null.
+            # A slot under list construction has been written -- its values
+            # live in `list_values`, not in `temps` -- so it is not one of
+            # these: `array<string>(null)` for an initialiser list is "No
+            # matching signatures to 'string[](<null handle>)'".
+            if (a.offset > 0 and a.offset not in self.declared
+                    and a.offset not in self.parameter_slots
+                    and a.offset not in self.list_values
+                    and a.offset not in self.list_sizes
+                    and a.offset not in self.list_types):
+                dt = self.var_types.get(a.offset)
+                if dt is None or dt.is_object_handle or dt.obj_type is not None:
+                    return Atom("null", "null")
             return self.var_atom(a.offset)
         if a.is_ptr:
             # pointer into an object (property, global): reading through it
@@ -465,15 +823,23 @@ class FuncDecompiler:
     def _bind(self, off: int, a: Atom) -> None:
         """Store a value into frame slot `off` (statement or temp alias)."""
         a = self._deref(a) if a.is_ptr else a
-        if a.kind == "const" and off in self.var_types:
+        if (a.kind == "const" and off in self.var_types
+                # ...unless this constant was typed from where it is stored
+                # rather than from the slot it passes through. Re-normalising
+                # to the slot's type is what turned 1.5f back into `true`:
+                # `_typed_constant` drops the bits for a bool, so nothing
+                # downstream could recover the value.
+                and self.k not in self.stored_const_types):
             a = self._normalize_arg(a, self.var_types[off])
         if off == self.return_slot and self.returns_value and off not in self.parameter_slots:
             if _needs_out_ref(self.fn.return_type):
+                self.consumed_temps.discard(off)
                 self.temps[off] = a
                 return
         if self.is_named(off):
             self._emit_assign(off, a)
         else:
+            self.consumed_temps.discard(off)
             self.temps[off] = a
 
     def _emit_declare(self, off: int) -> None:
@@ -486,6 +852,13 @@ class FuncDecompiler:
         self.events.append(Event("stmt", self._pos(), (tn, f"{self.name_of(off)};")))
 
     def _emit_assign(self, off: int, a: Atom) -> None:
+        # The statement supersedes any expression still aliased to this slot.
+        # A folded short-circuit is bound to its slot so later reads see the
+        # whole value; left there after the slot is assigned again, every
+        # later read came back as that stale `(A && B)` -- 104 of Psycho
+        # Strike's errors were one `clear_pathway` temporary read six times.
+        self.temps.pop(off, None)
+        self.consumed_temps.discard(off)
         if off in self.var_types:
             a = self._normalize_arg(a, self.var_types[off])
         if off in self.mixed_boolean_slots:
@@ -587,6 +960,7 @@ class FuncDecompiler:
                 if len({v.declared_at for v in decls}) > 1:
                     for v in decls:
                         redeclare.setdefault(v.declared_at, []).append(v)
+        self.skip_indexes.update(self.generated_member_init)
         while self.k < n:
             if self.k in self.skip_indexes:
                 self.k += 1
@@ -611,6 +985,7 @@ class FuncDecompiler:
             for off, value in self.object_branch_snapshots.pop(ins.pos, {}).items():
                 current = self.temps.get(off)
                 if current and current.kind == "null":
+                    self.consumed_temps.discard(off)
                     self.temps[off] = value
             # Object lifetime metadata can precede the instruction consuming
             # its last value. FREE and explicit stores maintain aliases.
@@ -743,8 +1118,20 @@ class FuncDecompiler:
             while self.bool_merges and self.bool_merges[-1]["dest"] == off \
                     and ins.pos >= self.bool_merges[-1]["merge"]:
                 merge = self.bool_merges.pop()
-                value = Atom("call", f"({merge['first'].text} {merge['op']} {value.text})")
-                self.temps[off] = value
+                # Both sides of `&&` / `||` are bools, and the compiler reuses
+                # int temporaries for them, so the slot's declared type is
+                # often int: `(c) && local_1` is "No conversion from 'int' to
+                # 'bool' available".
+                operand = self._normalize_arg(value, DataType(token_type=67))
+                value = Atom("call",
+                             f"({merge['first'].text} {merge['op']} {operand.text})",
+                             data_type=DataType(token_type=67))
+                if not self.is_named(off):
+                    # Only a temporary carries the merged value onward; a
+                    # named variable keeps its own identity, and its later
+                    # writes are statements that this alias would outlive.
+                    self.consumed_temps.discard(off)
+                    self.temps[off] = value
             self.value_reg = value
             return
         if name in ("CpyRtoV4", "CpyRtoV8"):
@@ -760,7 +1147,10 @@ class FuncDecompiler:
             while self.bool_merges and self.bool_merges[-1]["dest"] == src \
                     and ins.pos >= self.bool_merges[-1]["merge"]:
                 merge = self.bool_merges.pop()
-                value = Atom("call", f"({merge['first'].text} {merge['op']} {value.text})")
+                operand = self._normalize_arg(value, DataType(token_type=67))
+                value = Atom("call",
+                             f"({merge['first'].text} {merge['op']} {operand.text})",
+                             data_type=DataType(token_type=67))
             self._bind(_s16(ins.w_arg), value)
             return
         if name in ("SetV4", "SetV8", "SetV2", "SetV1"):
@@ -769,15 +1159,19 @@ class FuncDecompiler:
             else:
                 off = _s16(ins.w_arg)
                 v = ins.qw_arg if name == "SetV8" else _s32(ins.dw_arg)
-                a = self._typed_constant(v, self.var_types.get(off), name == "SetV8")
+                a = self._typed_constant(
+                    v, self.stored_const_types.get(self.k) or self.var_types.get(off),
+                    name == "SetV8")
             self._bind(_s16(ins.w_arg), a)
             return
         if name == "LdGRdR4":
             g = ins.global_name or "<?global>"
-            self._bind(_s16(ins.w_arg), Atom("global", g))
+            self._bind(_s16(ins.w_arg),
+                       Atom("global", g, data_type=self.global_types.get(g)))
             self.pending_global = g
             # the value register now holds &global (WRTV4 writes through it)
-            self.value_reg = Atom("global", g, 1, is_ptr=True)
+            self.value_reg = Atom("global", g, 1, is_ptr=True,
+                                  data_type=self.global_types.get(g))
             return
         if name in ("WRTV1", "WRTV2", "WRTV4", "WRTV8"):
             v = self._slot_atom(_s16(ins.w_arg))
@@ -797,8 +1191,14 @@ class FuncDecompiler:
                 self._stmt(f"{self.value_reg.text} = {self._deref(v).text};")
             return
         if name == "CpyGtoV4":
-            # value register -> frame slot (the reverse of CpyVtoG4)
-            self._bind(_s16(ins.w_arg), Atom("global", ins.global_name or "<?global>"))
+            # value register -> frame slot (the reverse of CpyVtoG4). With the
+            # global's declared type: a bool global copied into a slot the
+            # bytecode uses as an int is "Can't implicitly convert from 'bool'
+            # to 'int'" without it, where the conversion is what the compiler
+            # itself would have written.
+            self._bind(_s16(ins.w_arg),
+                       Atom("global", ins.global_name or "<?global>",
+                            data_type=self.global_types.get(ins.global_name)))
             self.value_reg = Atom("raw", "<?reg>")
             return
         if name == "CpyVtoG4":
@@ -812,7 +1212,12 @@ class FuncDecompiler:
         if name == "LDG":
             g = ins.global_name or "<?global>"
             self.pending_global = g
-            self.value_reg = Atom("global", g, 1, is_ptr=True)
+            # With the global's type: a `bool` global read through this
+            # pointer into a slot the bytecode also uses as an int needs the
+            # conversion the compiler would have written (`RDR1` reads one
+            # byte, and the slot is declared from the wider use).
+            self.value_reg = Atom("global", g, 1, is_ptr=True,
+                                  data_type=self.global_types.get(g))
             return
         if name in ("RDR1", "RDR2", "RDR4", "RDR8"):
             # RDR* reads *through* the pointer in the value register into a
@@ -887,7 +1292,8 @@ class FuncDecompiler:
                 # simplification _taken_condition does, but for a comparison
                 # used as a value inside a larger `&&` / `||`.
                 if op in ("==", "!="):
-                    for lit, other in ((b.text, a.text), (a.text, b.text)):
+                    left, right = _unwrap_bool(a.text), _unwrap_bool(b.text)
+                    for lit, other in ((right, left), (left, right)):
                         if lit in ("true", "false"):
                             keep = (op == "==") == (lit == "true")
                             text = other if keep else _negate_cond(other)
@@ -971,7 +1377,14 @@ class FuncDecompiler:
         if name in ("PSF", "PshVPtr", "VAR"):
             off = _s16(ins.w_arg)
             label = self.name_of(off)
-            self.stack.append(Atom("ptr", label, 2, is_ptr=True, offset=off))
+            # With the slot's declared type: a write THROUGH this pointer is
+            # the only thing that says what the destination is, and without it
+            # an int slot written to a `bool&out` parameter came out as
+            # `arg0 = local_1;` -- "Can't implicitly convert from 'int' to
+            # 'bool&'" -- instead of the conversion the compiler would have
+            # made itself.
+            self.stack.append(Atom("ptr", label, 2, is_ptr=True, offset=off,
+                                   data_type=self.var_types.get(off)))
             return
         if name in ("PshV4", "PshV8"):
             a = self._slot_atom(_s16(ins.w_arg))
@@ -998,6 +1411,18 @@ class FuncDecompiler:
         if name == "RDSPtr":
             if self.stack:
                 self.stack[-1] = self._deref(self.stack[-1])
+            return
+        if name == "STR":
+            # The older engine (BGT's AngelScript) has a dedicated opcode for a
+            # string literal: STR pushes the constant's address and then its
+            # length, and the registered string factory pops both to build the
+            # string. stackInc is 2 there for exactly that reason, so pushing
+            # one slot makes the factory's arity over-pop and the literal
+            # disappears into a neighbouring call.
+            self.stack.append(Atom("const", f'"{_esc(ins.string_const)}"', 1)
+                              if ins.string_const is not None
+                              else Atom("raw", f"<?str#{ins.dw_arg}>"))
+            self.stack.append(Atom("const", "<strlen>", 1))
             return
         if name in ("PshG4", "PshGPtr", "PGA"):
             if ins.string_const is not None and name in ("PGA", "PshGPtr"):
@@ -1036,6 +1461,7 @@ class FuncDecompiler:
             self.obj_reg = self._slot_atom(off)
             self.consumed_temps.add(off)
             if not self.is_named(off):
+                self.consumed_temps.discard(off)
                 self.temps[off] = Atom("null", "null", 2)
             return
         if name == "STOREOBJ":
@@ -1068,6 +1494,7 @@ class FuncDecompiler:
             # FREE also zeroes the frame slot. The compiler uses this to pass
             # null handles even when no ClrVPtr instruction is present.
             if not self.is_named(off):
+                self.consumed_temps.discard(off)
                 self.temps[off] = Atom("null", "null", 2)
             return                       # end of a temp lifetime: no source
         if name in ("RefCpyV", "REFCPY"):
@@ -1127,8 +1554,135 @@ class FuncDecompiler:
     def _slot_atom(self, off: int) -> Atom:
         """Value of a frame slot: temp alias if bound, else the variable."""
         if off in self.temps:
+            # Deliberately NOT `_read_temp`: a value pushed from a slot is
+            # read through here, and promoting every slot read twice this way
+            # to a variable cost far more than it bought -- 400 diagnostics
+            # against 93, from declarations that then land in the wrong
+            # scope. The duplication it would have caught is real and is
+            # measured instead: `bgt libcheck --decompiler` names the
+            # functions whose call sequence does not match the library's
+            # (`sound_pool::play_extended_1d` folds one `reserve_slot()` into
+            # all forty-five uses of its result).
+            self.consumed_temps.add(off)
             return self.temps[off]
         return self.var_atom(off)
+
+    def _is_unwritten(self, atom: Atom) -> bool:
+        """Whether this argument is a slot the program never wrote.
+
+        BGT exposes its variadic-looking APIs as long signatures of `?&in`
+        parameters that all default to null -- `nwengine.call(signature,
+        ?&in = null, ...)` -- and the compiler materialises a slot per
+        default it fills in. The source passed nothing there and the slot
+        holds nothing, so reading it emits a name with no declaration: 1,825
+        of SBYW's errors, from one API.
+        """
+        name = atom.text.lstrip("@")
+        off = next((o for o, n in self.var_names.items() if n == name), None)
+        return (off is not None and off > 0 and off not in self.declared
+                and off not in self.temps and off not in self.parameter_slots)
+
+    def _read_temp(self, off: int) -> Atom:
+        """Read a temporary, and make it a variable if that is what it is.
+
+        A slot whose value is read twice is a variable, not a temporary.
+        Folding an expression into every read writes -- and runs -- it once
+        per read: `sound_pool::play_extended_1d` called `reserve_slot()`
+        forty-five times where the source called it once and kept the result,
+        and a stripped build with no declaration for the slot turned one
+        `enemies_in_range()` call into fourteen, in a 21,000-character
+        expression.
+
+        Twice means the SAME value twice: a slot written again between the
+        reads is an ordinary reused temporary, and folding each value into its
+        one read is both correct and what lets the structurer still see a loop
+        condition as an expression rather than a statement before the jump.
+
+        Only where the slot can be *declared*: a name with no type is emitted
+        as a bare assignment and the compiler never sees a declaration for it.
+        An expression written twice is wrong, but a variable that does not
+        exist does not compile at all, so the type decides. Both read paths --
+        a value pushed from a slot, and an address dereferenced -- come
+        through here, because either one can be the second read.
+        """
+        value = self.temps[off]
+        known = self.var_types.get(off) or value.data_type
+        if known is not None and known.obj_type is not None                 and known.obj_type.name.startswith("$"):
+            # An engine-internal type (`$list`, the initialiser-list buffer)
+            # has no name source can write, so a slot cannot be declared with
+            # it: `$list local_6;` is "Expected expression value".
+            known = None
+        if (off > 0 and off in self.consumed_temps
+                and known is not None and not _is_repeatable(value)):
+            self.var_names.setdefault(off, f"local_{off}")
+            self.var_types.setdefault(off, known)
+            # Its declaration has to be hoisted: the first write may be inside
+            # a branch while a later read is not, and a declaration inside the
+            # branch is out of scope there.
+            self.forced_slots.add(off)
+        self.consumed_temps.add(off)
+        return value
+
+    def _stored_constant_types(self) -> dict:
+        """A constant that is only ever stored, typed by where it is stored.
+
+        `self.var_types` types a slot from the opcodes that *compute* with it,
+        which says nothing about a value that is written straight out:
+
+            SetV4 v2, 0x3FC00000           the bits of 1.5f -- width only
+            PshGPtr pool ; ADDSi pan_step ; PopRPtr
+            WRTV4 v2
+
+        No float opcode touches slot 2, and in Psycho Strike's `main` that
+        slot is a bool elsewhere, so `pool.pan_step = 1.5` came out as
+        `pool.pan_step = true` -- which the compiler rejects on a `float`, and
+        which was the only error in that title that was not its missing
+        plugin.
+
+        The destination's *declared* type settles it, and typing the constant
+        rather than the slot is what keeps this cheap: declaring the slot
+        would make it a variable, and a slot that is a variable is no longer
+        folded into its use. Tried that way, `sound_pool::reset` went from
+        nine lines identical to BGT's own source to thirty-six lines of slot
+        traffic.
+
+        Returns {instruction index: DataType}. A reader that is anything but
+        that one write leaves the constant alone, because this answers one
+        question and guessing the rest is how a plausible wrong type gets in.
+        """
+        widths = {"WRTV4": 81, "WRTV8": 94}            # float, double
+        loads = ("ADDSi", "LoadThisR", "LoadRObjR", "LoadVObjR")
+        typed = {}
+        for index, ins in enumerate(self.instrs):
+            if ins.name not in ("SetV4", "SetV8"):
+                continue
+            off = _s16(ins.w_arg)
+            known = self.var_types.get(off)
+            if known is not None and (known.obj_type is not None
+                                      or known.token_type in (81, 94)):
+                continue                               # already float enough
+            destination = None
+            for j in range(index + 1, min(index + 9, len(self.instrs))):
+                nxt = self.instrs[j]
+                if widths.get(nxt.name) == widths.get(ins.name.replace("SetV", "WRTV"))                         and _s16(nxt.w_arg) == off:
+                    for back in range(j - 1, index, -1):
+                        previous = self.instrs[back]
+                        if previous.name in loads:
+                            destination = self.property_types.get(previous.prop_name)
+                            break
+                        if previous.name in ("LDG", "LdGRdR4"):
+                            destination = self.global_types.get(previous.global_name)
+                            break
+                    break
+                # Anything else that could read the slot, or could have
+                # replaced the address, ends the search.
+                if (nxt.name.startswith(("J", "CALL", "SUSPEND"))
+                        or _s16(nxt.w_arg) == off or _s16(nxt.w_arg2) == off):
+                    break
+            if (destination is not None and destination.obj_type is None
+                    and destination.token_type == widths[ins.name.replace("SetV", "WRTV")]):
+                typed[index] = destination
+        return typed
 
     def _typed_constant(self, value: int, dt: DataType | None,
                         wide: bool = False) -> Atom:
@@ -1188,10 +1742,24 @@ class FuncDecompiler:
             return Atom("call", f"({condition} ? {yes.text} : {no.text})", data_type=dt)
         if dt.token_type == 67 and source and source.obj_type is None and source.token_type in (70, 77, 81, 94):
             return Atom("call", f"({atom.text} != 0)", data_type=dt)
+        # ...and the other way. A stripped build records no type for a scalar
+        # slot, and one slot serves several source locals: `clear_pathway`
+        # uses slot 1 as an int and as a bool. Convert explicitly at the use
+        # rather than mistyping the declaration -- the value is the same one
+        # the compiler would have converted implicitly if it allowed it.
+        if (dt.token_type in NUMERIC_TOKENS and atom.kind != "const"
+                and source is not None and source.obj_type is None
+                and source.token_type == 67):
+            return Atom("call", f"({atom.text} ? 1 : 0)", data_type=dt)
         if atom.kind != "const":
             return atom
         if atom.constant_bits is not None:
             return self._typed_constant(atom.constant_bits, dt, _type_stack_size(dt) == 2)
+        if atom.text in ("true", "false") and dt.token_type in NUMERIC_TOKENS:
+            # A one-byte constant reads as a bool, and an integer destination
+            # will not take one: writing an int8 property gave `x = true;`,
+            # "Can't implicitly convert from 'bool' to 'int&'".
+            return Atom("const", "1" if atom.text == "true" else "0", data_type=dt)
         try:
             value = int(atom.text)
         except ValueError:
@@ -1359,14 +1927,22 @@ class FuncDecompiler:
                         output_type.is_object_handle = True
                     # Scratch slots are reused with different types later;
                     # give an output argument its own source-level lifetime.
+                    # Emitted WITH its type on the event, so the hoisting pass
+                    # can recognise a declaration and lift it out of whatever
+                    # block the call was in: an output filled inside an `if`
+                    # and read after it is "'__nvgt_out_17_502' is not
+                    # declared" -- 1,868 of SBYW's errors came from that one
+                    # shape.
                     if direction & 3 == 3 and value and value.kind != "raw":
                         value = self._normalize_arg(value, output_type)
-                        self._stmt(f"{output_type.format()} {local} = {value.text};")
+                        self._append_stmt(output_type.format(),
+                                          f"{local} = {value.text};")
                     else:
-                        self._stmt(f"{output_type.format()} {local};")
+                        self._append_stmt(output_type.format(), f"{local};")
                     arg = Atom("var", ("@" if as_handle else "") + local,
                                data_type=output_type)
                     out_locals.append(local)
+                    self.consumed_temps.discard(off)
                     self.temps[off] = Atom("var", local, data_type=output_type)
                 else:
                     arg = self.var_atom(off)
@@ -1387,7 +1963,9 @@ class FuncDecompiler:
         if fr is not None and fr.default_args:
             while args and len(args) <= len(fr.default_args) \
                     and fr.default_args[len(args) - 1] == "null" \
-                    and (args[-1].text.startswith("tmp") or args[-1].text in ("<?>", "null")):
+                    and (args[-1].text.startswith("tmp")
+                         or args[-1].text in ("<?>", "null")
+                         or self._is_unwritten(args[-1])):
                 args.pop()
 
         # call name without the return type (use the resolved function name)
@@ -1406,6 +1984,58 @@ class FuncDecompiler:
             value = self.temps.pop(off)
             self.var_names[off] = f"local_{off}"
             self._emit_assign(off, value)
+
+        # A template factory stub creates an instance of the template it
+        # returns: `GenerateTemplateFactoryStub` emits OBJTYPE + CALLSYS +
+        # RET, so its one apparent argument is the hidden object type and not
+        # anything source wrote. Say what it makes -- `weapon@[]()` -- rather
+        # than naming the stub, which no source can call.
+        if meth == "factstub" and ret is not None:
+            typename = _constructor_type(ret)
+            # Its *declared* arguments are real: the array template has a
+            # factory taking a length, and `double[]@ factstub(uint)` is that
+            # one. Dropping the length left two member arrays unsized in
+            # Paladin's `input_recorder`, and its constructor then wrote past
+            # the end of them -- which the engine reports as "Failed to
+            # initialize global variable 'recorder'" and nothing else.
+            # (A `factstub()` with no declared parameter is the plain
+            # factory; the value pushed at such a call is the hidden object
+            # type, and `args` is empty for it either way.)
+            # ...but only the arguments that are *values*. The template also
+            # has a list factory, whose parameter is the initialiser-list
+            # buffer the compiler fills -- an engine-internal object with no
+            # name source can write, and `array<string>(local_6)` is both an
+            # undeclared name and the wrong type.
+            # The two parameterised factories differ exactly here: the
+            # length one takes `uint` by value (`double[]@ factstub(uint)`)
+            # and the list one takes the buffer by reference
+            # (`string[]@ factstub(int&in)`). Only a by-value primitive is
+            # something source wrote.
+            lengths = [a.text for index, a in enumerate(args)
+                       if index < len(fr.param_types)
+                       and fr.param_types[index].obj_type is None
+                       and not fr.param_types[index].is_reference]
+            inner = ", ".join(lengths)
+            self.value_reg = Atom("call", f"{typename}({inner})", data_type=ret)
+            self.pending_value_call = None
+            if has_out and pop_out is not None and pop_out.is_ptr \
+                    and pop_out.offset is not None:
+                self._bind(pop_out.offset, self.value_reg)
+            return
+
+        # The older engine's string literals arrive as a call to the
+        # registered string factory over the pair STR pushed. The literal is
+        # the whole content of the call, and the factory returns
+        # `const string&`, so nothing else rides on its frame. Collapsing the
+        # call away entirely instead was tried in the lifter and reverted: it
+        # desynchronises the literal from the PshRPtr that pushes the result.
+        if meth == "_string_factory_" or meth.endswith("stringfactory"):
+            literal = next((a.text for a in args
+                            if a.kind == "const" and a.text.startswith('"')), None)
+            self.value_reg = Atom("const", literal if literal is not None else '""',
+                                  data_type=ret)
+            self.pending_value_call = None
+            return
 
         # constructors: $beh0(out) = copy-construct (this=dest, out=source),
         # $beh0() = default. The chained temp form leaves the initializer
@@ -1429,6 +2059,7 @@ class FuncDecompiler:
                     if self.is_named(dst.offset):
                         self._emit_declare(dst.offset)   # `string s;`
                     else:
+                        self.consumed_temps.discard(dst.offset)
                         self.temps[dst.offset] = Atom("const", '""') if typename == "string" else Atom("call", f"{typename}()")
                     return
                 src = self._deref(args[0]) if copy_ctor else Atom(
@@ -1436,6 +2067,7 @@ class FuncDecompiler:
                 if self.is_named(dst.offset):
                     self._emit_assign(dst.offset, src)
                 else:
+                    self.consumed_temps.discard(dst.offset)
                     self.temps[dst.offset] = src
                 return          # leftover stack slot (if any) feeds the ALLOC
             self.value_reg = Atom("call", args[0].text if args else '""')
@@ -1627,6 +2259,7 @@ class FuncDecompiler:
             if self.is_named(dest.offset):
                 self._emit_assign(dest.offset, Atom("call", txt))
             else:
+                self.consumed_temps.discard(dest.offset)
                 self.temps[dest.offset] = Atom("call", txt)
         elif dest is not None and dest.text:
             # destination is a property/global address (e.g. `wname = n`)
@@ -1639,6 +2272,14 @@ class FuncDecompiler:
         off = _s16(ins.w_arg2)
         dt = self.var_types.get(off)
         type_name = dt.obj_type.name if dt and dt.obj_type else ""
+        if not type_name:
+            # The slot may carry no declared type -- BGT records a
+            # funcdef-typed local under a placeholder that names no funcdef --
+            # but the value in it does: `global_events[i]` is an element of an
+            # `event@[]`, and that is what says the call takes one argument.
+            value = self._slot_atom(off)
+            if value.data_type is not None and value.data_type.obj_type is not None:
+                type_name = value.data_type.obj_type.name
         fr = next((f for f in self.m.funcdefs if f.name == type_name), None)
         nparams = len(fr.param_types) if fr is not None else ins.w_arg
         ret = fr.return_type if fr is not None else None
@@ -1701,6 +2342,178 @@ class FuncDecompiler:
         if not joins or len(set(joins)) != 1:
             return None
         return cursor + 1, cases, default, joins[0], _s16(high.w_arg)
+
+    def _dense_switch_pattern(self, index):
+        """Recognize the compiler's jump-table dispatch.
+
+        A `switch` over a dense range compiles to a bounds check, a
+        normalisation and a computed jump into a table of unconditional jumps,
+        one per value:
+
+            CMPIi arg0, 31 ; JP  after        high bound
+            CMPIi arg0, 1  ; JS  after        low bound
+            CMPIi arg0, 12 ; JP  next_range   this table's own high bound
+            SUBIi v1, arg0, 1                 normalise to zero
+            JMPP  v1                          jump to table[v1]
+            JMP case1 / JMP case2 / JMP default / ...
+
+        So the table is the run of jumps after `JMPP`, entry *i* is the value
+        `i + offset` where the `SUBIi` supplies the offset, and the value
+        switched on is that instruction's *source* rather than the normalised
+        slot. Unrecognised, each table entry prints as `goto` -- which
+        AngelScript has no keyword for, so every one of them is an error: 26 of
+        Paladin's 28 and 50 of Psycho Strike's, all in nine bodies.
+
+        The result is the same tuple the sparse form produces, so everything
+        downstream is shared.
+        """
+        table = self._dense_table(index)
+        if table is None:
+            return None
+        cursor, cases, default, selector, next_range = table
+
+        # One source `switch` over scattered values compiles to SEVERAL dense
+        # tables, each guarded by its own range check and jumping to the next
+        # range when the value is outside it. Read as one table each, the
+        # first switch's extent swallows the later ranges' bodies -- they come
+        # out as `return` statements with no `case` above them, which compiles
+        # and answers the wrong thing. So follow the chain and merge.
+        seen = {index}
+        while next_range is not None:
+            following = self.pos_of.get(next_range)
+            if following is None:
+                break
+            nxt = next((i for i in range(following, min(following + 12, len(self.instrs)))
+                        if self.instrs[i].name == "JMPP"), None)
+            if nxt is None or nxt in seen:
+                # The chain's last link need not be another table: a single
+                # remaining value is an equality compare, not a range.
+                link = self._equality_chain(following, cursor, selector, default)
+                if link is None:
+                    break
+                cursor, more_cases, next_range = link
+                cases += [case for case in more_cases if case[1] != default]
+                continue
+            more = self._dense_table(nxt)
+            if more is None or more[3] != selector:
+                break
+            seen.add(nxt)
+            cursor = max(cursor, more[0])
+            cases += [case for case in more[1] if case[1] != default]
+            next_range = more[4]
+        # The tables merged in are inside the span the switch handler skips
+        # (`self.k + 1` to `cursor`), so they never dispatch on their own; no
+        # separate bookkeeping is needed, and `skip_indexes` does not exist
+        # yet when this runs.
+        if not cases:
+            return None
+
+        entries = sorted({target for _, target in cases} | {default})
+        if entries[0] <= self.instrs[cursor - 1].pos:
+            return None                   # a table entry jumping backwards
+        joins = []
+        for begin, end in zip(entries, entries[1:]):
+            body = [op for op in self.instrs
+                    if begin <= op.pos < end and op.name not in SKIP_OPS]
+            if body and body[-1].name == "JMP" and _jump_target(body[-1]) >= entries[-1]:
+                joins.append(_jump_target(body[-1]))
+        if not joins or len(set(joins)) != 1:
+            return None
+        return cursor, cases, default, joins[0], selector
+
+    def _equality_chain(self, index, cursor, selector, default):
+        """The tail of a switch chain written as compares rather than a table.
+
+        A `switch` over scattered values compiles to one dense table per
+        dense range, each guard sending the value on to the next. Where a
+        range holds a *single* value there is no table to build, so the
+        compiler emits the compare directly:
+
+            CMPIi v35, 27 ; JZ case27
+            JMP   exit                       the switch's own default
+
+        Read as a table that is not there, the chain simply stops, and the
+        compare is left behind as a branch to the switch's exit -- a block the
+        switch handler has already consumed, so it is a `goto` to a label that
+        is never emitted. One source `switch` in Super Egg Hunt's
+        `submit_score` is exactly this: `case 1..3` as a table, `case 27`
+        as a compare.
+
+        Returns `(cursor, cases, next range)`, or None when this is not that
+        shape. Two conditions keep it honest: the compare must test the
+        selector the table normalised, and the chain must begin exactly where
+        the table's entries ended. The second matters because `cursor` is the
+        span the switch handler skips -- extending it to a block that is not
+        adjacent would swallow whatever lies between.
+        """
+        if index != cursor:
+            return None
+        cases = []
+        while index + 1 < len(self.instrs):
+            compare, jump = self.instrs[index], self.instrs[index + 1]
+            if (compare.name not in ("CMPIi", "CMPIu")
+                    or _s16(compare.w_arg) != selector or jump.name != "JZ"):
+                break
+            target = _jump_target(jump)
+            if target is None:
+                return None
+            cases.append((_s32(compare.dw_arg), target))
+            index += 2
+        if not cases:
+            return None
+        # The fall-through is where a value matching nothing here goes: the
+        # switch's own default, or the next link of the chain.
+        tail = self.instrs[index] if index < len(self.instrs) else None
+        if tail is None or tail.name != "JMP":
+            return None
+        following = _jump_target(tail)
+        return index + 1, cases, None if following == default else following
+
+    def _dense_table(self, index):
+        """One jump table: (end index, cases, default, selector, next range).
+
+        `next range` is where the guard sends a value outside this table's
+        range, which is where the next table of the same switch lives.
+        """
+        jmpp = self.instrs[index]
+        if jmpp.name != "JMPP":
+            return None
+        targets = []
+        cursor = index + 1
+        while cursor < len(self.instrs) and self.instrs[cursor].name == "JMP":
+            targets.append(_jump_target(self.instrs[cursor]))
+            cursor += 1
+        if len(targets) < 2 or any(target is None for target in targets):
+            return None
+
+        # The normalisation immediately before, if any: it names both the
+        # value switched on and the first entry's label.
+        selector = _s16(jmpp.w_arg)
+        offset = 0
+        previous = self.instrs[index - 1] if index else None
+        if (previous is not None and previous.name in ("SUBIi", "ADDIi")
+                and _s16(previous.w_arg) == selector):
+            selector = _s16(previous.w_arg2)
+            delta = _s32(previous.dw_arg)
+            offset = delta if previous.name == "SUBIi" else -delta
+
+        # The guards before it: the last one skips this table's own range, the
+        # ones before it bound the switch as a whole.
+        guards = [op for op in self.instrs[max(0, index - 8):index]
+                  if op.name in ("JP", "JS", "JNS", "JNP")]
+        next_range = _jump_target(guards[-1]) if guards else None
+
+        # The default is the entry the gaps share; with no repeated entry the
+        # table has no default of its own and the outermost guard supplies it.
+        counts = collections.Counter(targets)
+        default, repeats = counts.most_common(1)[0]
+        if repeats == 1:
+            if not guards:
+                return None
+            default = _jump_target(guards[0])
+        cases = [(value + offset, target)
+                 for value, target in enumerate(targets) if target != default]
+        return cursor, cases, default, selector, next_range
 
     def _begin_switch(self, ins: Instr) -> bool:
         """Recognize the guarded dense jump-table protocol, without guessing."""
@@ -1767,7 +2580,8 @@ class FuncDecompiler:
             # `x != false` -> x. _negate_cond also cancels a double negation, so
             # `!(getf()) == false` collapses to `getf()`.
             if op in ("==", "!="):
-                for lit, other in ((b.text, a.text), (a.text, b.text)):
+                left, right = _unwrap_bool(a.text), _unwrap_bool(b.text)
+                for lit, other in ((right, left), (left, right)):
                     if lit in ("true", "false"):
                         keep = (op == "==") == (lit == "true")
                         return other if keep else _negate_cond(other)
@@ -2007,6 +2821,7 @@ class FuncDecompiler:
             value.data_type = yes_value.data_type
             self.stack[-1] = value
         else:
+            self.consumed_temps.discard(off)
             self.temps[off] = value
         self.pending_value_call = None
         self.skip_indexes.update(range(self.k + 1, merge_idx))
@@ -2038,6 +2853,18 @@ class LoopCtx:
 class SwitchCtx:
     def __init__(self, join, parent):
         self.join, self.parent = join, parent
+
+    @property
+    def exit(self):
+        """Where a `break` out of the switch lands, named as a loop names it.
+
+        The structurer passes whichever construct encloses a branch, so a
+        branch inside a switch is handed this object where a loop would
+        otherwise be, and asked for `.exit`. Without it, any conditional
+        branch inside a switch raised AttributeError and the whole body came
+        out as a decompiler error (`set_state` in Psycho Strike).
+        """
+        return self.join
 
     def is_break(self, target):
         return target == self.join
@@ -2120,14 +2947,23 @@ class Structurer:
         return [ind * "    " + line for ind, line in self.out]
 
     def _next_index(self, pos: int) -> int:
-        """Index of the first event at or after dword position `pos`."""
+        """Index of the first event at or after dword position `pos`.
+
+        The miss is cached as well as the hit. Rescanning every event on every
+        miss is quadratic in the body, which is invisible on a normal function
+        and not on a large one: it was the single biggest cost in a
+        20,000-instruction body, and Manamon 2 has one of 68,692.
+        """
         idx = self.pos_index.get(pos)
         if idx is not None:
             return idx
+        found = len(self.ev)
         for i, e in enumerate(self.ev):
             if e.pos >= pos:
-                return i
-        return len(self.ev)
+                found = i
+                break
+        self.pos_index[pos] = found
+        return found
 
     # -- loop detection -----------------------------------------------------
 
@@ -2144,7 +2980,19 @@ class Structurer:
                     and e.pos >= cond_pos):
                 c_idx = self._next_index(cond_pos)
                 for k in range(c_idx, j):
-                    if self.ev[k].kind == "stmt" and not self.done[k]:
+                    if self.ev[k].kind != "stmt" or self.done[k]:
+                        continue
+                    # A statement in the condition block usually means this is
+                    # an if/else merge rather than a loop condition. But a
+                    # pre-tested loop re-evaluates its condition every
+                    # iteration, and the compiler materialises what that
+                    # condition reads: `for (i = 0; i < bag[n].items.length();
+                    # i++)` emits `@handle = bag;` there. A plain assignment
+                    # with no call in it is that materialisation; anything
+                    # that calls something is not, and still rules the loop
+                    # out.
+                    text = self.ev[k].data[1]
+                    if "(" in text or not re.match(r"@?[\w.\[\]]+ = ", text):
                         return None
                 return (j, e.data[1])
         return None
@@ -2243,8 +3091,7 @@ class Structurer:
                              if not self.done[j] and self.ev[j].kind == "jump"
                              and self.ev[j].data <= self.ev[j].pos
                              and self._next_index(self.ev[j].data) == i]
-            if (plain_latches and i not in self.handled_plain_loops
-                    and not (e.kind == "branch" and e.data[1] > self.ev[plain_latches[-1]].pos)):
+            if plain_latches and i not in self.handled_plain_loops:
                 tail = plain_latches[-1]
                 self.handled_plain_loops.add(i)
                 self.done[tail] = True
@@ -2263,12 +3110,31 @@ class Structurer:
                     labels.setdefault(target, []).append(f"case {value}:")
                 labels.setdefault(default, []).append("default:")
                 positions = sorted(labels)
-                self.out.append((indent, f"switch ({selector}) {{"))
+                # Render the arms first: AngelScript requires `default` last,
+                # and whether it already is only becomes answerable once each
+                # arm's statements exist. See `_default_last`.
+                arms = []
                 for index, target in enumerate(positions):
-                    for label in labels[target]:
-                        self.out.append((indent + 1, label))
                     boundary = positions[index + 1] if index + 1 < len(positions) else join
-                    self._block(indent + 2, self._next_index(target), self._next_index(boundary), SwitchCtx(join, loop))
+                    mark = len(self.out)
+                    self._block(indent + 2, self._next_index(target),
+                                self._next_index(boundary), SwitchCtx(join, loop))
+                    arms.append((labels[target], self.out[mark:]))
+                    del self.out[mark:]
+                self.out.append((indent, f"switch ({selector}) {{"))
+                for names, lines in _default_last(arms):
+                    for label in names:
+                        self.out.append((indent + 1, label))
+                    start = len(self.out)
+                    self.out.extend(lines)
+                    # A declaration directly under `case` is "Variables cannot
+                    # be declared in switch cases, except inside statement
+                    # blocks". An arm's declarations belong to that arm, and a
+                    # block around them changes nothing else -- a fallthrough
+                    # still falls through to the next label.
+                    if any(DECL_RE.match(text) for _, text in self.out[start:]):
+                        self.out.insert(start, (indent + 1, "{"))
+                        self.out.append((indent + 1, "}"))
                 self.out.append((indent, "}"))
                 i = self._next_index(join)
                 continue
@@ -2304,7 +3170,18 @@ class Structurer:
                                 and re.fullmatch(r"[A-Za-z_]\w*(?:\+\+|--);", self.ev[update].data[1])
                                 and any(ev.kind == "jump" and ev.data < t
                                         and self._next_index(ev.data) == update
-                                        for ev in self.ev[i + 1:update])):
+                                        for ev in self.ev[i + 1:update])
+                                # ...and nothing jumps straight to the
+                                # condition, past the update. Such a jump is a
+                                # `continue` in a loop whose increment is part
+                                # of the body; hoisting the increment into a
+                                # `for` header makes it run on that path too,
+                                # which is a behaviour change -- and the jump
+                                # itself then has no form to be written in, so
+                                # it came out as the one `goto` left in
+                                # Paladin (`storyline_scroll`).
+                                and not any(ev.kind == "jump" and ev.data == t
+                                            for ev in self.ev[i + 1:l_idx])):
                             # A for-loop continue lands on its update, before
                             # the condition. Move that update into the header
                             # so source continue still executes it exactly once.
@@ -2630,6 +3507,7 @@ class ModuleDecompiler:
         for f in self.m.funcdefs:
             if f.parent_class is c:
                 self.emit("    " + funcdef_declaration(f))
+        sizes = _member_array_sizes(c)
         for pname, dt, flags in c.properties:
             if flags & 4:
                 continue  # inherited properties are declared by the base
@@ -2639,7 +3517,14 @@ class ModuleDecompiler:
             if decl.endswith("&"):
                 decl = decl[:-1].rstrip()
             visibility = "private " if flags & 1 else "protected " if flags & 2 else ""
-            self.emit(f"    {visibility}{decl} {pname};")
+            # An array member declared with a length is created with it by the
+            # constructor's generated prologue, which is dropped: the length
+            # only survives on the declaration. Without it `input_recorder`'s
+            # constructor wrote past the end of two members, and the engine
+            # said only "Failed to initialize global variable 'recorder'".
+            length = sizes.get(pname)
+            suffix = f"({length})" if length is not None else ""
+            self.emit(f"    {visibility}{decl} {pname}{suffix};")
         if c.properties:
             self.emit()
         seen_ctors: set[str] = set()
@@ -2715,10 +3600,19 @@ class ModuleDecompiler:
             # A mutable object may first be recognized at a method call, after
             # its constructor or writes in earlier branches. Simulate again
             # with the discovered lvalues so those earlier writes are retained.
-            if fd.var_names != initial_names:
-                discovered = dict(fd.var_names)
+            # Repeat while each pass finds more: a slot folded into another
+            # slot's expression only becomes visible once that one is a
+            # variable, so one pass is not a fixed point.
+            rounds = 0
+            while fd.var_names != initial_names and rounds < 4:
+                rounds += 1
+                discovered, types = dict(fd.var_names), dict(fd.var_types)
+                forced = set(fd.forced_slots)
                 fd = FuncDecompiler(self.m, f, self.comments)
+                initial_names = dict(fd.var_names)
                 fd.var_names.update(discovered)
+                fd.var_types.update(types)
+                fd.forced_slots.update(forced)
                 ev = fd.run()
             # Stripped metadata reuses scalar slots across sibling blocks.
             # Keep one declaration in the function and initialization at its
@@ -2740,14 +3634,27 @@ class ModuleDecompiler:
             # scope, "'i' is already declared". Take every scalar name.
             scalar_names |= {v.name for v in f.variables
                              if v.name and v.stack_offset > 0 and _is_scalar(v.type)}
+            # A slot the simulation promoted to a variable is hoisted whatever
+            # its type: it was promoted because it is read in more than one
+            # place, and those places are not always one scope.
+            scalar_names |= {fd.name_of(off) for off in fd.forced_slots}
             for event in ev:
                 if event.kind != "stmt":
                     continue
                 typename, text = event.data
                 if not typename:
                     continue
-                name = text.split(" ", 1)[0].rstrip(";")
-                if name in scalar_names:
+                # Up to the first non-identifier character, so the
+                # constructor form counts too: `string local_11("");` is a
+                # declaration, and matching on the first *word* missed it --
+                # it then stayed inside the block it was written in while
+                # later statements in the enclosing one used it ("'local_11'
+                # is not declared").
+                match = re.match(r"[A-Za-z_][A-Za-z_0-9]*", text)
+                name = match.group(0) if match else ""
+                # A local this decompiler generates belongs to the function,
+                # not to the block the call happened to be in.
+                if name in scalar_names or GENERATED_LOCAL.match(name):
                     # One hoisted declaration per name: a slot declared in
                     # several sibling scopes shows up here once per scope.
                     # Hoisted WITHOUT its initialiser, so a `const` local
@@ -2763,12 +3670,20 @@ class ModuleDecompiler:
                     off = next((off for off in fd.var_names if fd.name_of(off) == name), None)
                     is_handle = off is not None and fd.var_types.get(off) and fd.var_types[off].is_object_handle
                     prefix = "@" if is_handle and text != name + ";" else ""
+                    if text.startswith(name + "("):
+                        # The constructor form has to become an assignment:
+                        # with the declaration hoisted away, `local_11("");`
+                        # on its own is a call to something that is not there.
+                        bare = typename.removeprefix("const ").strip()
+                        text = "%s = %s%s" % (name, bare, text[len(name):])
                     event.data = ("", "" if text == name + ";" else prefix + text)
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
             scopes = _recover_plain_scopes(ev, f, self.m.classes)
             st = Structurer(ev, f, scopes)
-            return _drop_redundant_parens(_reconstruct_for_loops(
-                _use_compound_assignment(declarations + st.render(indent))))
+            body = _use_compound_assignment(declarations + st.render(indent))
+            body = _declare_read_before_written(body, fd, indent)
+            body = _drop_unreachable(body)
+            return _drop_redundant_parens(_reconstruct_for_loops(body))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
 
@@ -2830,7 +3745,9 @@ class ModuleDecompiler:
                 if last.startswith(f"{qualified} = "):
                     expr = last[len(qualified) + 3:-1] if last.endswith(";") \
                         else last[len(qualified) + 3:]
-                    decl = f"{g.type.format()} {g.name} = {expr};"
+                    initialiser = _initialiser(g.type, expr)
+                    decl = (f"{g.type.format()} {g.name};" if initialiser is None
+                            else f"{g.type.format()} {g.name} = {initialiser};")
                     stmts = stmts[:-1]
             if stmts:
                 qualified = (namespace + "::" if namespace else "") + g.name

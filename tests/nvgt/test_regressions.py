@@ -126,13 +126,13 @@ class RendererTests(unittest.TestCase):
                 with self.subTest(name=name):
                     bytecode = Path(folder) / f"original_{name}.bin"
                     first = subprocess.run([str(compiler), str(ROOT / f"test_{name}.as"), str(bytecode)],
-                                           capture_output=True, text=True, timeout=30)
+                                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
                     self.assertEqual(first.returncode, 0, first.stderr)
                     source = decompile_module(load_any(str(bytecode)))
                     path = Path(folder) / (name + ".as")
                     path.write_text(source, encoding="utf-8")
                     result = subprocess.run([str(compiler), str(path), str(path.with_suffix(".bin"))],
-                                            capture_output=True, text=True, timeout=30)
+                                            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_stripped_control_flow_and_recompile(self):
@@ -142,7 +142,7 @@ class RendererTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT / "build") as folder:
             bytecode = Path(folder) / "original.bin"
             first = subprocess.run([str(compiler), str(ROOT / "test_real.as"), str(bytecode), "--strip"],
-                                   capture_output=True, text=True, timeout=30)
+                                   capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             self.assertEqual(first.returncode, 0, first.stderr)
             source = decompile_module(load_any(str(bytecode)))
             self.assertIn("bool alive() const", source)
@@ -151,7 +151,7 @@ class RendererTests(unittest.TestCase):
             path = Path(folder) / "stripped.as"
             path.write_text(source, encoding="utf-8")
             result = subprocess.run([str(compiler), str(path), str(path.with_suffix(".bin"))],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_official_stripped_fixture_recompiles(self):
@@ -164,7 +164,7 @@ class RendererTests(unittest.TestCase):
             path = Path(folder) / "official.as"
             path.write_text(source, encoding="utf-8")
             result = subprocess.run([str(compiler), str(path), str(path.with_suffix(".bin"))],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

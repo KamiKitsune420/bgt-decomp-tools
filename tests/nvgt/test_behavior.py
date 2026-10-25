@@ -172,7 +172,7 @@ void main() {
     def compile_and_run(self, path, strip=True):
         result = subprocess.run([str(COMPILER), str(path), str(path.with_suffix(".bin")),
                                  *(["--strip"] if strip else []), "--run"],
-                                capture_output=True, text=True, timeout=20)
+                                capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 0,
                          result.stderr + "\n" + path.read_text(encoding="utf-8"))
         return result.stdout
@@ -510,6 +510,31 @@ void main() {
     for (int n = -1; n < 8; n++) print(label(n) + ":" + value(n) + ";");
 }
 ''', "x:-1;x:4;x:7;x:9;a:2;b:-1;c:-1;d:-1;x:-1;")
+
+    def test_switch_over_a_dense_range_and_one_far_value(self):
+        """One switch, two links: a jump table and a lone compare.
+
+        A `switch` over scattered values compiles to one dense table per
+        dense range. Where a range holds a single value there is no table,
+        so the compiler emits `CMPIi sel, K ; JZ case` instead -- and the
+        chain has to follow it, or that case's body is left outside the
+        switch and the compare becomes a branch to the switch's own exit.
+        """
+        self.roundtrip('''
+string pick(int n) {
+    switch (n) {
+        case 1: return "a";
+        case 2: return "b";
+        case 3: return "c";
+        case 27: return "z";
+    }
+    return "x";
+}
+void main() {
+    for (int n = 0; n < 5; n++) print(pick(n));
+    print(pick(26) + pick(27) + pick(28));
+}
+''', "xabcxxzx")
 
     def test_empty_catch_regions_preserve_exception_swallowing(self):
         self.roundtrip('''

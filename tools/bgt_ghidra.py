@@ -170,7 +170,7 @@ def _jdk_version(home: str) -> int:
         return 0
     try:
         out = subprocess.run([java, "-version"], capture_output=True, text=True,
-                             timeout=30)
+                             timeout=30, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return 0
     text = (out.stderr or "") + (out.stdout or "")
@@ -491,7 +491,7 @@ def decompile(install: str, jdk: str, binary: str, out: str,
     cmd += ["-scriptPath", scripts, "-postScript", script]
 
     print("running headless (%s, JDK at %s)" % (os.path.basename(install), jdk))
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     tail = [ln for ln in (proc.stdout or "").splitlines()
             if "wrote" in ln or "ERROR" in ln or "Analysis succeeded" in ln]
     for ln in tail[-6:]:

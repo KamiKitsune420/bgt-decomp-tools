@@ -86,7 +86,8 @@ class CommandLineTests(unittest.TestCase):
             source = Path(directory) / "broken.bin"
             source.write_bytes(b"ASBC")
             result = subprocess.run([sys.executable, "-B", str(TOOLS / "decompile.py"), str(source)],
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL, timeout=20)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("truncated ASBC header", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
@@ -133,7 +134,8 @@ class OpcodeGeneratorTests(unittest.TestCase):
                            "--header", str(header), "--output", str(output)]
                 if bits == 32:
                     command.append("--32")
-                result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+                result = subprocess.run(command, capture_output=True, text=True,
+                                        stdin=subprocess.DEVNULL, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 table = runpy.run_path(str(output))["OPCODES"]
                 self.assertEqual(table[1][3], 0xffff)
@@ -262,7 +264,7 @@ class ExportHashTests(unittest.TestCase):
             source = directory / "owned.as"
             source.write_text("int a() { return 1; }\nint b() { return 2; }\nvoid main() {}\n")
             bytecode = directory / "owned.bin"
-            result = subprocess.run([str(ROOT / "build/bcdump.exe"), str(source), str(bytecode), "--strip"], capture_output=True, timeout=20)
+            result = subprocess.run([str(ROOT / "build/bcdump.exe"), str(source), str(bytecode), "--strip"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stderr)
             project = directory / "project"
             first = recover.generate_project(bytecode, project, target_lines=1)

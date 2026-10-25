@@ -63,7 +63,7 @@ class NumberBehaviorTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["TEMP"] = environment["TMP"] = str(folder)
             result = subprocess.run([str(COMPILER), "-c", str(folder / "project/main.nvgt")],
-                                    env=environment, capture_output=True, text=True, timeout=50)
+                                    env=environment, capture_output=True, text=True, timeout=50, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(all(value == 0 for value in manifest["diagnostics"].values()))
             with zipfile.ZipFile(folder / "project/main.zip") as package:
@@ -89,7 +89,7 @@ class NumberBehaviorTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["TEMP"] = environment["TMP"] = str(folder)
             result = subprocess.run([str(COMPILER), "-Q", str(source)], env=environment,
-                                    capture_output=True, text=True, timeout=25)
+                                    capture_output=True, text=True, timeout=25, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             owned_trace = report.read_text(encoding="utf-8").splitlines()
         states = [line for line in owned_trace if line.startswith(("case|", "again|"))]

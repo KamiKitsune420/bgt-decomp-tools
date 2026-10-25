@@ -121,7 +121,16 @@ class DataType:
         else:
             name = PRIMITIVE_NAMES.get(self.token_type, f"tok{self.token_type}")
         if self.obj_type is not None and self.template_subtypes:
-            name += "<" + ", ".join(s.format(default_ns) for s in self.template_subtypes) + ">"
+            # One template type is written with its argument in front and
+            # brackets behind: BGT's array is registered as `array<T>` -- which
+            # is how it appears in saved bytecode -- and spelled `T[]` in
+            # source, as the compiler's own `string[]@ string_split(...)` says.
+            if self.obj_type.template_syntax == "suffix":
+                name = self.template_subtypes[0].format(default_ns) + "[]" * len(
+                    self.template_subtypes)
+            else:
+                name += "<" + ", ".join(s.format(default_ns)
+                                        for s in self.template_subtypes) + ">"
         if self.is_handle_to_const:
             name = "const " + name
         if self.is_object_handle:
@@ -158,6 +167,7 @@ class TypeInfo:
     typedef_target: Optional[DataType] = None
     enum_underlying: str = "int"
     template_typename: str = ""
+    template_syntax: str = "angle"   # how source writes it: array<T> or T[]
     is_shared: bool = False
     is_external: bool = False
     is_interface: bool = False

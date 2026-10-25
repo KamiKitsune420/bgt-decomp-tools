@@ -71,14 +71,14 @@ int twice(int n) { return n * 2; }
 void main() { Counter@ c = Counter(starting); c.tick(); print(label + ":" + twice(c.n)); }
 ''', encoding="utf-8")
             first = subprocess.run([str(HOST), str(original), str(original.with_suffix(".bin")),
-                                    "--strip", "--run"], capture_output=True, text=True, timeout=20)
+                                    "--strip", "--run"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(first.returncode, 0, first.stderr)
             output = folder / "project"
             manifest = generate_project(original.with_suffix(".bin"), output, target_lines=5)
             self.assertEqual(manifest["input"], "owned.bin")
             self.assertNotIn(str(folder), (output / "manifest.json").read_text(encoding="utf-8"))
             second = subprocess.run([str(HOST), str(output / "main.nvgt"), str(folder / "second.bin"),
-                                     "--strip", "--run"], capture_output=True, text=True, timeout=20)
+                                     "--strip", "--run"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(second.stdout, first.stdout)
             self.assertGreater(len(manifest["source_files"]), 3)
@@ -123,14 +123,14 @@ void main() { Counter@ c = Counter(starting); c.tick(); print(label + ":" + twic
             # Debug builds retain section filenames even after folder splitting.
             debug_bytecode = folder / "debug.bin"
             compiled = subprocess.run([str(HOST), str(original), str(debug_bytecode)],
-                                      capture_output=True, text=True, timeout=20)
+                                      capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             debug_project = folder / "debug_project"
             debug_manifest = generate_project(debug_bytecode, debug_project)
             self.assertTrue(debug_manifest["script_section_paths"])
             self.assertTrue((debug_project / "includes/owned.nvgt").exists())
             executed = subprocess.run([str(HOST), str(debug_project / "main.nvgt"), str(folder / "debug_again.bin"),
-                                       "--run"], capture_output=True, text=True, timeout=20)
+                                       "--run"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
             self.assertEqual(executed.returncode, 0, executed.stderr)
             self.assertEqual(executed.stdout, first.stdout)
 

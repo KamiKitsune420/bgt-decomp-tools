@@ -391,25 +391,28 @@ class Reader:
         # how the tagged titles used to die on their very first funcdef.
         guarded = self.dialect != TAGGED
 
+        inout: List[int] = []
         if nparams or not guarded:               # inOutFlags
             n = self.eu()
             if nparams and n > nparams:
                 raise ParseError("inOutFlag count %d > %d params" % (n, nparams))
             for _ in range(n):
-                self.eu()
+                inout.append(self.eu())
 
         func_type = self.eu()
 
+        defaults: List[str] = []
         if nparams or not guarded:               # default-argument expressions
             n = self.eu()
             if nparams and n > nparams:
                 raise ParseError("default-arg count %d > %d params" % (n, nparams))
             for _ in range(n):
-                self.string()
+                defaults.append(self.string().decode("latin1"))
 
         owner = self.type_info()
+        traits = 0
         if owner is not None:
-            self.raw(1)                          # traits byte: private/protected/const
+            traits = self.raw(1)[0]              # traits byte: private/protected/const
             ns = None
         elif func_type == 4 and self.dialect != TAGGED:   # a funcdef with no owner
             tag = self.raw(1)[0]
@@ -424,7 +427,8 @@ class Reader:
             ns = self.string().decode("latin1")
 
         return {"name": name.decode("latin1"), "returns": ret, "params": params,
-                "funcType": func_type, "owner": owner, "namespace": ns}
+                "funcType": func_type, "owner": owner, "namespace": ns,
+                "inOut": inout, "defaults": defaults, "traits": traits}
 
     def _script_body_tagged(self, rec: Dict[str, Any]) -> None:
         """The older reader's funcType-1 body (strike.exe 0x0041E2A0).
@@ -462,10 +466,7 @@ class Reader:
         ninfo = self.eu()
         if not 0 <= ninfo <= 1 << 18:
             raise ParseError("implausible object-info count %d" % ninfo)
-        for _ in range(ninfo):
-            self.eu()
-            self.eu()
-            self.eu()
+        rec["objInfo"] = [(self.eu(), self.eu(), self.eu()) for _ in range(ninfo)]
         # debug info follows only when noDebugInfo == 0, and BGT always strips it
 
         # ...and then ONE trailing traits byte (bit 0 read-only, bit 1 private),
@@ -508,11 +509,11 @@ class Reader:
                     if nobj > 0:
                         self.eu()                # objVariablesOnHeap
                     ninfo = self.eu()            # NOTE: inside the 0x08 block
-                    for _ in range(ninfo):
-                        self.eu(), self.eu(), self.eu()
+                    rec["objInfo"] = [(self.eu(), self.eu(), self.eu())
+                                      for _ in range(ninfo)]
                 if flags & 0x10:
-                    for _ in range(self.eu()):   # try/catch spans
-                        self.eu(), self.eu()
+                    rec["tryCatch"] = [(self.eu(), self.eu())
+                                       for _ in range(self.eu())]
                 # debug info follows only when noDebugInfo == 0
         elif ft in (2, 3):
             rec["vfTableIdx"] = self.eu()
@@ -810,7 +811,8 @@ class Reader:
         # typedefs -- phase 1 then phase 2, which for a typedef is a single
         # encoded token type (the primitive it aliases).
         n = self._count(4096)
-        section("typedefs", n, lambda: (self.type_decl_phase1(), self.eu())[0])
+        section("typedefs", n,
+                lambda: dict(self.type_decl_phase1(), token=self.eu()))
 
         section("global_properties", self._count(1 << 18), self.global_property)
         section("module_functions", self._count(1 << 18),
@@ -1029,12 +1031,13 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
                template_namespace=template_namespace)
     classes, declared = [], None
     funcdefs, funcdefs_declared = [], None
+    enums: List[Dict[str, Any]] = []
     blocks = []
     tail: Optional[Dict[str, Any]] = None
     tail_error = None
     try:
         for _ in range(n_enums):
-            r.enum()
+            enums.append(r.enum())
         declared = r.eu()
         for _ in range(declared):
             classes.append(r.type_decl_phase1())
@@ -1057,7 +1060,7 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
     except (ParseError, IndexError, struct.error):
         pass
 
-    return {"classes": classes, "classes_declared": declared,
+    return {"enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
             "parse_errors": r.parse_errors, "end": r.p,

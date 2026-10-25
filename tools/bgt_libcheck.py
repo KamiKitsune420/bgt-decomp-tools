@@ -51,11 +51,12 @@ the meaningful reference.
 import argparse
 import collections
 import difflib
+import json
 import glob
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
     from . import as_disasm, as_lift
@@ -234,6 +235,49 @@ def compare(mod: "as_disasm.Module",
     return out
 
 
+def compare_decompiled(module_path: str, exe_path: Optional[str],
+                       opcodes: Optional[str],
+                       library: Dict[str, List[str]]) -> List[Comparison]:
+    """The same comparison, against the decompiler rather than the lifter.
+
+    `bgt recover` emits compilable source through a different path -- the IR
+    adapter and the decompiler -- and a clean compile says nothing about
+    meaning. This is the check that does: per function, the sequence of calls
+    in evaluation order and the string literals as a multiset, against source
+    nobody here wrote.
+    """
+    try:                      # installed as a package
+        from . import bgt_asir
+        from .nvgt import decompile
+    except ImportError:       # run directly from a checkout
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "nvgt"))
+        import bgt_asir
+        import decompile
+
+    table = None
+    if opcodes:
+        with open(opcodes, encoding="utf-8") as fh:
+            table = {int(k): v for k, v in json.load(fh).items()}
+    module = bgt_asir.load(module_path, exe_path, table)
+    renderer = decompile.ModuleDecompiler(module)
+
+    recovered: Dict[str, List[Any]] = collections.defaultdict(list)
+    for f in module.saved_functions:
+        if not f.bytecode:
+            continue
+        owner = f.object_type.name if f.object_type is not None else "<global>"
+        recovered["%s::%s" % (owner, f.name)].append(f)
+    out = []
+    for label in sorted(library):
+        bodies = library[label]
+        if len(bodies) != 1 or len(recovered.get(label, ())) != 1:
+            continue             # absent, or overloaded: no unambiguous pair
+        text = chr(10).join(renderer._body(recovered[label][0], 0))
+        out.append(Comparison(label, bodies[0], text))
+    return out
+
+
 def find_include_dirs(explicit: Optional[Sequence[str]]) -> List[str]:
     if explicit:
         return [d for d in explicit if os.path.isdir(d)]
@@ -251,6 +295,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="BGT include folder (default: the usual install paths); repeatable")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="show every function that is not identical")
+    ap.add_argument("--decompiler", action="store_true",
+                    help="score the decompiler (bgt recover) instead of the lifter")
     args = ap.parse_args(argv)
 
     dirs = find_include_dirs(args.include)
@@ -259,8 +305,11 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
     library = library_functions(dirs)
-    mod = as_disasm.load(args.module, args.exe, args.opcodes)
-    results = compare(mod, library)
+    if args.decompiler:
+        results = compare_decompiled(args.module, args.exe, args.opcodes, library)
+    else:
+        mod = as_disasm.load(args.module, args.exe, args.opcodes)
+        results = compare(mod, library)
     if not results:
         print("no library function appears in this module under the same name")
         return 1
@@ -280,7 +329,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(
                 None, r.source_calls, r.lifted_calls).get_opcodes():
             if op != "equal":
-                print("        %-7s source %s  lifted %s"
+                print("        %-7s source %s  recovered %s"
                       % (op, r.source_calls[i1:i2], r.lifted_calls[j1:j2]))
     if len(shown) > 8 and not args.verbose:
         print("\n  ... %d more (-v shows all)" % (len(shown) - 8))

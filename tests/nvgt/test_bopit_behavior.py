@@ -80,7 +80,7 @@ class BopItBehaviorTests(unittest.TestCase):
                 source.write_text(HARNESS + body, encoding="utf-8")
                 result = subprocess.run(
                     [str(compiler), str(source), str(source.with_suffix(".bin")), "--run"],
-                    capture_output=True, text=True, timeout=20)
+                    capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 results.append(result.stdout)
             self.assertEqual(results[1], results[0])

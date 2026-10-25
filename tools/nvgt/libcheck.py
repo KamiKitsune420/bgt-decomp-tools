@@ -85,7 +85,7 @@ def export_bytecode(compiler: Path, include: Path, folder: Path,
     try:
         result = subprocess.run([str(compiler), "harness.nvgt"], cwd=folder,
                                 capture_output=True, text=True, errors="replace",
-                                timeout=timeout)
+                                stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "harness did not finish (a script exception shows a modal dialog)"
     if all((folder / f"{kind}.bin").is_file() for kind in KINDS):

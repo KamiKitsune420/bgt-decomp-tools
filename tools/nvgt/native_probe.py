@@ -62,7 +62,8 @@ def probe(target, compiler, source, output):
     env = dict(os.environ, TEMP=str(temp), TMP=str(temp))
     bytecode.unlink(missing_ok=True)
     reference = subprocess.run([str(compiler), str(harness)], cwd=output,
-                               capture_output=True, timeout=45, env=env)
+                               capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=45, env=env)
     (output / "reference.log").write_bytes(reference.stdout + reference.stderr)
     if reference.returncode or not bytecode.exists():
         raise RuntimeError("Owned harness did not export bytecode; see reference.log")
@@ -82,7 +83,8 @@ def probe(target, compiler, source, output):
     for dll in (target.parent / "lib").glob("*.dll"):
         shutil.copyfile(dll, libraries / dll.name)
     log.unlink(missing_ok=True)
-    result = subprocess.run([str(executable)], cwd=output, capture_output=True, timeout=45, env=env)
+    result = subprocess.run([str(executable)], cwd=output, capture_output=True,
+                            stdin=subprocess.DEVNULL, timeout=45, env=env)
     (output / "process.log").write_bytes(result.stdout + result.stderr)
     if hashlib.sha256(target.read_bytes()).hexdigest() != original_hash:
         raise ValueError("Target changed during experiment")

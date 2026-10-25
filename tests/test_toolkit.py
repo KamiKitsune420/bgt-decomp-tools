@@ -25,7 +25,7 @@ try:                                   # after `pip install -e .`
     from bgtdecomp import (as_disasm, as_lift, as_module, as_opcodes,
                            as_write, bgt_crack, bgt_ghidra, bgt_kdf,
                            bgt_libcheck, bgt_pack, bgt_repack, bgt_string_crypt,
-                           bgtlib, cli)
+                           bgt_unpack, bgtlib, cli)
 except ImportError:                    # straight from a checkout
     sys.path.insert(0, os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
@@ -41,6 +41,7 @@ except ImportError:                    # straight from a checkout
     import bgt_pack
     import bgt_repack
     import bgt_string_crypt
+    import bgt_unpack
     import bgtlib
     import cli
 
@@ -2206,6 +2207,25 @@ def test_string_encrypt_roundtrips():
 def test_string_decrypt_rejects_wrong_key():
     blob = bgt_string_crypt.string_encrypt(b"secret data", b"right")
     assert bgt_string_crypt.string_decrypt(blob, b"wrong") is None
+
+
+def test_dialect_probe_refuses_a_module_with_no_enums():
+    """The probe reads the first enum name's first byte.
+
+    With no enums the next section is the class declarations, which open with
+    a count -- so neither dialect's signature is there to read. Super Egg Hunt
+    has no enums and is the *older* dialect, and the probe called it the newer
+    one from a byte that was a count. A header peek that answers anyway is
+    worse than one that declines, because `as_module` already decides this by
+    trial parse and only accepts the dialect whose tail lands exactly on EOF.
+    """
+    head = bytes([1, 0, 0x2A, 0, 0, 0, 0, 0])          # noDebugInfo, 0 enums
+    assert "trial parse" in bgt_unpack.angelscript_probe(head)
+
+
+def test_dialect_probe_reads_a_tagged_module():
+    head = bytes([1, 1, 0x6E, 4, 0, 0, 0, 0])          # one enum, 'n' tag
+    assert "tagged" in bgt_unpack.angelscript_probe(head)
 
 
 if __name__ == "__main__":

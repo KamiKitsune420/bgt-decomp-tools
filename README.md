@@ -15,6 +15,19 @@ bgt identify game.exe                 # BGT or NVGT?
 **BGT game:**
 
 ```bash
+bgt recover game.exe -o recovered/ --compile
+```
+
+That produces a whole project -- an entry script that `#include`s a tree of
+`.bgt` files (one class per file; library files under their real names), a ZIP,
+and a report -- and, with `--compile`, BGT's own compiler's verdict on it. The
+original file *names* of a game's own code are not recoverable, so the layout
+is generated and every file says so; what is recovered is the code.
+
+For the pseudo-source view of a single function or a whole module, the lifter
+is still there and is less machinery:
+
+```bash
 bgt unpack game.exe -o work/
 bgt lift work/game_bytecode.bin game.exe -o game.as
 ```

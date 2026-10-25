@@ -48,7 +48,7 @@ def _run(script: Path) -> str:
     try:
         result = subprocess.run([str(COMPILER), script.name], cwd=script.parent,
                                 capture_output=True, text=True, errors="replace",
-                                timeout=45)
+                                timeout=45, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise AssertionError(f"{script} did not finish: most likely a script "
                              "exception, which NVGT reports in a modal dialog") from None
@@ -118,7 +118,12 @@ class DecompiledBehaviourTests(_BehaviourFixture):
         # The shapes behind each fix, stated directly so a failure says which.
         self.assertRegex(source, r"@local_\d+\.item = local_\d+;")
         self.assertRegex(source, r'\.set\("item", @local_\d+\)')
-        self.assertRegex(source, r"bool __nvgt_ret_\d+ = local_\d+\.get\(")
+        # The generated result local is declared as a bool and assigned from
+        # the out-call before anything reads it. Its declaration is hoisted
+        # to the function, because such a local can be read outside the
+        # block whose call created it -- so pin the intent, not the shape.
+        self.assertRegex(source, r"bool __nvgt_ret_\d+(?: = |;)")
+        self.assertRegex(source, r"__nvgt_ret_\d+ = local_\d+\.get\(")
         self.assertIn("cast<sword@>(", source)
         self.assertRegex(source, r"\? 1 : 0\)")          # bool stored in a float slot
 

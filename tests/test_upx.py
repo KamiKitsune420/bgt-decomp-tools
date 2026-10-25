@@ -324,7 +324,7 @@ def test_decompress_matches_upx_d_outside_the_import_table():
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "unpacked.exe")
         subprocess.run(["upx", "-d", "-q", SAMPLE, "-o", out], check=True,
-                       stdout=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         with open(out, "rb") as fh:
             ref = fh.read()
     _base, secs = upx._sections(ref)

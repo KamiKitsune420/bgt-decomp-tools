@@ -101,7 +101,7 @@ namespace example {
                 path = folder / (name + ".as")
                 path.write_text(source, encoding="utf-8")
                 result = subprocess.run([str(compiler), str(path), str(path.with_suffix(".bin"))],
-                                        capture_output=True, text=True, timeout=30)
+                                        capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 return load_any(str(path.with_suffix(".bin")))
 

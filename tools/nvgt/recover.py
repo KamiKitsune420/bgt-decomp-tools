@@ -222,7 +222,8 @@ def check_compilation(sources, compiler, timeout=90):
         try:
             result = subprocess.run(command + ["-c", str(root / "main.nvgt")],
                                     cwd=root, capture_output=True, text=True,
-                                    errors="replace", timeout=timeout)
+                                    errors="replace", stdin=subprocess.DEVNULL,
+                                    timeout=timeout)
             output = result.stdout + result.stderr
             status = "passed" if result.returncode == 0 else "failed"
             exit_code = result.returncode
