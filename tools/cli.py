@@ -16,6 +16,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
                --replace sounds.dat=my.dat -o modified.bin
     bgt repack game.exe modified.bin -o patched.exe
     bgt recover game.exe -o recovered/ --compile    a whole project, compiler-checked
+    bgt gui                                a window for the above (wxPython)
     bgt compile recovered/game.bgt         BGT's own compiler, every diagnostic
     bgt api garbage_collect                what the engine documents, from bgt.chm
     bgt validate game.exe patched.exe
@@ -286,6 +287,19 @@ def cmd_api(args: argparse.Namespace) -> int:
 def cmd_recover(args: argparse.Namespace) -> int:
     """Everything after `bgt recover` is handled by bgt_project's own parser."""
     return _run(bgt_project.main, args.rest, prog="bgt recover")
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    """`bgt gui` -- the same recovery, driven from a window.
+
+    Imported here rather than at module scope so the whole CLI does not need
+    wxPython installed to run `bgt unpack`.
+    """
+    try:
+        from . import bgt_gui                      # type: ignore[attr-defined]
+    except ImportError:
+        import bgt_gui                             # type: ignore[no-redef]
+    return bgt_gui.main(args.rest)
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
@@ -574,6 +588,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("rest", nargs=argparse.REMAINDER,
                    help="game.exe -o DIR [--compile] [--no-zip] [--include DIR]")
     p.set_defaults(func=cmd_recover)
+
+    p = sub.add_parser("gui", help="the same recovery, in a window (wxPython)")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("compile",
                        help="compile a .bgt script with BGT's own compiler")

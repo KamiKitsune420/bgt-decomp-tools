@@ -24,6 +24,8 @@ x86 = ["capstone>=5.0"]
 dev = ["pytest>=7"]
 # Only for the optional memory-dump key scanner (bgt nvgt keyscan).
 scan = ["numpy>=1.22"]
+# Only for `bgt gui`. Everything else is a command line and needs none of it.
+gui = ["wxPython>=4.2"]
 
 [project.scripts]
 bgt = "bgtdecomp.cli:main"

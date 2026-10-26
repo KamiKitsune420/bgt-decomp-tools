@@ -128,6 +128,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_api.py` | `bgt api`: the engine's documented API, read out of the installed `bgt.chm` |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
+| `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
 | `bgt_validate.py` | run the whole pipeline over several titles and compare, stage by stage |
@@ -1138,6 +1139,36 @@ Three things it settles that were guesses before:
 - **The command-line options are documented** (Appendix G), and match what the
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
+
+## A window, for people who read screens with a screen reader
+
+`bgt gui` is a wxPython front end over `identify`, `recover` and `compile`.
+It calls the same functions the CLI does with the same defaults, so the
+command line stays the reference and anything the window reports can be
+rechecked in one command.
+
+These are audio games, and that decides the design rather than decorating it:
+
+- **Stock controls, and a label on every one.** The label goes on twice —
+  as the `StaticText` beside the field and as the control's accessible name —
+  because which one a screen reader picks up varies, and a field announced
+  as "edit" is a field nobody can fill in. `tests/test_gui.py` asserts it,
+  with the generic names taken **from wx itself**: `CheckBox` defaults to
+  `check`, not `checkbox`, and a plausible-looking list would have let the
+  real case through.
+- **The log is a read-only multiline text box**, because that is the one
+  widget a screen reader can review line by line afterwards. Progress is
+  appended, so nothing already said is overwritten.
+- **Finishing raises a dialog.** A screen reader announces a dialog without
+  being asked and does not announce a label that quietly changed, so the end
+  of a job arrives as a message box while the detail stays in the log.
+- **Work runs on a thread**, every widget touch through `wx.CallAfter`.
+  Recovering Crazy Party takes minutes, and a frozen window cannot even say
+  it is still working.
+- **There is no Stop button.** `recover` has no cancellation point, and a
+  button that cannot stop what it claims to invites you to believe a
+  half-written output folder is consistent. The controls disable instead,
+  and closing mid-job asks first.
 
 ## The assets, which the script will go looking for
 
