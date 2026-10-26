@@ -30,7 +30,8 @@ Plain `SHA256(password)` is specifically ruled out -- do not reintroduce it.
 
 import os
 import struct
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import (Any, Dict, Iterable, List, Optional, Sequence,
+                    Tuple, Union)
 
 try:
     from Crypto.Cipher import AES
@@ -40,6 +41,8 @@ except ImportError:
 
 PACK_MAGIC = b"SFPv"
 SWCR_MAGIC = b"SWCR"
+#: magic + three copies of the plain size + the 16-byte key tag.
+SWCR_HEADER = 4 + 12 + 16
 ZERO16 = bytes(16)
 
 
@@ -98,8 +101,18 @@ class Entry:
 def parse(path: str, load_data: bool = True) -> Tuple[int, List["Entry"]]:
     """Parse an SFPv1 pack. Returns (version, entries).
 
-    Raises if the walk does not land exactly on EOF -- a pack that parses to the
-    byte is proof the format is right, and silence about a short read is not.
+    Every record carries the `SFPv` magic again, and that is the per-entry
+    self-check: a wrong field width desynchronises and the next magic fails.
+    A short read inside an entry still raises, because that is the same
+    failure caught one step later.
+
+    **Bytes after the last entry are reported, not refused.** `pack::create`
+    writes the entry count in the header and `pack_file` reads exactly that
+    many, so the engine never looks past them -- a pack with a footer opens
+    fine in the game. Crazy Party's `data.dat` has 32 such bytes after 2,425
+    entries that every one of which validated, and refusing it meant the one
+    pack the toolkit could not open was one the engine could. The count is
+    left on `parse.trailing` for a caller that wants to say so.
     """
     entries = []
     total = os.path.getsize(path)
@@ -126,10 +139,13 @@ def parse(path: str, load_data: bool = True) -> Tuple[int, List["Entry"]]:
             entries.append(Entry(name, flags, offset, size, data))
 
         pos = f.tell()
-        if pos != total:
-            raise PackError("walk ended at %d, file is %d bytes (%d unexplained)"
-                            % (pos, total, total - pos))
+        parse.trailing = total - pos
     return version, entries
+
+
+#: Bytes left after the last entry of the most recent `parse`, which the
+#: engine ignores. Non-zero means the pack carries a footer of some kind.
+parse.trailing = 0
 
 
 def encrypt_payload(plaintext: bytes, key: bytes) -> bytes:
@@ -182,6 +198,36 @@ def replace(path: str, replacements: Dict[str, bytes],
         else:
             items.append((e.name, e.data))
     return build(items)
+
+
+def survey(path: str, sample: int = 0) -> Dict[str, Any]:
+    """What a pack holds, without reading its payloads.
+
+    A 372 MB pack cannot be loaded to answer "is it encrypted?", and asking
+    `tag_index` without data silently answers "no keys", because the `SWCR`
+    tag lives in the payload it did not read. So the header of each entry is
+    read directly -- 20 bytes at a known offset -- which is cheap and cannot
+    give that wrong answer.
+
+    `sample` limits how many entries are probed; 0 reads them all.
+    """
+    version, entries = parse(path, load_data=False)
+    trailing = parse.trailing
+    probe = entries if not sample else entries[:sample]
+    tags, encrypted, plain = set(), 0, 0
+    with open(path, "rb") as fh:
+        for entry in probe:
+            fh.seek(entry.offset)
+            head = fh.read(SWCR_HEADER)
+            if head[:4] == SWCR_MAGIC and len(head) == SWCR_HEADER:
+                encrypted += 1
+                tags.add(bytes(head[16:32]))
+            else:
+                plain += 1
+    return {"path": path, "version": version, "entries": len(entries),
+            "size": os.path.getsize(path), "trailing": trailing,
+            "probed": len(probe), "encrypted": encrypted, "plain": plain,
+            "keys": len(tags)}
 
 
 def tag_index(entries: Sequence["Entry"]) -> Dict[bytes, List["Entry"]]:

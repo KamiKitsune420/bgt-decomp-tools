@@ -786,16 +786,42 @@ def test_pack_build_roundtrips_through_parse():
         os.unlink(path)
 
 
-def test_pack_trailing_garbage_is_an_error():
-    """A walk that does not land exactly on EOF must raise, never pass quietly."""
+def test_pack_trailing_bytes_are_reported_not_refused():
+    """The engine reads `entry_count` entries and stops, so a footer is fine.
+
+    This test used to require the walk to land exactly on EOF. That rule was
+    stricter than `pack_file` itself: Crazy Party's `data.dat` carries 32
+    bytes after 2,425 entries whose record magic every one validated, and
+    refusing it meant the one pack this toolkit could not open was one the
+    game opens without complaint. The per-entry `SFPv` magic is the real
+    self-check -- a wrong field width desynchronises and the next one fails --
+    so trailing bytes are counted and reported instead.
+    """
     path = _write_temp(bgt_pack.build([("a", b"1")]) + b"leftover")
+    try:
+        _version, entries = bgt_pack.parse(path)
+        assert [e.name for e in entries] == ["a"]
+        assert bgt_pack.parse.trailing == len(b"leftover")
+    finally:
+        os.unlink(path)
+
+
+def test_a_desynchronised_pack_walk_still_raises():
+    """What the EOF rule was really for: a record that is not where it should be.
+
+    Corrupting an entry's magic is the same failure a wrong field width
+    produces, and it must still be loud.
+    """
+    good = bgt_pack.build([("a", b"1"), ("b", b"22")])
+    broken = good.replace(b"SFPv", b"XXXX", 2)      # header survives, entry 1 does not
+    path = _write_temp(broken)
     try:
         bgt_pack.parse(path)
     except bgt_pack.PackError:
         return
     finally:
         os.unlink(path)
-    raise AssertionError("unexplained trailing bytes were accepted")
+    raise AssertionError("a desynchronised walk was accepted")
 
 
 def test_encrypted_entry_roundtrips_and_rejects_wrong_key():

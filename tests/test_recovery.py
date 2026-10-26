@@ -27,7 +27,8 @@ import sys
 import tempfile
 
 try:                                   # after `pip install -e .`
-    from bgtdecomp import bgt_api, bgt_asir, bgt_compile, bgt_project
+    from bgtdecomp import (bgt_api, bgt_asir, bgt_compile, bgt_pack,
+                           bgt_project)
     from bgtdecomp.nvgt import asreader, decompile
 except ImportError:                    # straight from a checkout
     TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
@@ -38,6 +39,7 @@ except ImportError:                    # straight from a checkout
     import bgt_asir
     import decompile
     import bgt_compile
+    import bgt_pack
     import bgt_project
 
 
@@ -1009,3 +1011,186 @@ def test_a_backward_branch_with_a_real_body_is_still_a_do_while():
     assert "do {" in rendered[0], rendered
     assert any("y = roll();" in line for line in rendered), rendered
     assert not any("goto" in line for line in rendered), rendered
+
+
+# -- the funcdef the module records only as a placeholder -------------------
+
+def test_the_documented_signature_names_an_engine_funcdef():
+    """`_builtin_function_@` is every funcdef, so the module cannot say which.
+
+    AngelScript records funcdef-typed values under one placeholder with no
+    signature. The engine's documentation can name it:
+    `bool set_callback_function(pathfinder_callback@ callback)`. Without that,
+    `pf.set_callback_function(obj.method)` is emitted with the bare method and
+    rejected twice over, which was the last error left on Crazy Party.
+    """
+    placeholder = asreader.TypeInfo(name=bgt_asir.BUILTIN_FUNCTION, kind="app")
+    param = asreader.DataType(obj_type=placeholder, is_object_handle=True)
+    owner = asreader.TypeInfo(name="pathfinder", kind="app")
+    fn = asreader.Function(name="set_callback_function", object_type=owner)
+    fn.param_types = [param]
+    module = asreader.Module()
+    module.used_functions = [fn, None]
+    api = {"types": {"pathfinder": {
+        "methods": ["bool set_callback_function(pathfinder_callback@ callback)"],
+        "properties": []}}}
+    assert bgt_asir.name_engine_funcdefs(module, api) == 1
+    assert param.obj_type.name == "pathfinder_callback"
+
+
+def test_an_undocumented_type_is_left_alone():
+    """No documentation, no change -- and no invented type name."""
+    placeholder = asreader.TypeInfo(name=bgt_asir.BUILTIN_FUNCTION, kind="app")
+    param = asreader.DataType(obj_type=placeholder, is_object_handle=True)
+    fn = asreader.Function(name="whatever",
+                           object_type=asreader.TypeInfo(name="elias", kind="app"))
+    fn.param_types = [param]
+    module = asreader.Module()
+    module.used_functions = [fn]
+    assert bgt_asir.name_engine_funcdefs(module, {"types": {}}) == 0
+    assert param.obj_type.name == bgt_asir.BUILTIN_FUNCTION
+
+
+def test_a_documented_signature_of_another_arity_is_not_applied():
+    """Overloads differ by arity, and the wrong one would name the wrong type."""
+    placeholder = asreader.TypeInfo(name=bgt_asir.BUILTIN_FUNCTION, kind="app")
+    param = asreader.DataType(obj_type=placeholder, is_object_handle=True)
+    owner = asreader.TypeInfo(name="pathfinder", kind="app")
+    fn = asreader.Function(name="set_callback_function", object_type=owner)
+    fn.param_types = [param]
+    module = asreader.Module()
+    module.used_functions = [fn]
+    api = {"types": {"pathfinder": {
+        "methods": ["bool set_callback_function(int a, int b)"], "properties": []}}}
+    assert bgt_asir.name_engine_funcdefs(module, api) == 0
+    assert param.obj_type.name == bgt_asir.BUILTIN_FUNCTION
+
+
+
+
+# -- the assets a recovered script will go looking for ----------------------
+
+def _game_folder(tmp, packs=(), junk=()):
+    """A folder with an executable, some packs and some decoys."""
+    exe = os.path.join(tmp, "game.exe")
+    with open(exe, "wb") as fh:
+        fh.write(b"MZ" + bytes(64))
+    for name, items in packs:
+        target = os.path.join(tmp, *name.split("/"))
+        os.makedirs(os.path.dirname(target) or tmp, exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(bgt_pack.build(items))
+    for name, blob in junk:
+        with open(os.path.join(tmp, name), "wb") as fh:
+            fh.write(blob)
+    return exe
+
+
+class _Mod:
+    """Just the two things `data_packs` and `asset_gaps` read."""
+
+    def __init__(self, strings, called=()):
+        self.used_strings = list(strings)
+        self.used_functions = [type("F", (), {"name": n})() for n in called]
+
+
+def test_only_real_packs_beside_the_game_are_claimed():
+    """The magic separates a pack from the other names in the constants.
+
+    The calls pass locals -- `set_sound_storage(local_8)` -- so the names come
+    from the string constants, which also hold `log.txt`, `save.bin`, `.` and
+    `/`. A file is a pack when it starts with `SFPv`, and that is the filter.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = _game_folder(tmp,
+                           packs=[("data/core.dat", [("beep.ogg", b"OggS")])],
+                           junk=[("log.txt", b"not a pack"), ("save.bin", bytes(2))])
+        mod = _Mod(["data/core.dat", "log.txt", "save.bin", ".", "/"])
+        found = bgt_project.data_packs(exe, mod)
+        assert [p["name"] for p in found] == ["data/core.dat"]
+        assert found[0]["entries"] == 1 and found[0]["plain"] == 1
+
+
+def test_a_name_outside_the_game_folder_is_never_followed():
+    """A string constant is data: it must not reach out of the game's folder."""
+    with tempfile.TemporaryDirectory() as tmp:
+        inner = os.path.join(tmp, "game")
+        os.makedirs(inner)
+        with open(os.path.join(tmp, "outside.dat"), "wb") as fh:
+            fh.write(bgt_pack.build([("x", b"1")]))
+        exe = _game_folder(inner)
+        assert bgt_project.data_packs(exe, _Mod(["../outside.dat"])) == []
+
+
+def test_a_different_drive_is_outside_rather_than_an_error():
+    """`commonpath` raises across drives; that is an answer, not a crash.
+
+    Crazy Party's string constants hit this and the exception escaped
+    `bgt recover` entirely.
+    """
+    sep = os.sep
+    assert bgt_project._inside("C:" + sep + "game", "C:" + sep + "game" + sep + "d.dat")
+    assert not bgt_project._inside("C:" + sep + "game", "D:" + sep + "else" + sep + "d.dat")
+    assert not bgt_project._inside("C:" + sep + "game", "C:" + sep + "other")
+
+
+def test_copying_keeps_the_name_the_engine_will_ask_for():
+    """The engine opens the pack by the relative name the original used, so
+    `data/core.dat` has to land at `data/core.dat`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = _game_folder(tmp, packs=[("data/core.dat", [("a.ogg", b"OggS")])])
+        packs = bgt_project.data_packs(exe, _Mod(["data/core.dat"]))
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        notes = bgt_project.bring_data(packs, out)
+        assert os.path.isfile(os.path.join(out, "data", "core.dat"))
+        assert "copied" in notes[0]
+
+
+def test_extracting_writes_the_entries_and_stays_inside():
+    """An entry name is data too, so a parent-directory name must not escape."""
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = _game_folder(tmp, packs=[("d.dat", [("music/a.ogg", b"OggS-a"),
+                                                  ("../../escape.ogg", b"no")])])
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        notes = bgt_project.bring_data(
+            bgt_project.data_packs(exe, _Mod(["d.dat"])), out, extract=True)
+        root = os.path.join(out, "assets", "d")
+        with open(os.path.join(root, "music", "a.ogg"), "rb") as fh:
+            assert fh.read() == b"OggS-a"
+        assert not os.path.exists(os.path.join(tmp, "escape.ogg"))
+        assert "extracted" in notes[0]
+
+
+def test_an_encrypted_pack_is_reported_rather_than_written_as_ciphertext():
+    """Writing entries that are still encrypted would look like success."""
+    with tempfile.TemporaryDirectory() as tmp:
+        blob = bgt_pack.encrypt_payload(b"OggS-real-audio", b"k" * 32)
+        exe = _game_folder(tmp, packs=[("s.dat", [("a.ogg", blob)])])
+        packs = bgt_project.data_packs(exe, _Mod(["s.dat"]))
+        assert packs[0]["encrypted"] == 1
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        notes = bgt_project.bring_data(packs, out, extract=True)
+        assert "needs its key" in notes[0] and "bgt crack" in notes[0]
+        assert not os.path.exists(os.path.join(out, "assets"))
+
+
+def test_using_the_asset_apis_with_no_pack_found_is_said_out_loud():
+    """Finding nothing is the case that matters.
+
+    Recovering from a copy of the executable -- the normal thing to do --
+    finds no pack beside it, and silence there is the surprise to avoid: the
+    engine does not quietly do without its sounds.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = _game_folder(tmp)
+        mod = _Mod(["data/core.dat"],
+                   called=["set_sound_storage", "set_sound_decryption_key"])
+        notes = bgt_project.asset_gaps(exe, mod, [])
+        assert any("no pack was found beside" in n for n in notes)
+        assert any("data/core.dat" in n for n in notes)
+        assert any("bgt crack" in n for n in notes)
+        # A game that never touches the asset APIs gets no warning at all.
+        assert bgt_project.asset_gaps(exe, _Mod(["data/core.dat"]), []) == []

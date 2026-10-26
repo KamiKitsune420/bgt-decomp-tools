@@ -48,17 +48,19 @@ not debug info: they drive temporary lifetimes and object scopes.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 try:                      # installed as a package
-    from . import as_module, as_opcodes
+    from . import as_module, as_opcodes, bgt_api
     from .nvgt import asreader
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
     import as_module
     import as_opcodes
     import asreader
+    import bgt_api
 
 DataType = asreader.DataType
 Function = asreader.Function
@@ -66,6 +68,69 @@ GlobalProperty = asreader.GlobalProperty
 Instr = asreader.Instr
 Module = asreader.Module
 TypeInfo = asreader.TypeInfo
+
+
+SIGNATURE_PARAMS = re.compile(r"\((.*)\)\s*(?:const)?$")
+
+
+def name_engine_funcdefs(m: Module, api: Optional[Dict[str, Any]] = None) -> int:
+    """Give the `_builtin_function_` placeholder the name the engine documents.
+
+    AngelScript records every funcdef-typed value under one placeholder with
+    no signature, so a registered callback parameter arrives as
+    `_builtin_function_@` and nothing in the module can say which funcdef it
+    is. The engine's own documentation can: `bgt api pathfinder` gives
+    `bool set_callback_function(pathfinder_callback@ callback)`.
+
+    Without it, `pf.set_callback_function(obj.method)` is emitted with the
+    bare method and rejected twice over ("Can't pass class method as arg
+    directly"), which was the last error left on Crazy Party. With it the
+    delegate can be written `pathfinder_callback(obj.method)`.
+
+    This lives on the BGT side on purpose: the documentation is BGT's, and the
+    decompiler stays an AngelScript decompiler. Returns how many parameters
+    were named, and does nothing at all when the help file cannot be read.
+    """
+    if api is None:
+        try:
+            api = bgt_api.read()
+        except (RuntimeError, OSError):
+            return 0
+    types: Dict[str, Any] = api.get("types") or {}
+    named: Dict[str, TypeInfo] = {}
+    count = 0
+    for f in m.used_functions:
+        owner = getattr(f, "object_type", None) if f is not None else None
+        if owner is None or not f.param_types:
+            continue
+        entry = types.get(owner.name)
+        if not entry:
+            continue
+        for line in entry.get("methods") or ():
+            head, _, rest = line.partition("(")
+            if head.split()[-1:] != [f.name]:
+                continue
+            match = SIGNATURE_PARAMS.search(line)
+            if match is None:
+                continue
+            documented = [p.strip() for p in match.group(1).split(",") if p.strip()]
+            if len(documented) != len(f.param_types):
+                continue
+            for dt, text in zip(f.param_types, documented):
+                if (dt.obj_type is None
+                        or dt.obj_type.name != BUILTIN_FUNCTION):
+                    continue
+                # `pathfinder_callback@ callback` -> the type, handle dropped.
+                word = text.split()[0].rstrip("@&")
+                if not word or not word[0].isalpha():
+                    continue
+                ti = named.get(word)
+                if ti is None:
+                    ti = named[word] = TypeInfo(name=word, kind="app")
+                dt.obj_type = ti
+                count += 1
+            break
+    return count
 
 
 class AdapterError(ValueError):
@@ -789,7 +854,11 @@ def load(module_path: str, exe_path: Optional[str] = None,
     if not info.get("tail"):
         raise AdapterError("module tail did not land on EOF: %s"
                            % (info.get("tail_error") or "unknown"))
-    return Builder(data, info, opcodes).build()
+    m = Builder(data, info, opcodes).build()
+    # The engine's documentation names the funcdefs the module records
+    # only as `_builtin_function_`. Absent documentation changes nothing.
+    name_engine_funcdefs(m)
+    return m
 
 
 if __name__ == "__main__":

@@ -55,14 +55,15 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
-    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile, bgtlib,
-                   script_files)
+    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile, bgt_pack,
+                   bgtlib, script_files)
     from .nvgt import decompile
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
@@ -70,6 +71,7 @@ except ImportError:       # run directly from a checkout
     import bgt_api
     import bgt_asir
     import bgt_compile
+    import bgt_pack
     import bgtlib
     import script_files
     import decompile
@@ -106,6 +108,8 @@ class Project:
     sections: List[Section] = field(default_factory=list)
     stats: Dict[str, Any] = field(default_factory=dict)
     problems: List[str] = field(default_factory=list)
+    #: what was done with the asset packs -- an action, not a complaint
+    data: List[str] = field(default_factory=list)
     compile_report: Optional[bgt_compile.Report] = None
 
     def summary(self) -> str:
@@ -130,6 +134,10 @@ class Project:
         if self.newer_engine:
             lines.append("%-22s %s" % ("needs a newer engine",
                                        ", ".join(self.newer_engine[:6])))
+        if self.data:
+            lines.append("%-22s %s" % ("asset packs", self.data[0]))
+            for note in self.data[1:]:
+                lines.append("%-22s %s" % ("", note))
         if self.compile_report is not None:
             lines.append("%-22s %s" % ("compiler", self.compile_report.summary()))
         for problem in self.problems:
@@ -320,6 +328,154 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
     return gap
 
 
+#: characters that cannot appear in a path the engine would open, so a
+#: string constant carrying one is not a file name.
+def _inside(folder: str, candidate: str) -> bool:
+    """Is `candidate` within `folder`?
+
+    `commonpath` raises `ValueError` for paths on different drives, and a
+    string constant out of a game module can name anything -- a drive letter, a UNC
+    share, a bare `/`. A different drive is simply outside, so the exception
+    is the answer rather than a crash. Crazy Party's constants hit this.
+    """
+    try:
+        return os.path.commonpath([folder, candidate]) == folder
+    except ValueError:
+        return False
+
+
+_UNUSABLE = re.compile(r'["<>|*?]|[\r\n]')
+
+def data_packs(exe_path: str, module, sample: int = 0) -> List[Dict[str, Any]]:
+    """The asset packs this module names, as they sit beside the game.
+
+    A recovered script still calls `set_sound_storage("data.dat")`, and if the
+    pack is not where it looks, the game does not politely do without sound --
+    it can die at startup. So the project has to say what it needs, and be
+    able to bring it.
+
+    The names come from the module's string constants, because the calls pass
+    locals rather than literals (`set_sound_storage(local_8)`). A name counts
+    only when a file of that name sits beside the executable *and* starts with
+    `SFPv`: that magic is what separates `data.dat` from `log.txt`, `save.bin`
+    and the `.` / `/` that also appear in the constants.
+    """
+    folder = os.path.dirname(os.path.abspath(exe_path))
+    found: List[Dict[str, Any]] = []
+    seen = set()
+    for text in getattr(module, "used_strings", ()) or ():
+        if not text or len(text) > 128 or _UNUSABLE.search(text):
+            continue
+        candidate = os.path.normpath(os.path.join(folder, text))
+        # A string from the module is data: it must not reach outside the
+        # game's own folder.
+        if not _inside(folder, candidate):
+            continue
+        if candidate in seen or not os.path.isfile(candidate):
+            continue
+        with open(candidate, "rb") as fh:
+            if fh.read(4) != bgt_pack.PACK_MAGIC:
+                continue
+        seen.add(candidate)
+        try:
+            info: Dict[str, Any] = bgt_pack.survey(candidate, sample=sample)
+        except bgt_pack.PackError as exc:
+            info = {"path": candidate, "error": str(exc)}
+        info["name"] = text.replace("\\", "/")
+        found.append(info)
+    return sorted(found, key=lambda d: d["name"])
+
+
+def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
+               extract: bool = False) -> List[str]:
+    """Copy each pack next to the entry script, or extract its entries.
+
+    Copying is what makes the recovered project runnable, because the engine
+    looks for the pack by the same relative name the original used. Extracting
+    is for reading the assets, and only works where they are not encrypted --
+    for the rest the key is a separate hunt (`bgt crack`), and saying so beats
+    writing out files that are still ciphertext.
+    """
+    notes: List[str] = []
+    for pack in packs:
+        if pack.get("error"):
+            notes.append("%s could not be read: %s" % (pack["name"], pack["error"]))
+            continue
+        if not extract:
+            target = os.path.join(out_dir, pack["name"].replace("/", os.sep))
+            os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
+            shutil.copy2(pack["path"], target)
+            notes.append("%s copied (%.1f MB)" % (pack["name"], pack["size"] / 1e6))
+            continue
+        if pack["encrypted"]:
+            notes.append("%s holds %d encrypted entries and needs its key: "
+                         "bgt crack %s --dict <module>.bin"
+                         % (pack["name"], pack["encrypted"],
+                            os.path.basename(pack["path"])))
+            continue
+        where = os.path.join(out_dir, "assets",
+                             os.path.splitext(os.path.basename(pack["name"]))[0])
+        os.makedirs(where, exist_ok=True)
+        _, entries = bgt_pack.parse(pack["path"], load_data=True)
+        written = 0
+        for entry in entries:
+            name = os.path.normpath(entry.name.replace("\\", "/")).lstrip("./\\")
+            target = os.path.join(where, name)
+            if not _inside(where, os.path.abspath(target)):
+                continue                      # a pack cannot write outside itself
+            os.makedirs(os.path.dirname(target) or where, exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(entry.data or b"")
+            written += 1
+        notes.append("%s extracted %d entries to assets/%s"
+                     % (pack["name"], written, os.path.basename(where)))
+    return notes
+
+
+ASSET_APIS = ("set_sound_storage", "set_sound_decryption_key")
+
+
+def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]]) -> List[str]:
+    """What the script will look for at run time and may not find.
+
+    Finding nothing is the case that matters. `data_packs` only reports a pack
+    it can see beside the executable, so recovering from a copy of the exe --
+    which is the normal thing to do -- finds none, and silence there is
+    exactly the surprise to avoid: the engine does not quietly do without its
+    sounds.
+
+    So the module's own calls are the evidence instead. `set_sound_storage`
+    means it opens a pack; `set_sound_decryption_key` means the entries are
+    encrypted and the key is a separate hunt. The names come from the string
+    constants, which is a list of what it may ask for, not proof of which.
+    """
+    called = {f.name for f in getattr(module, "used_functions", ()) or ()
+              if f is not None and f.name}
+    uses = [api for api in ASSET_APIS if api in called]
+    if not uses:
+        return []
+    notes: List[str] = []
+    if not packs:
+        folder = os.path.dirname(os.path.abspath(exe_path))
+        asked = sorted({t.replace("\\", "/").lstrip("/") for t in
+                        (getattr(module, "used_strings", ()) or ())
+                        if t and 4 < len(t) < 64 and t.lower().endswith(".dat")})
+        notes.append(
+            "this game loads assets through %s and no pack was found beside "
+            "%s -- the recovered script will ask the engine for one by name "
+            "and can die at startup without it. Run recovery on the "
+            "executable in its own folder, or copy the data in by hand.%s"
+            % (" and ".join(uses), folder,
+               (" It names: " + ", ".join(asked[:8])) if asked else ""))
+    if "set_sound_decryption_key" in called:
+        notes.append(
+            "its pack entries are encrypted: the key is whatever the script "
+            "passed to set_sound_decryption_key, and `bgt crack <pack> "
+            "--dict <module>.bin` harvests candidates from this module and "
+            "tests each against one AES block")
+    return notes
+
+
 def _library(include_dirs: Optional[Sequence[str]]):
     dirs = list(include_dirs) if include_dirs else []
     if not dirs:
@@ -488,7 +644,8 @@ def verify(sections: List[Section], order: List[str], source: str) -> bool:
 
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
-            timeout: float = 600.0, progress=lambda message: None) -> Project:
+            timeout: float = 600.0, with_data: bool = False,
+            extract_data: bool = False, progress=lambda message: None) -> Project:
     name = os.path.splitext(os.path.basename(exe_path))[0]
     os.makedirs(out_dir, exist_ok=True)
 
@@ -516,6 +673,14 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     declared = {ti.name for ti in module.classes} | {ti.name for ti in module.enums}
     used = [ti.name for ti in module.used_types if ti and ti.name not in declared]
     plugins = plugin_dlls(exe_path, used)
+    # The asset packs the script will look for at run time. Discovery is
+    # always done, because a project that cannot find its sounds can die
+    # at startup and the report is the only warning you get.
+    packs = data_packs(exe_path, module)
+    data_notes: List[str] = []
+    if packs and (with_data or extract_data):
+        progress("bringing %d asset pack(s)" % len(packs))
+        data_notes = bring_data(packs, out_dir, extract=extract_data)
     # ...and types the installed engine simply does not have, plugin or not.
     newer = [name for name, _ in engine_gap(exe_path, used)
              if not any(os.path.splitext(dll)[0].lower() == name.lower()
@@ -602,8 +767,25 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         "bodies": sum(1 for f in module.saved_functions if f.bytecode),
         "verified": verify(sections, order, source),
         "unbalanced": len(unbalanced(sections)),
+        "data_packs": packs,
         "dangling_else": len(dangling_else(sections)),
     }
+    for pack in packs:
+        if pack.get("error"):
+            project.problems.append(
+                "the asset pack %s could not be read: %s"
+                % (pack["name"], pack["error"]))
+        elif not (with_data or extract_data):
+            project.problems.append(
+                "%s needs %s beside it (%d entries, %.1f MB%s): the script "
+                "asks the engine for it by that name, and without it the game "
+                "can die at startup. Re-run with --with-data to copy it."
+                % (project.entry, pack["name"], pack["entries"],
+                   pack["size"] / 1e6,
+                   ", %d encrypted" % pack["encrypted"] if pack["encrypted"] else ""))
+    for note in asset_gaps(exe_path, module, packs):
+        project.problems.append(note)
+    project.data = list(data_notes)
     for path, line in dangling_else(sections)[:5]:
         project.problems.append(
             "%s has an `else` with no `if`: `%s` -- the structurer gave up on "
@@ -693,13 +875,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-zip", action="store_true")
     ap.add_argument("--compile", action="store_true",
                     help="compile the result with BGT's own compiler and report")
+    ap.add_argument("--with-data", action="store_true",
+                    help="copy the asset packs the script needs into the project")
+    ap.add_argument("--extract-data", action="store_true",
+                    help="extract the packs entries instead of copying them; unencrypted ones only, the rest need bgt crack")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
 
     project = recover(args.exe, args.output, args.include,
                       make_zip=not args.no_zip, compile_check=args.compile,
-                      timeout=args.timeout,
+                      timeout=args.timeout, with_data=args.with_data,
+                      extract_data=args.extract_data,
                       progress=(lambda m: None) if args.quiet
                       else (lambda m: print("  %s" % m, flush=True)))
     print(project.summary())

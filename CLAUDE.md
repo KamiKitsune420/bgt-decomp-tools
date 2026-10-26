@@ -172,6 +172,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 
 ```bash
 bgt recover game.exe -o recovered/ --compile
+bgt recover game.exe -o recovered/ --with-data   # ...and the packs it needs
 bgt compile recovered/game.bgt            # just the compiler, on any script
 ```
 
@@ -1047,9 +1048,12 @@ checks say:
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 190,294 | 559 | 0 | 0 | yes | **2**, both one line |
+| Crazy Party | 190,294 | 559 | 0 | 0 | yes | **0 errors, and it runs** |
 
-**Two titles compile clean and run.** `bgt compile --run` on the recovered
+**Three titles compile clean and run**, including the largest. Crazy Party
+is 190,294 lines across 559 files and `bgt compile --run` on the recovered
+project reports `compiled with 4 warning(s), and ran: it opened a window of
+its own titled 'Crazy Party beta77'`. `bgt compile --run` on the recovered
 project reports `compiled with 1 warning(s), and ran: it opened a window of
 its own titled 'Super Egg Hunt Version 1.53'` — which is the title the
 original executable shows, checked by launching it. That is the end-to-end
@@ -1134,6 +1138,54 @@ Three things it settles that were guesses before:
 - **The command-line options are documented** (Appendix G), and match what the
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
+
+## The assets, which the script will go looking for
+
+A recovered script still calls `set_sound_storage("data.dat")`, and if the
+pack is not where it looks the engine does not politely do without sound —
+it can die at startup. So `bgt recover` always reports what the project
+needs, and can bring it:
+
+```bash
+bgt recover game.exe -o out/ --with-data      # copy the packs beside the entry script
+bgt recover game.exe -o out/ --extract-data   # unpack their entries instead
+```
+
+Finding the packs takes two pieces of evidence, because neither alone is
+enough. The *names* come from the module's string constants, since the calls
+pass locals (`set_sound_storage(local_8)`) and the literal never reaches the
+call site. The *filter* is the `SFPv` magic of a file sitting beside the
+executable, which is what separates `data.dat` from the `log.txt`,
+`save.bin`, `.` and `/` that are also in those constants.
+
+**Finding nothing is the case that matters.** Recovering from a copy of the
+executable — the normal thing to do — finds no pack beside it, and silence
+there is the whole problem. So the module's own calls are the fallback
+evidence: `set_sound_storage` means it opens a pack at all, and
+`set_sound_decryption_key` means the entries are encrypted and the key is a
+separate hunt (`bgt crack`). Either way the report says so.
+
+Three things this turned up:
+
+- **A pack may have a footer, and refusing it was stricter than the engine.**
+  `pack::create` writes the entry count in the header and `pack_file` reads
+  exactly that many, so bytes after the last entry are never read. Crazy
+  Party's `data.dat` carries 32 of them after 2,425 entries whose record
+  magic every one validated, and the old "must land exactly on EOF" rule
+  meant the one pack this toolkit could not open was one the game opens
+  without complaint. The per-entry magic is the real self-check; trailing
+  bytes are counted and reported now.
+- **`tag_index` without payloads answers "no keys", which is wrong.** The
+  `SWCR` tag lives in the payload, so asking after `parse(load_data=False)`
+  reports every pack as unencrypted — and a 372 MB pack cannot be loaded
+  just to ask. `bgt_pack.survey` reads each entry's 20-byte header at its
+  known offset instead, which is cheap and cannot give that answer.
+- **A string constant is data, and two guards follow from that.** A name must
+  not reach outside the game's folder, and an entry name must not write
+  outside the extraction folder. `os.path.commonpath` raises `ValueError`
+  across drives rather than returning a verdict, and Crazy Party's constants
+  hit exactly that, so the exception is the answer — different drive,
+  therefore outside — rather than a crash out of `bgt recover`.
 
 ## Compiling without the GUI
 

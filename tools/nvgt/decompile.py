@@ -1934,7 +1934,8 @@ class FuncDecompiler:
                 # `void CbFade(int, bool)`.
                 bound = next((i.func_ref for i in reversed(self.instrs[:self.k])
                               if i.name == "FuncPtr" and i.func_ref is not None), None)
-                funcdef = self._funcdef_matching(bound)
+                funcdef = (self._funcdef_matching(bound)
+                           or self._funcdef_from_consumer())
                 if funcdef:
                     expression = f"{funcdef}({expression})"
             self.value_reg = Atom("call", expression)
@@ -2372,6 +2373,40 @@ class FuncDecompiler:
                     tuple(p.format() for p in fd.param_types)) == want:
                 hits.append((fd.namespace_ + "::" if fd.namespace_ else "") + fd.name)
         return hits[0] if len(hits) == 1 else ""
+
+    def _funcdef_from_consumer(self) -> str:
+        """The funcdef named by the parameter this delegate is passed into.
+
+        A *registered* funcdef is not in the module's own list, and the module
+        records every funcdef-typed value under the `_builtin_function_`
+        placeholder, so neither the slot nor `_funcdef_matching` can name it.
+        The call that consumes the delegate can: Crazy Party's
+        `JoueurTerrain::setPf` binds `Terrain::callbackPf` and passes it to
+        `pathfinder::set_callback_function`, whose parameter the BGT adapter
+        has already named `pathfinder_callback` from the engine's own
+        documentation.
+
+        Only a registered type counts -- one the module does not declare as a
+        class -- and only when the callee has exactly one such parameter, so
+        there is nothing to choose between.
+        """
+        declared = {c.name for c in getattr(self.m, "classes", ()) or () if c}
+        for ins in self.instrs[self.k + 1:]:
+            if not ins.name.startswith("CALL"):
+                continue
+            fr = ins.func_ref
+            if fr is None:
+                return ""
+            names = []
+            for dt in fr.param_types:
+                ot = dt.obj_type
+                if (ot is None or ot.name in declared
+                        or ot.name == "_builtin_function_"
+                        or getattr(ot, "kind", "") != "app"):
+                    continue
+                names.append(ot.name)
+            return names[0] if len(names) == 1 else ""
+        return ""
 
     def _call_ptr(self, ins: Instr) -> None:
         self._flush_pending_call()
