@@ -62,8 +62,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
-    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile, bgt_pack,
-                   bgtlib, script_files)
+    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile,
+                   bgt_libcheck, bgt_pack, bgtlib, script_files)
     from .nvgt import decompile
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
@@ -71,6 +71,7 @@ except ImportError:       # run directly from a checkout
     import bgt_api
     import bgt_asir
     import bgt_compile
+    import bgt_libcheck
     import bgt_pack
     import bgtlib
     import script_files
@@ -110,6 +111,8 @@ class Project:
     problems: List[str] = field(default_factory=list)
     #: what was done with the asset packs -- an action, not a complaint
     data: List[str] = field(default_factory=list)
+    #: which library files came from the engine rather than the module
+    stock: List[str] = field(default_factory=list)
     compile_report: Optional[bgt_compile.Report] = None
 
     def summary(self) -> str:
@@ -134,12 +137,19 @@ class Project:
         if self.newer_engine:
             lines.append("%-22s %s" % ("needs a newer engine",
                                        ", ".join(self.newer_engine[:6])))
+        if self.stock:
+            lines.append("%-22s %s" % ("stock library", self.stock[0]))
+            for note in self.stock[1:]:
+                lines.append("%-22s %s" % ("", note))
         if self.data:
             lines.append("%-22s %s" % ("asset packs", self.data[0]))
             for note in self.data[1:]:
                 lines.append("%-22s %s" % ("", note))
         if self.compile_report is not None:
+            used = s.get("compiler_used")
             lines.append("%-22s %s" % ("compiler", self.compile_report.summary()))
+            if used:
+                lines.append("%-22s %s" % ("", used))
         for problem in self.problems:
             lines.append("  ! %s" % problem)
         return "\n".join(lines)
@@ -476,13 +486,238 @@ def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]]) -> List[s
     return notes
 
 
+#: a `#include` directive, with or without space before the name
+#: (`#include"form.bgt"` is how BGT's own sources write some of them).
+_INCLUDE_LINE = re.compile(r'\s*#\s*include\b')
+
+
+#: a `funcdef` declaration; `types.bgt` already carries every one of
+#: the module's, so a stock file's copy would be a name conflict.
+_FUNCDEF_LINE = re.compile(r'\s*funcdef\b')
+
+
+def stock_library(include_dirs: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """{file name: path} for the library source BGT ships with itself."""
+    found: Dict[str, str] = {}
+    for folder in (list(include_dirs) if include_dirs else _default_includes()):
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            if name.lower().endswith(".bgt"):
+                found.setdefault(name, os.path.join(folder, name))
+    return found
+
+
+#: a function or method definition's opening line: `bool f(int a, string b)`.
+_SIGNATURE = re.compile(
+    r"^[ \t]*(?:[A-Za-z_][\w:]*(?:\[\])*@?[ \t]+)+([A-Za-z_]\w*)[ \t]*\(([^)]*)\)",
+    re.MULTILINE)
+
+
+def _param_types(params: str) -> List[str]:
+    """The parameter *types* of one parameter list, names and defaults dropped.
+
+    `tts_voice@ handle` and `voice_manager@ arg0` differ in the only part that
+    matters, and `bool persistent=false` is the same parameter as
+    `bool arg2 = false`. So the default is cut, and the trailing identifier --
+    the parameter's own name -- goes with it, leaving `const string&in` intact
+    because its type is more than one token.
+    """
+    out: List[str] = []
+    for raw in params.split(","):
+        text = raw.split("=")[0].strip()
+        if not text:
+            continue
+        words = text.split()
+        out.append(" ".join(words[:-1]) if len(words) > 1 else words[0])
+    return out
+
+
+def _signatures(text: str) -> Dict[str, List[List[str]]]:
+    """{name: [parameter type lists]} for every definition in some source."""
+    found: Dict[str, List[List[str]]] = {}
+    for match in _SIGNATURE.finditer(text):
+        found.setdefault(match.group(1), []).append(_param_types(match.group(2)))
+    return found
+
+
+def _bodies_that_differ(stock_text: str, group: Sequence[Section]) -> List[str]:
+    """Functions whose recovered call sequence is not the stock one.
+
+    Reused from `bgt_libcheck`, which is the thing that scores recovered code
+    against BGT's shipped library in the first place: the sequence of calls in
+    evaluation order, and the string literals as a multiset.
+    """
+    try:
+        stock = bgt_libcheck.source_functions(stock_text)
+        recovered = bgt_libcheck.source_functions(
+            chr(10).join(section.text for section in group))
+    except Exception:
+        return []
+    differing: List[str] = []
+    for label, bodies in sorted(stock.items()):
+        mine = recovered.get(label)
+        if len(bodies) != 1 or not mine or len(mine) != 1:
+            continue
+        pair = bgt_libcheck.Comparison(label, bodies[0], mine[0])
+        if not pair.identical or not pair.literals_equal:
+            differing.append(label)
+    return differing
+
+
+def _members(module, class_name: str) -> List[str]:
+    """Every member name the module records for this class.
+
+    Methods and properties both, because a game's edit can be either, and the
+    one that caught this out was a property: Super Egg Hunt's `dynamic_menu`
+    carries an `is_main` that stock BGT's has never heard of.
+    """
+    names: List[str] = []
+    for ti in getattr(module, "classes", ()) or ():
+        if ti is None or ti.name != class_name:
+            continue
+        names += [m.name for m in (ti.methods or ()) if m is not None and m.name]
+        names += [n for n, _dt, _flags in (ti.properties or ())]
+    return names
+
+
+def _why_not_stock(name: str, described, text: str, group: Sequence[Section],
+                   module) -> str:
+    """Why this library file must keep its decompiled version, or "" to take
+    the engine's.
+
+    Every one of these came from a title that broke:
+
+    * **It declares types of its own.** `form.bgt` declares four enums, and
+      `types.bgt` already carries every enum in the module, so taking the
+      stock file too is four "Name conflict" errors. Psycho Strike.
+    * **The game added a member.** Super Egg Hunt's `dynamic_menu` has
+      `is_main`, `confirm`, `select` and `sound_pack`; substituting dropped
+      them and the game's own code then failed against the engine's class.
+    * **The game changed a signature.** Paladin's
+      `dynamic_menu::set_tts_object` takes its own `voice_manager@` where
+      stock takes `tts_voice@`. The names match, which is why comparing names
+      was not enough, and the call site is what broke.
+    """
+    if described.enums or described.globals:
+        return ("it declares %d enum(s) and %d global(s) of its own, which "
+                "types.bgt and globals.bgt already carry"
+                % (len(described.enums), len(described.globals)))
+
+    declared = set(described.classes) | set(described.functions)
+    stock_signatures = _signatures(text)
+    for section in group:
+        if section.name not in declared:
+            return "the game declares %s, which the engine's copy does not" % section.name
+        if section.kind != "class":
+            continue
+        for member in _members(module, section.name):
+            if not re.search(r"(?<![\w.])" + re.escape(member) + r"\b", text):
+                return ("the game's %s has %s, which the engine's does not"
+                        % (section.name, member))
+    for member, mine in _signatures(
+            chr(10).join(section.text for section in group)).items():
+        theirs = stock_signatures.get(member)
+        if theirs is None or len(mine) != 1 or len(theirs) != 1:
+            continue
+        if mine[0] != theirs[0]:
+            return ("the game's %s takes (%s) where the engine's takes (%s)"
+                    % (member, ", ".join(mine[0]), ", ".join(theirs[0])))
+    return ""
+
+
+def substitute_stock(sections: List[Section], out_dir: str, module,
+                     include_dirs: Optional[Sequence[str]] = None
+                     ) -> Tuple[Dict[str, str], List[str]]:
+    """Use the engine's own copy of a library file instead of the decompiled one.
+
+    A stock `include/*.bgt` is not what anyone is trying to recover: it ships
+    with BGT, and its real source carries the parameter names, the comments
+    and the author's own structure, none of which survive compilation.
+    Decompiling it throws all of that away -- `play_stationary(string arg0,
+    bool arg1, bool arg2 = false)` where the original reads
+    `play_stationary(string filename, bool looping, bool persistent=false)`.
+
+    So where a run was attributed to a shipped file, that file is copied in and
+    the decompiled sections for it are dropped -- but **only when nothing says
+    the game's copy is different**, and games edit this library constantly.
+    `_why_not_stock` holds the three reasons found so far, each from a title
+    that broke when the check was weaker than it is now.
+
+    What this still cannot see is an edited method *body*, since a difference
+    there is either the game's edit or this decompiler's own imperfection and
+    the comparison cannot tell them apart. Those are reported rather than
+    acted on.
+
+    Returns ({library name: source path}, notes).
+    """
+    stock = stock_library(include_dirs)
+    if not stock:
+        return {}, ["no BGT include folder found, so library files stay decompiled"]
+    index = {f.name: f for f in _library(include_dirs)}
+
+    runs: Dict[str, List[Section]] = {}
+    for section in sections:
+        if section.origin:
+            runs.setdefault(section.origin, []).append(section)
+
+    used: Dict[str, str] = {}
+    notes: List[str] = []
+    for name, group in sorted(runs.items()):
+        source = stock.get(name)
+        described = index.get(name)
+        if source is None or described is None:
+            notes.append("%s is attributed but not shipped here, so it stays "
+                         "as decompiled" % name)
+            continue
+        with open(source, "r", encoding="latin-1") as fh:
+            text = fh.read()
+
+        why = _why_not_stock(name, described, text, group, module)
+        if why:
+            notes.append("%s keeps its decompiled version: %s" % (name, why))
+            continue
+
+        target = os.path.join(out_dir, "includes", name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        kept = [line for line in text.splitlines()
+                if not _INCLUDE_LINE.match(line) and not _FUNCDEF_LINE.match(line)]
+        header = (
+            "// %s -- BGT's own copy of this file, from\n"
+            "// %s\n"
+            "//\n"
+            "// Decompiling a stock library file loses its parameter names and\n"
+            "// comments for nothing, so the engine's source is used instead. Every\n"
+            "// member and signature the game's own copy has was checked against\n"
+            "// this file first, so it is not hiding an edit the game made.\n"
+            "//\n"
+            "// Its #include and funcdef lines are stripped: the entry script lists\n"
+            "// every file in order, and types.bgt already declares the funcdefs.\n"
+            "\n" % (name, source))
+        with open(target, "w", encoding="latin-1", newline="\n") as fh:
+            fh.write(header)
+            fh.write("\n".join(kept).rstrip() + "\n")
+        used[name] = source
+        notes.append("%s taken from the engine, replacing %d decompiled "
+                     "declaration(s)" % (name, len(group)))
+        differing = _bodies_that_differ(text, group)
+        if differing:
+            notes.append("    ...but %s differ from the engine's source: either "
+                         "the game edited them or the decompiler renders them "
+                         "differently, and `bgt libcheck --decompiler` is what "
+                         "tells the two apart" % ", ".join(differing[:4]))
+    return used, notes
+
+
+def _default_includes() -> List[str]:
+    """Where BGT keeps the library source it ships with."""
+    return [folder for folder in (r"C:\Program Files (x86)\BGT\include",
+                                  r"C:\Program Files\BGT\include")
+            if os.path.isdir(folder)]
+
+
 def _library(include_dirs: Optional[Sequence[str]]):
-    dirs = list(include_dirs) if include_dirs else []
-    if not dirs:
-        for candidate in (r"C:\Program Files (x86)\BGT\include",
-                          r"C:\Program Files\BGT\include"):
-            if os.path.isdir(candidate):
-                dirs.append(candidate)
+    dirs = list(include_dirs) if include_dirs else _default_includes()
     return script_files.library_index(dirs, extensions=("*.bgt",)) if dirs else []
 
 
@@ -645,7 +880,8 @@ def verify(sections: List[Section], order: List[str], source: str) -> bool:
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
             timeout: float = 600.0, with_data: bool = False,
-            extract_data: bool = False, progress=lambda message: None) -> Project:
+            extract_data: bool = False, stock_includes: bool = True,
+            progress=lambda message: None) -> Project:
     name = os.path.splitext(os.path.basename(exe_path))[0]
     os.makedirs(out_dir, exist_ok=True)
 
@@ -689,10 +925,27 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     # level down.
     newer += [name for name, _ in method_gap(exe_path, module)]
 
+    # The library files BGT ships are taken from BGT, not from the module.
+    # The order still comes from the module, so the entry script lists them
+    # exactly where the game declared them.
+    stock_used: Dict[str, str] = {}
+    stock_notes: List[str] = []
+    if stock_includes:
+        progress("taking the stock library files from the engine")
+        stock_used, stock_notes = substitute_stock(sections, out_dir, module,
+                                                   include_dirs)
+
     order: List[str] = []
     for section in sections:
         if section.path not in order:
             order.append(section.path)
+    # A substituted file is already written, so its decompiled sections must
+    # not be written over it -- but its place in the order is kept.
+    written = [s for s in sections if s.origin not in stock_used]
+    # Only the types section is inlined into the entry script: it is first in
+    # the order, so nothing moves, and it is the one section with no natural
+    # file of its own.
+    first_path = order[0] if order and order[0] == "includes/types.bgt" else None
 
     project = Project(name=name, out_dir=out_dir, entry=name + ".bgt",
                       files=[], includes=order, plugins=plugins,
@@ -701,7 +954,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
 
     progress("writing %d files" % (len(order) + 1))
     by_path: Dict[str, List[Section]] = {}
-    for section in sections:
+    for section in written:
         by_path.setdefault(section.path, []).append(section)
     for path, group in by_path.items():
         target = os.path.join(out_dir, path.replace("/", os.sep))
@@ -746,7 +999,26 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         entry_lines.append("// copied into this project. Compiling here needs")
         entry_lines.append("// the engine build that has it.")
         entry_lines.append("")
-    entry_lines += ['#include "%s"' % path for path in order]
+    # The entry script carries the first section's own text rather than only
+    # `#include` lines. Two reasons, and neither is cosmetic alone:
+    #
+    #   * BGT warns "The script section is empty" for a file that declares
+    #     nothing, and it shows that warning in a modal dialog, so an
+    #     unattended compile stops on it.
+    #   * A warning nobody can explain invites the conclusion that the
+    #     structure is wrong. It is not: `#include` is textual, so the module
+    #     is the concatenation, and `main()` inside an include runs -- which
+    #     was checked directly rather than assumed.
+    #
+    # The first section is `types.bgt` (enums, typedefs, funcdefs), and it is
+    # first in the order, so moving its text into the entry script leaves that
+    # order exactly as the module had it.
+    inlined = [section for section in written if section.path == first_path]
+    for section in inlined:
+        entry_lines.append(section.text.rstrip())
+        entry_lines.append("")
+    entry_lines += ['#include "%s"' % path for path in order
+                    if not (inlined and path == first_path)]
     entry_lines.append("")
     entry_path = os.path.join(out_dir, project.entry)
     with open(entry_path, "w", encoding="utf-8") as fh:
@@ -786,6 +1058,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     for note in asset_gaps(exe_path, module, packs):
         project.problems.append(note)
     project.data = list(data_notes)
+    project.stock = list(stock_notes)
     for path, line in dangling_else(sections)[:5]:
         project.problems.append(
             "%s has an `else` with no `if`: `%s` -- the structurer gave up on "
@@ -795,6 +1068,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         project.problems.append(
             "%s does not balance its braces (%+d): it cannot parse, and the "
             "compiler will blame the next declaration instead" % (path, depth))
+    if stock_used:
+        project.stock.append(
+            "the concatenation check covers the decompiled sections; the "
+            "%d file(s) above are the engine's own source by choice, not a "
+            "reconstruction of it" % len(stock_used))
     if not project.stats["verified"]:
         project.problems.append(
             "the files do not concatenate back to the one-file source: "
@@ -842,6 +1120,20 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         text = text.replace('#include "includes/', '#include "../includes/')
         with open(target, "w", encoding="utf-8") as fh:
             fh.write(text)
+        exe = bgt_compile.find_compiler()
+        caps = bgt_compile.capabilities()
+        project.stats["compiler_used"] = exe
+        if caps.get("default_arguments") is False:
+            # The recovered source uses default arguments wherever the
+            # original did, and BGT 1.0 cannot parse them at all. Compiling a
+            # perfectly good project with it gives a cascade that reads as a
+            # broken decompilation, and saying nothing about which compiler
+            # ran is what made that look like the recovery's fault.
+            project.problems.append(
+                "%s has no default arguments, which this source uses: every "
+                "`= false` in a signature will be reported as \"Expected ')' "
+                "or ','\". That is the compiler's age, not the recovery -- "
+                "pass --compiler to use a newer BGT." % exe)
         project.compile_report = bgt_compile.check(target, timeout=timeout)
 
     with open(os.path.join(out_dir, "recovery.json"), "w", encoding="utf-8") as fh:
@@ -875,6 +1167,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-zip", action="store_true")
     ap.add_argument("--compile", action="store_true",
                     help="compile the result with BGT's own compiler and report")
+    ap.add_argument("--no-stock-includes", action="store_true",
+                    help="decompile BGT's own library files too, instead of "
+                         "copying the engine's source for them")
     ap.add_argument("--with-data", action="store_true",
                     help="copy the asset packs the script needs into the project")
     ap.add_argument("--extract-data", action="store_true",
@@ -887,6 +1182,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       make_zip=not args.no_zip, compile_check=args.compile,
                       timeout=args.timeout, with_data=args.with_data,
                       extract_data=args.extract_data,
+                      stock_includes=not args.no_stock_includes,
                       progress=(lambda m: None) if args.quiet
                       else (lambda m: print("  %s" % m, flush=True)))
     print(project.summary())

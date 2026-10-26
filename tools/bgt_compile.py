@@ -55,6 +55,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -228,6 +229,51 @@ def find_compiler(explicit: Optional[str] = None) -> Optional[str]:
         if path and os.path.isfile(path):
             return path
     return None
+
+
+#: a one-line script whose only unusual feature is a default argument, which
+#: is how the compiler is asked whether it has them.
+_DEFAULT_ARG_PROBE = chr(10).join([
+    "int f(int a, bool b = false) { return a; }",
+    "void main() { f(1); }",
+    "",
+])
+
+_CAPABILITIES: Dict[str, Dict[str, bool]] = {}
+
+
+def capabilities(compiler: Optional[str] = None) -> Dict[str, bool]:
+    """What this BGT can parse, asked rather than assumed.
+
+    There is no version string in `bgt.exe` and no version metadata on the
+    file, so the only way to tell two installs apart is to put something to
+    them. BGT 1.0 does not support **default arguments at all**, and a
+    recovered module uses them wherever the original did, so compiling a
+    perfectly good project with 1.0 produces a cascade that reads as a broken
+    decompilation: `Expected ')' or ','` at the `=`, then "Expected method or
+    property", then "Unexpected token '}'" at the end of the class.
+
+    That happened, and the report said nothing about which compiler it had
+    used, which is what made it look like the recovery's fault.
+    """
+    exe = find_compiler(compiler)
+    if exe is None:
+        return {}
+    if exe in _CAPABILITIES:
+        return _CAPABILITIES[exe]
+    folder = tempfile.mkdtemp(prefix="bgtcaps_")
+    script = os.path.join(folder, "probe.bgt")
+    try:
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(_DEFAULT_ARG_PROBE)
+        report = check(script, compiler=exe, timeout=60.0, build="debug")
+        found = {"default_arguments": not report.errors}
+    except Exception:
+        found = {}
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    _CAPABILITIES[exe] = found
+    return found
 
 
 def parse(text: str) -> List[Diagnostic]:

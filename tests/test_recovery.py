@@ -1194,3 +1194,143 @@ def test_using_the_asset_apis_with_no_pack_found_is_said_out_loud():
         assert any("bgt crack" in n for n in notes)
         # A game that never touches the asset APIs gets no warning at all.
         assert bgt_project.asset_gaps(exe, _Mod(["data/core.dat"]), []) == []
+
+
+# -- library files taken from the engine instead of the module --------------
+
+class _Described:
+    """What `script_files.library_index` reports about one shipped file."""
+
+    def __init__(self, classes=(), functions=(), enums=(), globals_=()):
+        self.classes = (dict(classes) if isinstance(classes, dict)
+                        else {c: set() for c in classes})
+        self.functions = list(functions)
+        self.enums = list(enums)
+        self.globals = list(globals_)
+
+
+class _Ti:
+    def __init__(self, name, methods=(), properties=()):
+        self.name = name
+        self.methods = [type("M", (), {"name": m})() for m in methods]
+        self.properties = [(p, None, 0) for p in properties]
+
+
+class _Module2:
+    def __init__(self, classes=()):
+        self.classes = list(classes)
+
+
+def _lib_section(name, kind, text, origin):
+    section = bgt_project.Section(kind=kind, name=name, text=text)
+    section.origin = origin
+    return section
+
+
+def test_parameter_types_ignore_names_and_defaults():
+    """`tts_voice@ handle` and `voice_manager@ arg0` differ in the only part
+    that matters; `bool persistent=false` and `bool arg2 = false` do not."""
+    assert bgt_project._param_types("tts_voice@ handle") == ["tts_voice@"]
+    assert bgt_project._param_types("voice_manager@ arg0") == ["voice_manager@"]
+    assert bgt_project._param_types("string f, bool l, bool p=false") == [
+        "string", "bool", "bool"]
+    assert bgt_project._param_types("const string&in text") == ["const string&in"]
+    assert bgt_project._param_types("") == []
+
+
+def test_a_file_declaring_its_own_types_is_not_substituted():
+    """`form.bgt` declares four enums, and `types.bgt` already carries every
+    enum in the module, so taking the stock file too is four name conflicts.
+    That is what it did to Psycho Strike."""
+    described = _Described(classes=["audio_form"], enums=["control_types"])
+    why = bgt_project._why_not_stock("form.bgt", described, "class audio_form {}",
+                                     [], _Module2())
+    assert "enum" in why
+
+
+def test_an_added_member_is_not_substituted_away():
+    """Super Egg Hunt's `dynamic_menu` has an `is_main` stock BGT lacks.
+
+    Comparing class *names* -- all the first version of this did -- replaced
+    it, and the game's own code then failed against the engine's class.
+    """
+    described = _Described(classes={"dynamic_menu": set()})
+    module = _Module2([_Ti("dynamic_menu", methods=["run"], properties=["is_main"])])
+    stock = "class dynamic_menu {" + chr(10) + "bool run() { return true; }" + chr(10) + "}"
+    section = _lib_section("dynamic_menu", "class", "class dynamic_menu {}",
+                       "dynamic_menu.bgt")
+    why = bgt_project._why_not_stock("dynamic_menu.bgt", described, stock,
+                                     [section], module)
+    assert "is_main" in why
+
+
+def test_a_changed_signature_is_not_substituted_away():
+    """Paladin's `set_tts_object` takes its own `voice_manager@` where stock
+    takes `tts_voice@`. The names match, which is why names were not enough,
+    and the call site is what broke."""
+    nl = chr(10)
+    described = _Described(classes={"dynamic_menu": set()})
+    module = _Module2([_Ti("dynamic_menu", methods=["set_tts_object"])])
+    stock = nl.join(["class dynamic_menu {",
+                     "bool set_tts_object(tts_voice@ handle)",
+                     "{", "return true;", "}", "}"])
+    mine = nl.join(["class dynamic_menu {",
+                    "    bool set_tts_object(voice_manager@ arg0)",
+                    "    {", "        return true;", "    }", "}"])
+    section = _lib_section("dynamic_menu", "class", mine, "dynamic_menu.bgt")
+    why = bgt_project._why_not_stock("dynamic_menu.bgt", described, stock,
+                                     [section], module)
+    assert "voice_manager@" in why and "tts_voice@" in why
+
+
+def test_an_unmodified_library_file_is_substituted():
+    """The whole point: when nothing says the game's copy differs, the
+    engine's own source beats any decompilation of it."""
+    nl = chr(10)
+    described = _Described(classes={"number_speaker": set()})
+    module = _Module2([_Ti("number_speaker", methods=["speak"],
+                           properties=["rate"])])
+    stock = nl.join(["class number_speaker {", "int rate;",
+                     "bool speak(string text)", "{", "return true;", "}", "}"])
+    mine = nl.join(["class number_speaker {", "    int rate;",
+                    "    bool speak(string arg0)", "    {",
+                    "        return true;", "    }", "}"])
+    section = _lib_section("number_speaker", "class", mine, "number_speaker.bgt")
+    assert bgt_project._why_not_stock("number_speaker.bgt", described, stock,
+                                      [section], module) == ""
+
+
+# -- which compiler ran, and whether it can read this source ----------------
+
+def test_the_default_argument_probe_is_one_small_script():
+    """There is no version string in bgt.exe and no version metadata on the
+    file, so the only way to tell two installs apart is to put something to
+    them. BGT 1.0 has no default arguments at all."""
+    probe = bgt_compile._DEFAULT_ARG_PROBE
+    assert "bool b = false" in probe
+    assert "void main()" in probe          # it has to be runnable, not just parsable
+    assert probe.count(chr(10)) >= 2
+
+
+def test_capabilities_are_cached_per_compiler():
+    """The probe compiles a script, so asking twice must not pay twice."""
+    bgt_compile._CAPABILITIES.clear()
+    bgt_compile._CAPABILITIES["X:/fake/bgt.exe"] = {"default_arguments": False}
+    real = bgt_compile.find_compiler
+    try:
+        bgt_compile.find_compiler = lambda explicit=None: "X:/fake/bgt.exe"
+        assert bgt_compile.capabilities() == {"default_arguments": False}
+    finally:
+        bgt_compile.find_compiler = real
+        bgt_compile._CAPABILITIES.clear()
+
+
+def test_no_compiler_means_no_claim_about_it():
+    """With nothing found there is nothing to say, and guessing `True` would
+    be the dangerous direction."""
+    real = bgt_compile.find_compiler
+    try:
+        bgt_compile.find_compiler = lambda explicit=None: None
+        assert bgt_compile.capabilities() == {}
+    finally:
+        bgt_compile.find_compiler = real

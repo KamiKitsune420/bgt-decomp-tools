@@ -1140,6 +1140,38 @@ Three things it settles that were guesses before:
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
 
+## Which BGT compiled it, and an entry script that declares something
+
+Two things that between them cost a user an afternoon, both because the
+toolkit was quiet rather than wrong.
+
+**BGT 1.0 has no default arguments at all.** A recovered module uses them
+wherever the original did, so compiling a perfectly good project with 1.0
+gives a cascade that reads exactly like a broken decompilation:
+`Expected ')' or ','` at the `=`, then "Expected method or property",
+then "Unexpected token '}'" at the end of the class. The same project
+compiles cleanly under 1.3.
+
+There is no version string in `bgt.exe` and no version metadata on the
+file, so the installs cannot be told apart by looking. They can be told
+apart by asking: `bgt_compile.capabilities()` compiles a two-line script
+whose only unusual feature is a default argument, and caches the answer
+per executable. `bgt recover --compile` now reports **which** `bgt.exe` it
+used, and says so plainly when that one cannot parse what the source
+contains. The missing fact was never the diagnostics; it was whose.
+
+**"The script section is empty" was not cosmetic.** BGT reports warnings
+in a modal dialog and waits on it, so an unattended compile stops there;
+and a warning nobody can explain invites the conclusion that an entry
+script of nothing but `#include` lines is why a recovery does not run.
+It is not — `#include` is textual, so the module is the concatenation, and
+`main()` inside an included file runs, which was checked directly with a
+two-file probe rather than argued. The entry script now carries the
+module's own types section (enums, typedefs, funcdefs) inline instead of
+only includes. That section was already first in the order, so nothing
+moves, and Super Egg Hunt went from `compiled with 1 warning(s)` to
+`compiled cleanly, and ran`.
+
 ## A window, for people who read screens with a screen reader
 
 `bgt gui` is a wxPython front end over `identify`, `recover` and `compile`.
@@ -1169,6 +1201,54 @@ These are audio games, and that decides the design rather than decorating it:
   button that cannot stop what it claims to invites you to believe a
   half-written output folder is consistent. The controls disable instead,
   and closing mid-job asks first.
+
+## The stock library files come from BGT, not from the module
+
+A shipped `include/*.bgt` is not what anyone is trying to recover. It
+comes with the engine, and its real source has the parameter names and
+the comments, which compilation threw away:
+
+```
+decompiled:  int play_stationary(string arg0, bool arg1, bool arg2 = false)
+BGT's own:   int play_stationary(string filename, bool looping, bool persistent=false)
+```
+
+So a run attributed to a shipped file is replaced by that file, and the
+decompiled sections for it are dropped. **Games edit this library
+constantly**, though, and substituting over an edit silently undoes it,
+so each of the following has to pass. Every one of them is here because a
+title broke when the check was weaker:
+
+- **It must declare no types of its own.** `form.bgt` declares four
+  enums, and `types.bgt` already carries every enum in the module, so
+  taking the stock file too is four "Name conflict" errors. Psycho
+  Strike, 33 errors to 37.
+- **Every member must exist in the stock file.** Super Egg Hunt's
+  `dynamic_menu` has `is_main`, and its `dynamic_menu_item` an
+  `item_id`, which stock BGT has never heard of. The first version of
+  this compared class *names*, which matched, and the game's own code
+  then failed against the engine's class.
+- **Every signature must match, parameter types and all.** Paladin's
+  `dynamic_menu::set_tts_object` takes its own `voice_manager@` where
+  stock takes `tts_voice@`, and Super Egg Hunt's `sound_pool::update`
+  takes three ints where stock takes two. The names match in both cases,
+  which is exactly why names were not enough: Paladin went from 0 errors
+  to 2, at the call site rather than the definition.
+
+What this still cannot see is an edited method **body**. Psycho Strike's
+`dynamic_menu::run_extended` checks `alts_pressed` where stock 1.3 checks
+joystick buttons, and nothing about its interface says so. It cannot be
+used to block the substitution either, because a body difference is
+*either* the game's edit or this decompiler's own imperfection and the
+comparison cannot tell them apart — the decompiler path matches 140 of
+Psycho Strike's 149 library functions, so demanding all of them would
+block every title for reasons that are mine. So differing bodies are
+**named in the report** and `bgt libcheck --decompiler` is what tells the
+two apart. `--no-stock-includes` keeps everything decompiled.
+
+`#include` and `funcdef` lines are stripped from the copied file: the
+entry script lists every file in order, and `types.bgt` already declares
+the funcdefs, so leaving either in is a duplicate declaration.
 
 ## The assets, which the script will go looking for
 
