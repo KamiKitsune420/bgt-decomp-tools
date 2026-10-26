@@ -998,16 +998,44 @@ def _literal_is_plausible(s: bytes) -> bool:
     return printable > 0
 
 
-def module_strings(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
+def literal_is_cipher_shaped(s: bytes) -> bool:
+    """Accept a literal that looks like a block cipher's output.
+
+    `_literal_is_plausible` rejects any byte outside printable ASCII, which is
+    right for a blind scan -- and it discards exactly the literal a BGT game
+    stores its pack key in. The idiom is
+    `set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"))`, where
+    `h_key` is a 32-byte AES-CBC blob, so a harvest that cannot represent high
+    bytes cannot contain the password under any transformation. Super Egg Hunt
+    was 3,392 candidates and no hits for that reason alone.
+
+    What is accepted instead is narrow enough not to flood a blind scan: a
+    whole number of 16-byte blocks, at least one block, and mostly bytes that
+    are not text. Plaintext never looks like this, and a run of 32 arbitrary
+    bytes picked up mid-record is cheap to test -- one AES block.
+    """
+    if len(s) < 16 or len(s) % 16 or len(s) > 512:
+        return False
+    text = sum(1 for c in s if 0x20 <= c <= 0x7E or c in (0x00, 0x09, 0x0A, 0x0D))
+    return text * 2 < len(s)
+
+
+def module_strings(data: bytes, dialect: Optional[str] = None,
+                   accept: Optional[Any] = None) -> List[bytes]:
     """Harvest every literal the string encoding actually yields.
 
     Unlike a printable-run sweep this respects the encoding, so the boundaries
     are exact -- which matters when a literal is being used as a password.
 
+    `accept` replaces the plausibility test, for a caller after literals this
+    one is built to discard -- see `literal_is_cipher_shaped`.
+
     The dialect is detected when not given. It used to default to the `len2`
     rule, which silently harvested a `tagged` module under the wrong encoding
     and returned whatever coincidence produced rather than its literals.
     """
+    if accept is None:
+        accept = _literal_is_plausible
     if dialect is None:
         try:
             dialect = detect(data)[0]
@@ -1035,7 +1063,7 @@ def module_strings(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
             break
         if 1 <= length <= 512 and q + length <= n:
             s = data[q:q + length]
-            if s not in seen and _literal_is_plausible(s):
+            if s not in seen and accept(s):
                 seen.add(s)
                 out.append(s)
         p += 1

@@ -36,6 +36,14 @@ Several harvesters are provided because BGT passwords turn up in several shapes:
   * `cores`    -- the readable part of a NUL-padded literal. Tomb Hunter writes
     its keys as `"\\0" * 19 + "melhesday" + "\\0" * 53`, and whether the password
     is the literal or the word inside it is not knowable here, so both are tried.
+  * `encrypted` -- `string_decrypt(blob, key)`, composed. A game that cares
+    about its sounds does not store the password as a literal; it stores an
+    encrypted blob and the key to it, both in the module. Super Egg Hunt's
+    `set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"))` is
+    `puppiesandpandas`, and no harvest over literals alone can reach it --
+    `module_strings` cannot even represent `h_key`, because its plausibility
+    test rejects every byte outside printable ASCII and a cipher blob is
+    nothing else. 3,392 candidates, 0 hits, and the password was in the file.
   * `printable` -- plain printable runs, the crude fallback.
 """
 
@@ -46,11 +54,12 @@ import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
-    from . import as_module, bgt_kdf, bgt_pack
+    from . import as_module, bgt_kdf, bgt_pack, bgt_string_crypt
 except ImportError:       # run directly from a checkout
     import as_module
     import bgt_kdf
     import bgt_pack
+    import bgt_string_crypt
 
 
 PROGRESS_EVERY = 10_000
@@ -122,7 +131,53 @@ def harvest_printable(data: bytes, minimum: int = 4) -> List[bytes]:
     return out
 
 
-HARVESTERS = ("strings", "runs", "cores", "printable")
+def harvest_blobs(data: bytes, dialect: Optional[str] = None) -> List[bytes]:
+    """Every literal that looks like cipher text rather than text."""
+    return as_module.module_strings(data, dialect,
+                                    accept=as_module.literal_is_cipher_shaped)
+
+
+#: how many text literals to try as the `string_decrypt` key for one blob.
+#: Every one costs a key schedule plus two AES blocks, so the whole cross
+#: product is still cheap -- this only bounds the pathological case.
+MAX_CRYPT_KEYS = 20_000
+
+
+def harvest_encrypted(blobs: Sequence[bytes], keys: Sequence[bytes],
+                      limit: int = MAX_CRYPT_KEYS) -> List[bytes]:
+    """`string_decrypt(blob, key)` -- the shape a BGT game stores a key in.
+
+    A game that cares about its sounds does not write the pack password as a
+    literal, because `bgt crack` would find it. It writes
+    `set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"))`, with
+    `h_key` an encrypted blob and the *crypt* key the plain literal. Both
+    halves are in the module, so the password is recoverable -- but only by a
+    harvest that composes them, which is what this does: every blob decrypted
+    under every text literal, keeping whatever unwraps to a string.
+
+    `string_decrypt` is self-checking, which is what makes the cross product
+    affordable: BGT wraps a plaintext as `printf<len>\\0<data>` and `unwrap`
+    returns `None` unless that header is there, so a wrong pairing is rejected
+    by the format and never reaches the pack.
+    """
+    out: List[bytes] = []
+    seen = set()
+    for blob in blobs:
+        for key in keys[:limit]:
+            if not key:
+                continue
+            for use_kdf in (True, False):
+                try:
+                    plain = bgt_string_crypt.string_decrypt(blob, key, use_kdf)
+                except Exception:
+                    continue
+                if plain and plain not in seen:
+                    seen.add(plain)
+                    out.append(plain)
+    return out
+
+
+HARVESTERS = ("strings", "runs", "cores", "encrypted", "printable")
 
 
 def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], Dict[str, int]]:
@@ -139,6 +194,9 @@ def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], 
             produced = harvest_runs(literals or harvest_strings(module))
         elif name == "cores":
             produced = harvest_cores(literals or harvest_strings(module))
+        elif name == "encrypted":
+            produced = harvest_encrypted(harvest_blobs(module),
+                                         literals or harvest_strings(module))
         elif name == "printable":
             produced = harvest_printable(module)
         else:
@@ -242,7 +300,7 @@ def main() -> int:
     ap.add_argument("pack", help="the encrypted SFPv1 pack (e.g. sounds.dat)")
     ap.add_argument("--dict", dest="dictionary", required=True,
                     help="recovered module bytecode to harvest candidates from")
-    ap.add_argument("--harvest", default="strings,runs,cores",
+    ap.add_argument("--harvest", default="strings,runs,cores,encrypted",
                     help="comma-separated: %s (default: strings,runs,cores)"
                          % ", ".join(HARVESTERS))
     ap.add_argument("--workers", type=int, default=1,

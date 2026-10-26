@@ -427,6 +427,44 @@ def test_neutered_disarms_the_entry_point_and_keeps_the_module():
         assert text.count("void main()") == 1         # exactly one entry point
 
 
+def test_staging_repoints_relative_includes_at_the_real_files():
+    """A staged copy does not sit where the includes are written against.
+
+    `bgt compile` stages into `_compile_check/` so the executable the compiler
+    writes lands there, and then BGT resolves `includes/classes/player.bgt`
+    beside the copy and reports, truthfully, that there is no such file. Only
+    `bgt recover --compile` knew that, with a `../includes/` string replace of
+    its own -- so `bgt compile` on the project `bgt recover` had just written
+    failed on its first include.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "includes", "classes"))
+        for rel in ("includes/types.bgt", "includes/classes/player.bgt"):
+            with open(os.path.join(tmp, rel.replace("/", os.sep)), "w") as fh:
+                fh.write("// a file\n")
+        script = os.path.join(tmp, "game.bgt")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write('#include "includes/types.bgt"\n'
+                     '#include"includes/classes/player.bgt"\n'
+                     '#include "%s"\n' % os.path.join(tmp, "includes", "types.bgt")
+                     .replace(os.sep, "/"))
+        check = os.path.join(tmp, "_compile_check")
+        target = bgt_compile.stage(script, check)
+
+        with open(target, encoding="utf-8") as fh:
+            text = fh.read()
+        # Every relative include now resolves from the staging directory...
+        for line in text.splitlines():
+            if "#include" not in line:
+                continue
+            name = line.split('"')[1]
+            assert os.path.isfile(os.path.join(check, name.replace("/", os.sep))), name
+        # ...the no-space spelling BGT's own sources use is handled...
+        assert '#include"../includes/classes/player.bgt"' in text
+        # ...and an absolute include is left exactly as it was.
+        assert os.path.join(tmp, "includes", "types.bgt").replace(os.sep, "/") in text
+
+
 # -- the project split ------------------------------------------------------
 
 def _section(kind, name, text="x"):
@@ -1163,7 +1201,7 @@ def test_extracting_writes_the_entries_and_stays_inside():
         assert "extracted" in notes[0]
 
 
-def test_an_encrypted_pack_is_reported_rather_than_written_as_ciphertext():
+def test_an_encrypted_pack_with_no_key_is_reported_not_written_as_ciphertext():
     """Writing entries that are still encrypted would look like success."""
     with tempfile.TemporaryDirectory() as tmp:
         blob = bgt_pack.encrypt_payload(b"OggS-real-audio", b"k" * 32)
@@ -1173,8 +1211,65 @@ def test_an_encrypted_pack_is_reported_rather_than_written_as_ciphertext():
         out = os.path.join(tmp, "project")
         os.makedirs(out)
         notes = bgt_project.bring_data(packs, out, extract=True)
-        assert "needs its key" in notes[0] and "bgt crack" in notes[0]
+        assert "key was not recovered" in notes[0] and "bgt crack" in notes[0]
         assert not os.path.exists(os.path.join(out, "assets"))
+
+
+def test_an_encrypted_pack_is_decrypted_when_the_key_is_known():
+    """With the key, extraction has to produce the plaintext -- the whole point.
+
+    Super Egg Hunt extracted nothing at all because the key was never
+    recovered, and the report said so in a line that read like advice. The key
+    was in the module.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        key = b"k" * 32
+        blob = bgt_pack.encrypt_payload(b"OggS-real-audio", key)
+        exe = _game_folder(tmp, packs=[("s.dat", [("a.ogg", blob)])])
+        packs = bgt_project.data_packs(exe, _Mod(["s.dat"]))
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        keys = {bgt_pack.tag_for_key(key): key}
+        notes = bgt_project.bring_data(packs, out, extract=True, keys=keys)
+        with open(os.path.join(out, "assets", "s", "a.ogg"), "rb") as fh:
+            assert fh.read() == b"OggS-real-audio"
+        assert "extracted 1 entries" in notes[0]
+
+
+def test_an_entry_whose_key_does_not_verify_is_skipped_and_counted():
+    """A wrong key must not write a file: ciphertext named `music.ogg` is worse
+    than no file, because it looks like the extraction worked."""
+    with tempfile.TemporaryDirectory() as tmp:
+        good, bad = b"g" * 32, b"b" * 32
+        exe = _game_folder(tmp, packs=[
+            ("s.dat", [("ok.ogg", bgt_pack.encrypt_payload(b"OggS-ok", good)),
+                       ("no.ogg", bgt_pack.encrypt_payload(b"OggS-no", bad))])])
+        packs = bgt_project.data_packs(exe, _Mod(["s.dat"]))
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        notes = bgt_project.bring_data(
+            packs, out, extract=True,
+            keys={bgt_pack.tag_for_key(good): good,
+                  # a tag the pack has, mapped to a key that does not satisfy it
+                  bgt_pack.tag_for_key(bad): b"x" * 32})
+        root = os.path.join(out, "assets", "s")
+        assert os.path.isfile(os.path.join(root, "ok.ogg"))
+        assert not os.path.exists(os.path.join(root, "no.ogg"))
+        assert "1 skipped: no key that verifies" in notes[0]
+
+
+def test_survey_reports_the_tags_themselves_not_only_how_many():
+    """A key search needs the tags, and they are all it needs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        key = b"k" * 32
+        exe = _game_folder(tmp, packs=[
+            ("s.dat", [("a.ogg", bgt_pack.encrypt_payload(b"OggS-a", key)),
+                       ("b.ogg", bgt_pack.encrypt_payload(b"OggS-b", key)),
+                       ("c.ogg", b"OggS-plain")])])
+        info = bgt_pack.survey(os.path.join(os.path.dirname(exe), "s.dat"))
+        assert info["keys"] == 1
+        assert info["tags"] == [bgt_pack.tag_for_key(key)]
+        assert info["encrypted"] == 2 and info["plain"] == 1
 
 
 def test_using_the_asset_apis_with_no_pack_found_is_said_out_loud():

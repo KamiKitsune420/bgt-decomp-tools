@@ -103,6 +103,9 @@ $text = ""
 # point of run mode, so breaking on the report would answer the wrong
 # question.
 $ran = $false
+# Panes seen on a window that is NOT the compilation report, i.e. whatever the
+# script itself put on screen.
+$said = @()
 while ((Get-Date) -lt $deadline) {
     if ($proc.HasExited) { $outcome = "exited"; break }
     $window = $null
@@ -119,11 +122,25 @@ while ((Get-Date) -lt $deadline) {
             $parts = @()
             foreach ($pane in $panes) {
                 $name = $pane.Current.Name
-                # The exit button is furniture; the diagnostics are the long one.
-                if ($name -ne "" -and $name -ne "Exit") { $parts += $name }
+                # Buttons are furniture, and their labels read exactly like a
+                # one-word message: `-- and said: Continue` is a dialog's own
+                # button, not anything the script reported. The diagnostics
+                # are the long pane.
+                if ($name -ne "" -and
+                    @("Exit","OK","Continue","Cancel","Yes","No","Close") -notcontains $name) {
+                    $parts += $name
+                }
             }
             $isReport = ($title -like "Compilation*")
             if ($isReport -or $text -eq "") { $text = $parts -join "`n" }
+            # What the script itself said, kept apart from what the compiler
+            # said about the source. A clean compile is silent about whether
+            # the project has the files it opens, and the engine is not.
+            if (-not $isReport) {
+                foreach ($part in $parts) {
+                    if ($said -notcontains $part) { $said += $part }
+                }
+            }
             $outcome = "window"
             if (($Switch -eq "run") -and (-not $isReport)) {
                 # The script's own window: it compiled and started.
@@ -148,7 +165,8 @@ if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
 $exit = -1
 if ($proc.HasExited) { $exit = $proc.ExitCode }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-@{ outcome = $outcome; title = $title; text = $text; exit = $exit; ran = $ran } |
+@{ outcome = $outcome; title = $title; text = $text; exit = $exit; ran = $ran;
+   said = ($said -join "`n") } |
     ConvertTo-Json -Compress -Depth 3
 """
 
@@ -194,14 +212,37 @@ class Report:
     def errors(self) -> List[Diagnostic]:
         return [d for d in self.diagnostics if d.kind == "Error"]
 
+    #: What the script itself put on screen, as opposed to what the compiler
+    #: said about the source. The driver keeps them apart by which window the
+    #: text came from, which is exact; filtering one stream by what the lines
+    #: look like is not -- it reported a dialog's `Continue` button as
+    #: something Crazy Party had said.
+    said: str = ""
+
+    @property
+    def runtime_complaints(self) -> List[str]:
+        """What the engine said at run time.
+
+        A clean compile says nothing about whether the project has the files it
+        opens, and the engine does not fail quietly about that: Super Egg Hunt
+        compiled cleanly, ran, and said `could not load pack data/bgm.dat.`
+        That line is the difference between "it works" and "it runs with no
+        sound", so it is not left in `raw` for someone to find.
+        """
+        return [line.strip() for line in (self.said or "").splitlines()
+                if line.strip()]
+
     def summary(self) -> str:
         if self.outcome == "compiled":
             return "compiled cleanly"
         if self.outcome == "started":
             warnings = sum(1 for d in self.diagnostics if d.kind == "Warning")
-            return ("compiled%s, and ran: it opened a window of its own%s"
+            said = self.runtime_complaints
+            return ("compiled%s, and ran: it opened a window of its own%s%s"
                     % (" with %d warning(s)" % warnings if warnings else " cleanly",
-                       " titled %r" % self.title if self.title else ""))
+                       " titled %r" % self.title if self.title else "",
+                       "" if not said else
+                       " -- and said: %s" % "; ".join(said[:3])))
         if self.outcome == "crashed":
             return "the compiler itself died: exit 0x%08X%s" % (
                 self.exit_code & 0xFFFFFFFF,
@@ -349,7 +390,8 @@ def parse(text: str) -> List[Diagnostic]:
 
 
 def check(script: str, compiler: Optional[str] = None, timeout: float = 60.0,
-          keep_driver: bool = False, build: Optional[str] = None) -> Report:
+          keep_driver: bool = False, build: Optional[str] = None,
+          workdir: Optional[str] = None) -> Report:
     """Compile one script and return every diagnostic the engine reported.
 
     `build` asks for a real compile rather than a run: "debug" (`-c`) or
@@ -357,6 +399,14 @@ def check(script: str, compiler: Optional[str] = None, timeout: float = 60.0,
     the better check, because nothing of the program runs -- a game cannot
     open a window and sit there -- and it is what proves the whole module
     reaches the engine.
+
+    `workdir` is where the script *runs*, which is not always where it lives.
+    An include resolves against the including script's directory and a data
+    file against the working directory, so a staged copy needs the two to be
+    different: the copy's includes point back at the project (`stage`), and
+    its working directory has to be the project or `set_sound_storage
+    ("data/bgm.dat")` cannot find a pack that is sitting right there. It
+    defaults to the script's own directory.
     """
     exe = find_compiler(compiler)
     if exe is None:
@@ -367,7 +417,7 @@ def check(script: str, compiler: Optional[str] = None, timeout: float = 60.0,
             return Report(outcome="nodriver",
                           raw="another compile check still holds %s after %ds"
                               % (_LOCK, int(timeout)))
-        return _check(exe, script, timeout, keep_driver, build)
+        return _check(exe, script, timeout, keep_driver, build, workdir)
 
 
 @contextlib.contextmanager
@@ -407,9 +457,9 @@ def _one_at_a_time(timeout: float):
 
 
 def _check(exe: str, script: str, timeout: float, keep_driver: bool,
-           build: Optional[str]) -> "Report":
+           build: Optional[str], workdir: Optional[str] = None) -> "Report":
     script = os.path.abspath(script)
-    workdir = os.path.dirname(script)
+    workdir = os.path.abspath(workdir) if workdir else os.path.dirname(script)
     fd, driver = tempfile.mkstemp(suffix=".ps1", prefix="bgtcheck_")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(DRIVER)
@@ -445,6 +495,7 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
 
     title = result.get("title") or ""
     text = result.get("text") or ""
+    said = result.get("said") or ""
     raw_exit = result.get("exit", -1)
     # `or -1` here would turn a clean exit (0, the success case) into -1.
     exit_code = -1 if raw_exit is None else int(raw_exit)
@@ -463,14 +514,15 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
         reported = parse(text)
         if reported:
             return Report(outcome="errors", diagnostics=reported, raw=text,
-                          title=title, exit_code=exit_code)
+                          title=title, exit_code=exit_code, said=said)
         if exit_code == 0:
             return Report(outcome="compiled", raw=text, title=title,
-                          exit_code=exit_code)
+                          exit_code=exit_code, said=said)
         return Report(outcome="crashed", raw=text, title=title,
-                      exit_code=exit_code)
+                      exit_code=exit_code, said=said)
     if result.get("outcome") == "timeout":
-        return Report(outcome="timeout", raw=text, title=title, exit_code=exit_code)
+        return Report(outcome="timeout", raw=text, title=title,
+                      exit_code=exit_code, said=said)
 
     diagnostics = parse(text)
     # Any window other than the report window means compilation finished and
@@ -478,30 +530,115 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
     # engine reports them and then runs, so the diagnostics are kept.
     if result.get("ran") or ("error" not in title.lower() and not diagnostics):
         return Report(outcome="started", raw=text, title=title,
-                      diagnostics=diagnostics, exit_code=exit_code)
+                      diagnostics=diagnostics, exit_code=exit_code, said=said)
     return Report(outcome="errors", diagnostics=diagnostics, raw=text,
-                  title=title, exit_code=exit_code)
+                  title=title, exit_code=exit_code, said=said)
 
 
-def neutered(script: str, out_dir: str) -> str:
-    """Copy a script with its entry point disarmed, for a compile-only check.
+#: a `#include` directive. BGT's own sources write some of them without the
+#: space (`#include"form.bgt"`), so neither space is required.
+_INCLUDE = re.compile(r'(#\s*include\s*")([^"]+)(")')
 
-    The whole module still compiles -- every function, class and global is
-    seen by the compiler -- but `main` does nothing, so the process exits
-    instead of opening the game. Without this a *successful* compile looks
-    exactly like a hang.
+
+def _repoint_includes(source: str, script_dir: str, out_dir: str) -> str:
+    """Rewrite each relative `#include` so it still resolves from `out_dir`.
+
+    BGT resolves an include against the *including script's* directory, so a
+    staged copy one level down looks for `includes/classes/player.bgt` beside
+    itself and reports, truthfully, that there is no such file. Only
+    `bgt recover --compile` knew that, with a `../includes/` string replace of
+    its own, so `bgt compile` on the very project `bgt recover` had just
+    written failed on its first include and blamed the file it could not find.
+
+    `relpath` is used rather than an absolute path because a relative include
+    is the form the engine is known to accept, and rather than a fixed `../`
+    because the staging directory need not be one level down.
+    """
+    def fix(match):
+        head, name, tail = match.groups()
+        if os.path.isabs(name) or ":" in name:
+            return match.group(0)
+        target = os.path.normpath(os.path.join(script_dir, name))
+        return head + os.path.relpath(target, out_dir).replace(os.sep, "/") + tail
+    return _INCLUDE.sub(fix, source)
+
+
+def stage(script: str, out_dir: str, disarm: bool = True,
+          as_name: Optional[str] = None) -> str:
+    """Copy a script into `out_dir` ready for a compile-only check.
+
+    Two things have to happen to the copy, and leaving either out looks like a
+    broken recovery rather than a broken check:
+
+    * **`main` is disarmed** (when `disarm`), so the whole module still
+      compiles -- every function, class and global is seen -- while the process
+      exits instead of opening the game. Without it a *successful* compile looks
+      exactly like a hang.
+    * **Relative includes are repointed** at the real files, because the copy
+      does not sit in the directory they are written against.
+
+    The copy exists at all so the executable the compiler writes lands beside
+    it and not in the project the caller is reading.
     """
     with open(script, "r", encoding="utf-8", errors="replace") as fh:
         source = fh.read()
-    patched, count = re.subn(r"(?m)^(\s*)void\s+main\s*\(\s*\)",
-                             r"\1void __recovered_main()", source, count=1)
-    if count:
-        patched += "\n\nvoid main()\n{\n}\n"
+    if disarm:
+        source, count = re.subn(r"(?m)^(\s*)void\s+main\s*\(\s*\)",
+                                r"\1void __recovered_main()", source, count=1)
+        if count:
+            source += "\n\nvoid main()\n{\n}\n"
     os.makedirs(out_dir, exist_ok=True)
-    target = os.path.join(out_dir, os.path.basename(script))
+    source = _repoint_includes(
+        source, os.path.dirname(os.path.abspath(script)),
+        os.path.abspath(out_dir))
+    target = os.path.join(out_dir, as_name or os.path.basename(script))
     with open(target, "w", encoding="utf-8") as fh:
-        fh.write(patched)
+        fh.write(source)
     return target
+
+
+def neutered(script: str, out_dir: str) -> str:
+    """Kept for callers that predate `stage`; `stage` is the one to use."""
+    return stage(script, out_dir, disarm=True)
+
+
+#: prefix for the staged copy and for the executable the compiler writes beside
+#: it. Reserved, so a project file is never overwritten and both are safe to
+#: delete afterwards.
+STAGED_PREFIX = "_bgtcheck_"
+
+
+def check_project(script: str, compiler: Optional[str] = None,
+                  timeout: float = 60.0, build: str = "debug",
+                  keep: bool = False) -> Report:
+    """Compile-check a script where it lives, and leave nothing behind.
+
+    The copy goes in the script's **own** directory under a reserved name,
+    not in a subfolder, because BGT resolves everything relative against the
+    script's location -- an `#include` and a data path alike. A copy one level
+    down was given repointed includes and *still* reported `could not load
+    pack data/bgm.dat.` for a pack sitting one directory up, because
+    `set_sound_storage("data/bgm.dat")` is relative to the script too. Running
+    the same project in place said nothing, which is how the difference
+    showed. Same directory means nothing to rewrite and nothing to get wrong.
+
+    The copy exists so the executable the compiler writes does not land on the
+    project's own name; it lands under the reserved prefix instead, and both
+    go away afterwards.
+    """
+    home = os.path.dirname(os.path.abspath(script))
+    staged = os.path.join(home, STAGED_PREFIX + os.path.basename(script))
+    produced = os.path.splitext(staged)[0] + ".exe"
+    try:
+        stage(script, home, disarm=True, as_name=os.path.basename(staged))
+        return check(staged, compiler, timeout, build=build, workdir=home)
+    finally:
+        if not keep:
+            for path in (staged, produced):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -518,20 +655,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--raw", action="store_true", help="print the engine's own text")
     args = ap.parse_args(argv)
 
-    script = args.script
-    build = args.build
-    if not args.run and not build:
-        # Compiling is the check. It goes through a copy so the executable the
-        # compiler writes lands beside that copy and not in the caller's
-        # directory.
-        build = "debug"
-        script = os.path.join(os.path.dirname(os.path.abspath(script)),
-                              "_compile_check", os.path.basename(script))
-        os.makedirs(os.path.dirname(script), exist_ok=True)
-        with open(args.script, "r", encoding="utf-8", errors="replace") as src, \
-                open(script, "w", encoding="utf-8") as dst:
-            dst.write(src.read())
-    report = check(script, args.compiler, args.timeout, build=build)
+    if not args.run and not args.build:
+        # Compiling is the check, and it goes through a staged copy so the
+        # executable the compiler writes does not land on the project's own
+        # name. `check_project` keeps that copy in the script's own directory,
+        # which is what both its includes and its data paths are relative to.
+        report = check_project(args.script, args.compiler, args.timeout)
+    else:
+        report = check(args.script, args.compiler, args.timeout,
+                       build=args.build)
     print(report.summary())
     if args.raw:
         print(report.raw)

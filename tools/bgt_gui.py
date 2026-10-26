@@ -318,7 +318,11 @@ class Frame(wx.Frame):
 
         def job():
             self.say("Compiling %s" % script)
-            report = bgt_compile.check(script, build="debug")
+            # Through the same staged copy the CLI uses: `main` disarmed, the
+            # copy beside the script so its includes and its data still
+            # resolve, and both the copy and the executable the compiler
+            # writes cleaned up afterwards.
+            report = bgt_compile.check_project(script)
             for diagnostic in report.diagnostics:
                 self.say("  %-8s %s:%s  %s" % (diagnostic.kind.lower(),
                                                os.path.basename(diagnostic.file),

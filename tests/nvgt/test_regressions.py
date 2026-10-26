@@ -7,11 +7,164 @@ import struct
 
 import extract
 from inspect_exe import identity, pe_imports
-from asreader import _Stream
-from decompile import load_any, decompile_module
+from asreader import Instr, _Stream
+from decompile import load_any, decompile_module, _esc
 from test_support import owned_pe_stub
 
 ROOT = Path(__file__).resolve().parent / "fixtures"
+
+
+def _unescape(text: str) -> bytes:
+    """Read a rendered literal back the way the engine's lexer does.
+
+    Deliberately not the inverse of `_esc` written from `_esc`: `\\xNN` is two
+    hex digits and `\\\\`, `\\"`, `\\n`, `\\r`, `\\t` are themselves, and
+    everything else is its own UTF-8 bytes. An inverse built from the same
+    table would agree with a wrong table.
+    """
+    out = bytearray()
+    i = 0
+    while i < len(text):
+        if text[i] != "\\":
+            out += text[i].encode("utf-8")
+            i += 1
+            continue
+        kind = text[i + 1]
+        if kind == "x":
+            out.append(int(text[i + 2:i + 4], 16))
+            i += 4
+        else:
+            out += {"\\": b"\\", '"': b'"', "n": b"\n", "r": b"\r",
+                    "t": b"\t"}[kind]
+            i += 2
+    return bytes(out)
+
+
+class FoldSafetyTests(unittest.TestCase):
+    """When a folded value stops being the value the bytecode computed.
+
+    The decompiler folds a compiler temporary into the expression that reads
+    it, and that fold is load-bearing: promoting every one to a variable cost
+    Super Egg Hunt 0 residual gotos -> 182 and 0 compiler errors -> 187,
+    because a loop condition promoted to a statement stops being a loop
+    condition. So the rules here are narrow by necessity, and each one is a
+    real failure that compiled cleanly and ran wrong.
+    """
+
+    def _sim(self, **attrs):
+        """A decompiler with only the fields these predicates read.
+
+        White-box on purpose: building a real one needs a module and a
+        function, and what needs pinning is the decision, not the plumbing.
+        """
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        for name, value in attrs.items():
+            setattr(sim, name, value)
+        return sim
+
+    def test_a_value_computed_inside_a_branch_cannot_be_folded_past_the_join(self):
+        """The simulation walks linearly, so a store inside a branch and a read
+        after the join look like one straight line. They are not.
+
+        `dynamic_menu::run_extended` sets a joystick flag inside a branch and
+        reads it in the menu's arrow condition afterwards. Folded, that read
+        became the constant the branch happened to store -- the recovered menu
+        said `key_pressed(KEY_UP) || key_pressed(KEY_I) || true`, so the arm
+        was always taken and the arrow keys did nothing.
+        """
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+        sim = self._sim(instrs=instrs, k=8,          # reading at pos 32
+                        cond_spans=[(8, 24)],        # branch 8 -> join 24
+                        back_edges=[])
+        # bound at 16: inside the branch, and the join is behind us now.
+        self.assertTrue(sim._conditionally_bound(16))
+        # bound at 4, before the branch: on every path.
+        self.assertFalse(sim._conditionally_bound(4))
+        # bound at 28, after the join: on every path.
+        self.assertFalse(sim._conditionally_bound(28))
+        # and a read still inside the branch folds, which is what keeps a
+        # condition an expression.
+        self.assertFalse(self._sim(instrs=instrs, k=5, cond_spans=[(8, 24)],
+                                   back_edges=[])._conditionally_bound(16))
+
+        # A value computed before a loop and read inside it is the same
+        # problem through a back edge: the read runs once per iteration while
+        # the computation ran once. `dynamic_menu`'s `speak_item` is set
+        # before the loop and assigned true by every arrow branch inside it;
+        # folded, the loop read `if (false)` and the menu never spoke.
+        loop = self._sim(instrs=instrs, k=5,         # reading at pos 20
+                         cond_spans=[], back_edges=[(16, 32)])
+        self.assertTrue(loop._conditionally_bound(8))    # bound before the loop
+        self.assertFalse(loop._conditionally_bound(16))  # bound at the head
+
+    def test_a_slot_tested_with_jlow_is_a_bool_whatever_its_width_says(self):
+        """`JLow*` tests the low byte of the value register and follows no
+        compare, so it is the bool protocol and nothing else.
+
+        Typing a compiler scratch slot by width called this one an int, which
+        made `_begin_bool_merge` decline `stick.get_y() < -100 && !moved`. It
+        came out as an `if` with two empty arms and vanished from the
+        condition it belonged to.
+        """
+        def op(name, w_arg=0):
+            return Instr(pos=0, op=0, name=name, bc_type="", size=1, w_arg=w_arg)
+
+        sim = self._sim(instrs=[op("CpyVtoV4"), op("CpyVtoR4", 28),
+                                op("JLowZ"), op("RET")])
+        self.assertTrue(sim._tested_as_bool(28, 1))
+        # the load has to be of THAT slot...
+        self.assertFalse(sim._tested_as_bool(29, 1))
+        # ...and what follows it has to be the boolean test.
+        sim = self._sim(instrs=[op("CpyVtoV4"), op("CpyVtoR4", 28),
+                                op("CMPi"), op("JZ")])
+        self.assertFalse(sim._tested_as_bool(28, 1))
+        # SUSPEND is not an instruction for this purpose.
+        sim = self._sim(instrs=[op("CpyVtoV4"), op("SUSPEND"),
+                                op("CpyVtoR4", 28), op("JLowNZ")])
+        self.assertTrue(sim._tested_as_bool(28, 1))
+
+
+class LiteralRenderingTests(unittest.TestCase):
+    """A literal has to reach the engine as the bytes the module held.
+
+    The engine reads source as bytes. Every byte above 0x7F used to be emitted
+    as a character into a UTF-8 file, which turned each one into two: Super Egg
+    Hunt's pack key is a 32-byte AES blob in a literal, so the recovered
+    project compiled, ran, and reported `Decryption failed because the key was
+    incorrect`. It looked finished and had no sound.
+    """
+
+    CASES = {
+        "an AES blob -- the case that broke":
+            bytes([0xAC, 0x71, 0x68, 0x96, 0x26, 0x2B, 0x3E, 0x29, 0x1A]),
+        "every byte there is": bytes(range(256)),
+        "plain ASCII": b"logo.ogg",
+        "UTF-8 text stays text": "caractère été".encode("utf-8"),
+        "a lone high byte that is not UTF-8": bytes([0x63, 0xE8, 0x73]),
+        "NUL inside a literal": b"able to\x00learn\x00",
+        "quotes, slashes and newlines": b'say \\"hi\\"\r\n\tand "bye"',
+    }
+
+    def test_rendering_a_literal_round_trips_through_utf8_source(self):
+        for label, raw in self.CASES.items():
+            with self.subTest(label):
+                rendered = _esc(raw.decode("latin-1"))
+                # The project file is written UTF-8, so that is the encoding
+                # the engine's bytes actually come from.
+                through_file = rendered.encode("utf-8").decode("utf-8")
+                self.assertEqual(_unescape(through_file), raw)
+
+    def test_text_is_left_readable_and_binary_is_not_left_to_chance(self):
+        """The two cases have to be told apart by decoding, not by taste."""
+        self.assertEqual(_esc("caractère".encode("utf-8").decode("latin-1")),
+                         "caractère")
+        blob = bytes([0xAC, 0x96]).decode("latin-1")
+        self.assertEqual(_esc(blob), "\\xac\\x96")
+        # A control character is escaped even in text, because it is not
+        # source anyone can read.
+        self.assertEqual(_esc("a\x00b"), "a\\x00b")
 
 
 class ExtractionTests(unittest.TestCase):

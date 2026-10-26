@@ -199,8 +199,32 @@ def calls(text: str) -> List[str]:
     return [name for _, name in sorted(found)]
 
 
+#: `\xNN`, the escape the engine's lexer reads as one byte.
+_HEX_ESCAPE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def _same_string(literal: str) -> bytes:
+    """One literal reduced to the bytes the engine would build from it.
+
+    Two spellings of the same string must compare equal, or this measures
+    spelling. Stock `form.bgt` writes `"\\xa3"` as the raw byte 0xA3 in a
+    latin-1 file and recovered source writes it as the escape, because a lone
+    0xA3 is not valid UTF-8 and emitting it as a character into a UTF-8 file
+    would hand the engine two bytes instead of one.
+
+    That difference is worth stating plainly: before the escape existed those
+    two *did* compare equal, and the comparison was flattering a real bug --
+    the recovered literal was wrong and matched the source anyway.
+    """
+    text = _HEX_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), literal)
+    for escape, char in (("\\\\", "\\"), ('\\"', '"'), ("\\n", "\n"),
+                         ("\\r", "\r"), ("\\t", "\t")):
+        text = text.replace(escape, char)
+    return text.encode("utf-8", "surrogateescape")
+
+
 def literals(text: str) -> collections.Counter:
-    return collections.Counter(_STRING.findall(text))
+    return collections.Counter(_same_string(s) for s in _STRING.findall(text))
 
 
 class Comparison:

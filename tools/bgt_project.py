@@ -62,8 +62,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
-    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile,
-                   bgt_libcheck, bgt_pack, bgtlib, script_files)
+    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile, bgt_crack,
+                   bgt_kdf, bgt_libcheck, bgt_pack, bgtlib, script_files)
     from .nvgt import decompile
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
@@ -71,6 +71,8 @@ except ImportError:       # run directly from a checkout
     import bgt_api
     import bgt_asir
     import bgt_compile
+    import bgt_crack
+    import bgt_kdf
     import bgt_libcheck
     import bgt_pack
     import bgtlib
@@ -396,16 +398,81 @@ def data_packs(exe_path: str, module, sample: int = 0) -> List[Dict[str, Any]]:
     return sorted(found, key=lambda d: d["name"])
 
 
+def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
+              progress=lambda message: None) -> Tuple[Dict[bytes, bytes], List[str]]:
+    """Recover the AES key for every encrypted pack, from the module itself.
+
+    Extraction without this answers "it needs its key" and stops, which is the
+    one thing the module can usually settle on its own: the key is whatever the
+    script passed to `set_sound_decryption_key`, and the script is in the file.
+
+    Super Egg Hunt is the case that matters, because it is the normal one. Its
+    key is not a literal -- `set_sound_decryption_key(string_decrypt(h_key,
+    "af-dc7=rqp+"), true)` -- so a harvest over literals finds nothing, and
+    `bgt crack` reported 3,392 candidates and 0 hits while both halves of the
+    password sat in the module. `bgt_crack.harvest_encrypted` composes them.
+
+    A candidate costs one AES block against the tag each entry stores, so the
+    whole search is cheaper than reading the pack, and a key that verifies is
+    not a guess: `tag == AES-ECB(key, 16 zero bytes)` cannot be satisfied by
+    the wrong key.
+
+    Returns ({verification tag: key}, notes). Keyed by tag rather than by pack
+    because one key usually opens all of them, and the tag is what says so.
+    """
+    wanted: Dict[bytes, List[str]] = {}
+    for pack in packs:
+        for tag in pack.get("tags") or ():
+            wanted.setdefault(tag, []).append(pack["name"])
+    if not wanted:
+        return {}, []
+
+    with open(module_path, "rb") as fh:
+        data = fh.read()
+    candidates, counts = bgt_crack.build_candidates(
+        data, ("strings", "runs", "cores", "encrypted"))
+    progress("searching %d candidates for %d pack key(s)"
+             % (len(candidates), len(wanted)))
+
+    found: Dict[bytes, bytes] = {}
+    notes: List[str] = []
+    for candidate in candidates:
+        key = bgt_kdf.aes_key(candidate)
+        tag = bgt_pack.tag_for_key(key)
+        if tag in wanted and tag not in found:
+            found[tag] = key
+            notes.append("key for %s recovered from the module: %r"
+                         % (", ".join(sorted(wanted[tag])), candidate))
+            if len(found) == len(wanted):
+                break
+    for tag, names in sorted(wanted.items()):
+        if tag not in found:
+            notes.append(
+                "no key found for %s among %d candidates (%s). The password "
+                "is computed rather than stored -- read the caller of "
+                "set_sound_decryption_key in the recovered source, which is "
+                "where Super Egg Hunt's `string_decrypt(h_key, ...)` was found"
+                % (", ".join(sorted(names)), len(candidates),
+                   ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
+    return found, notes
+
+
 def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
-               extract: bool = False) -> List[str]:
+               extract: bool = False,
+               keys: Optional[Dict[bytes, bytes]] = None) -> List[str]:
     """Copy each pack next to the entry script, or extract its entries.
 
     Copying is what makes the recovered project runnable, because the engine
-    looks for the pack by the same relative name the original used. Extracting
-    is for reading the assets, and only works where they are not encrypted --
-    for the rest the key is a separate hunt (`bgt crack`), and saying so beats
-    writing out files that are still ciphertext.
+    looks for the pack by the same relative name the original used -- and the
+    script sets its own decryption key, so a copied pack needs nothing from
+    here.
+
+    Extracting is for reading the assets, and needs the key: `keys` maps each
+    verification tag to the key that satisfies it (`pack_keys`). An entry whose
+    key is not known is **skipped and counted**, never written, because a file
+    of ciphertext named `music.ogg` is worse than no file.
     """
+    keys = keys or {}
     notes: List[str] = []
     for pack in packs:
         if pack.get("error"):
@@ -417,9 +484,11 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
             shutil.copy2(pack["path"], target)
             notes.append("%s copied (%.1f MB)" % (pack["name"], pack["size"] / 1e6))
             continue
-        if pack["encrypted"]:
-            notes.append("%s holds %d encrypted entries and needs its key: "
-                         "bgt crack %s --dict <module>.bin"
+        unopened = [tag for tag in (pack.get("tags") or ()) if tag not in keys]
+        if unopened and pack["encrypted"]:
+            notes.append("%s holds %d encrypted entries and its key was not "
+                         "recovered, so nothing was written: bgt crack %s "
+                         "--dict <module>.bin"
                          % (pack["name"], pack["encrypted"],
                             os.path.basename(pack["path"])))
             continue
@@ -428,24 +497,36 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
         os.makedirs(where, exist_ok=True)
         _, entries = bgt_pack.parse(pack["path"], load_data=True)
         written = 0
+        refused = 0
         for entry in entries:
             name = os.path.normpath(entry.name.replace("\\", "/")).lstrip("./\\")
             target = os.path.join(where, name)
             if not _inside(where, os.path.abspath(target)):
                 continue                      # a pack cannot write outside itself
+            if entry.encrypted:
+                plain = entry.decrypt(keys.get(entry.tag, b"\x00" * 32))
+                if plain is None:
+                    refused += 1
+                    continue
+            else:
+                plain = entry.data or b""
             os.makedirs(os.path.dirname(target) or where, exist_ok=True)
             with open(target, "wb") as fh:
-                fh.write(entry.data or b"")
+                fh.write(plain)
             written += 1
-        notes.append("%s extracted %d entries to assets/%s"
-                     % (pack["name"], written, os.path.basename(where)))
+        notes.append("%s extracted %d entries to assets/%s%s"
+                     % (pack["name"], written, os.path.basename(where),
+                        "" if not refused
+                        else " (%d skipped: no key that verifies)" % refused))
     return notes
 
 
 ASSET_APIS = ("set_sound_storage", "set_sound_decryption_key")
 
 
-def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]]) -> List[str]:
+def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]],
+               keys: Optional[Dict[bytes, bytes]] = None,
+               extracted: bool = False) -> List[str]:
     """What the script will look for at run time and may not find.
 
     Finding nothing is the case that matters. `data_packs` only reports a pack
@@ -478,11 +559,29 @@ def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]]) -> List[s
             % (" and ".join(uses), folder,
                (" It names: " + ", ".join(asked[:8])) if asked else ""))
     if "set_sound_decryption_key" in called:
+        # Only extraction needs the key. A copied pack does not: the script
+        # sets its own key at run time, from a literal this project carries.
+        unopened = [pack["name"] for pack in packs
+                    if extracted and any(tag not in (keys or {})
+                                         for tag in (pack.get("tags") or ()))]
+        if not packs or unopened:
+            notes.append(
+                "its pack entries are encrypted%s: the key is whatever the "
+                "script passed to set_sound_decryption_key, and `bgt crack "
+                "<pack> --dict <module>.bin` harvests candidates from this "
+                "module and tests each against one AES block"
+                % ("" if not packs else " and %s stayed shut"
+                   % ", ".join(unopened[:4])))
+    if extracted and packs:
+        # Extracted assets are for reading. The script still calls
+        # `set_sound_storage("data/bgm.dat")`, so the project does not have
+        # what it opens -- which the engine says out loud ("could not load
+        # pack data/bgm.dat.") and is worth saying before it does.
         notes.append(
-            "its pack entries are encrypted: the key is whatever the script "
-            "passed to set_sound_decryption_key, and `bgt crack <pack> "
-            "--dict <module>.bin` harvests candidates from this module and "
-            "tests each against one AES block")
+            "the assets were extracted for reading, which is not what the "
+            "script opens: it still asks the engine for %s by name. Re-run "
+            "with --with-data to copy the pack(s) in and have the project run."
+            % packs[0]["name"])
     return notes
 
 
@@ -914,9 +1013,15 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     # at startup and the report is the only warning you get.
     packs = data_packs(exe_path, module)
     data_notes: List[str] = []
+    keys: Dict[bytes, bytes] = {}
+    if packs and extract_data:
+        # Extraction needs the key, and the module is where it is. Copying
+        # does not: the script sets its own key at run time.
+        keys, key_notes = pack_keys(module_path, packs, progress)
+        data_notes += key_notes
     if packs and (with_data or extract_data):
         progress("bringing %d asset pack(s)" % len(packs))
-        data_notes = bring_data(packs, out_dir, extract=extract_data)
+        data_notes += bring_data(packs, out_dir, extract=extract_data, keys=keys)
     # ...and types the installed engine simply does not have, plugin or not.
     newer = [name for name, _ in engine_gap(exe_path, used)
              if not any(os.path.splitext(dll)[0].lower() == name.lower()
@@ -952,11 +1057,18 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                       newer_engine=newer, sections=sections,
                       problems=list(problems))
 
-    progress("writing %d files" % (len(order) + 1))
+    # The entry script, plus one file per path in the order -- except the
+    # inlined one, whose text the entry script carries instead.
+    progress("writing %d files" % (len(order) + (0 if first_path else 1)))
     by_path: Dict[str, List[Section]] = {}
     for section in written:
         by_path.setdefault(section.path, []).append(section)
     for path, group in by_path.items():
+        if path == first_path:
+            # The entry script carries this section's text inline, so writing
+            # the file too leaves one in the project that nothing includes --
+            # and, if anyone does include it, a duplicate declaration.
+            continue
         target = os.path.join(out_dir, path.replace("/", os.sep))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         header = ["// %s" % path,
@@ -973,7 +1085,6 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         with open(target, "w", encoding="utf-8") as fh:
             fh.write("\n".join(header) + "\n\n")
             fh.write("\n".join(section.text for section in group))
-        project.files.append(path)
 
     entry_lines = ["// %s -- entry script for the recovered project." % project.entry,
                    "// Generated by `bgt recover` from %s." % os.path.basename(exe_path),
@@ -1017,13 +1128,25 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     for section in inlined:
         entry_lines.append(section.text.rstrip())
         entry_lines.append("")
-    entry_lines += ['#include "%s"' % path for path in order
-                    if not (inlined and path == first_path)]
+    included = [path for path in order if not (inlined and path == first_path)]
+    entry_lines += ['#include "%s"' % path for path in included]
     entry_lines.append("")
     entry_path = os.path.join(out_dir, project.entry)
     with open(entry_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(entry_lines))
-    project.files.insert(0, project.entry)
+
+    # The file list is built from the include order and from what is actually
+    # on disk, not from the sections that were written here. A substituted
+    # library file is written by `substitute_stock`, so appending as each
+    # decompiled group was written left every one of them out of the list, out
+    # of the count, and -- the part that mattered -- out of the ZIP: unzipping
+    # Super Egg Hunt gave an entry script that included `number_speaker.bgt`
+    # and `sound_positioning.bgt` and two files that were not there. From
+    # outside that is indistinguishable from "it does not copy the stock
+    # includes", which is how it was reported.
+    project.files = [project.entry] + [
+        path for path in order
+        if os.path.isfile(os.path.join(out_dir, path.replace("/", os.sep)))]
 
     lines = source.splitlines()
     project.stats = {
@@ -1039,7 +1162,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         "bodies": sum(1 for f in module.saved_functions if f.bytecode),
         "verified": verify(sections, order, source),
         "unbalanced": len(unbalanced(sections)),
-        "data_packs": packs,
+        # The tags are bytes, and `recovery.json` is where they would stop the
+        # whole run: a key-verification tag is for comparing, not for reading,
+        # so it is written as hex rather than carried through.
+        "data_packs": [dict(pack, tags=[tag.hex() for tag in pack.get("tags") or ()])
+                       for pack in packs],
         "dangling_else": len(dangling_else(sections)),
     }
     for pack in packs:
@@ -1055,7 +1182,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                 % (project.entry, pack["name"], pack["entries"],
                    pack["size"] / 1e6,
                    ", %d encrypted" % pack["encrypted"] if pack["encrypted"] else ""))
-    for note in asset_gaps(exe_path, module, packs):
+    for note in asset_gaps(exe_path, module, packs, keys, extract_data):
         project.problems.append(note)
     project.data = list(data_notes)
     project.stock = list(stock_notes)
@@ -1112,14 +1239,6 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
 
     if compile_check:
         progress("compiling the project with BGT's own compiler")
-        check_dir = os.path.join(out_dir, "_compile_check")
-        target = bgt_compile.neutered(entry_path, check_dir)
-        # The entry copy still has to reach the real files.
-        with open(target, "r", encoding="utf-8") as fh:
-            text = fh.read()
-        text = text.replace('#include "includes/', '#include "../includes/')
-        with open(target, "w", encoding="utf-8") as fh:
-            fh.write(text)
         exe = bgt_compile.find_compiler()
         caps = bgt_compile.capabilities()
         project.stats["compiler_used"] = exe
@@ -1134,11 +1253,25 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                 "`= false` in a signature will be reported as \"Expected ')' "
                 "or ','\". That is the compiler's age, not the recovery -- "
                 "pass --compiler to use a newer BGT." % exe)
-        project.compile_report = bgt_compile.check(target, timeout=timeout)
+        # `check_project` stages the entry script inside the project rather
+        # than in a subfolder, because BGT resolves an `#include` and a data
+        # path alike against the script's own location: a copy one level down
+        # reported `could not load pack data/bgm.dat.` for a pack that had
+        # just been copied in. It cleans the copy up afterwards.
+        project.compile_report = bgt_compile.check_project(entry_path,
+                                                           timeout=timeout)
 
     with open(os.path.join(out_dir, "recovery.json"), "w", encoding="utf-8") as fh:
         json.dump({"executable": exe_path, "entry": project.entry,
-                   "files": project.files, "includes": order,
+                   "files": project.files,
+                   # What the entry script really includes, and the one
+                   # section it carries inline instead. Reporting `order` here
+                   # listed `includes/types.bgt` as included when the entry
+                   # script had inlined it -- a file list nothing reads is
+                   # still a claim about the project.
+                   "includes": included,
+                   "inlined": [first_path] if inlined else [],
+                   "order": order,
                    "plugins": plugins, "newer_engine": newer,
                    "stats": project.stats,
                    "problems": project.problems,

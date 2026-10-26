@@ -110,18 +110,54 @@ def _s64(v: int) -> int:
     return v - (1 << 64) if v >= (1 << 63) else v
 
 
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
 def _esc(s: str) -> str:
-    """Encode source literals without losing binary bytes in saved strings."""
-    escapes = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    """Render a literal so the engine ends up with the module's exact bytes.
+
+    The engine reads source as bytes, and a recovered literal is bytes. So the
+    only property that matters is that whatever is written here, encoded the
+    way the project file is written (UTF-8), is byte for byte what the module
+    held. Getting that wrong fails in the worst way available: Super Egg Hunt's
+    pack key is a 32-byte AES blob in a literal, every byte of it above 0x7F
+    was emitted as a character, and a UTF-8 file turned each one into two. The
+    project compiled, ran, and said `Decryption failed because the key was
+    incorrect` -- a recovery that looks complete and has no sound.
+
+    Two cases, and the test between them is decoding rather than taste:
+
+    * The bytes **are** valid UTF-8. Then the characters they decode to encode
+      back to exactly those bytes, so they are written as themselves: a French
+      game's `caractère` stays `caractère` and stays correct.
+    * They are not. Then no character spelling can be trusted, and every byte
+      from 0x7F up is written `\\xNN`. BGT was asked rather than assumed --
+      `"\\xac\\x71\\x96"` compiles with no warning and produces those three
+      bytes, while the octal form `"\\254"` is `Warning: Invalid escape
+      sequence`.
+
+    A control character is escaped either way: it is not source anyone can read
+    and `\\xNN` round-trips it.
+    """
+    if all(ord(character) <= 0xFF for character in s):
+        raw = s.encode("latin-1")
+        try:
+            # Valid UTF-8: the decoded text re-encodes to these same bytes, so
+            # it can be written as text without changing what the engine gets.
+            s = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return "".join(_ESCAPES.get(chr(b), chr(b)) if 32 <= b < 0x7F
+                           else "\\x%02x" % b for b in raw)
     result = []
     for character in s:
         value = ord(character)
-        if character in escapes:
-            result.append(escapes[character])
+        if character in _ESCAPES:
+            result.append(_ESCAPES[character])
         elif 0xdc80 <= value <= 0xdcff:
-            result.append(f"\\x{value - 0xdc00:02x}")
+            # A byte that was not decodable text when the module was read.
+            result.append("\\x%02x" % (value - 0xdc00))
         elif value < 32 or value == 127:
-            result.append(f"\\x{value:02x}")
+            result.append("\\x%02x" % value)
         else:
             result.append(character)
     return "".join(result)
@@ -301,6 +337,33 @@ class Atom:
     list_index: int | None = None
     constant_bits: int | None = None
     ternary: tuple[str, Atom, Atom] | None = None
+
+
+#: the object a call is made on, and the method: `this.terrain.getTailleX()`
+#: has receiver `this.terrain`, not `this`. Taking the leading identifier
+#: instead made `this` the receiver of every method call on a member, and
+#: since almost every statement in a method mentions `this`, the invalidation
+#: test below matched everything -- which cost Crazy Party four loops.
+_CALL_RECEIVER = re.compile(
+    r"((?:@?[A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*)\.([A-Za-z_]\w*)\s*\(")
+
+
+def _mutates(statement: str, receiver: str) -> bool:
+    """Could this statement have changed what `receiver` holds?
+
+    Mentioning it is not enough, and that is the whole difficulty.
+    `@local_7 = this.terrain;` reads `this.terrain` and cannot change it,
+    while `item_list.resize(...)` changes `item_list`. So what counts is a
+    call *on* the receiver, or an assignment *to* it -- not an appearance of
+    its name on the right of one.
+    """
+    name = re.escape(receiver)
+    return bool(
+        # a method call on it: `item_list.resize(...)`
+        re.search(r"(?<![\w.])" + name + r"\s*\.\s*[A-Za-z_]\w*\s*\(", statement)
+        # or an assignment to it, including compound and indexed
+        or re.search(r"(?<![\w.])@?" + name + r"\s*(?:\[[^\]]*\])?\s*"
+                     r"(?:[-+*/%|&^]|<<|>>)?=(?!=)", statement))
 
 
 def _is_repeatable(a: Atom) -> bool:
@@ -625,6 +688,19 @@ class FuncDecompiler:
         self.comments = comments
         self.instrs = fn.bytecode
         self.pos_of = {i.pos: k for k, i in enumerate(self.instrs)}
+        #: (branch position, join position) for every forward conditional
+        #: jump. A value computed between the two is computed on only one
+        #: path, so once the join is passed it can no longer be folded into a
+        #: read -- see `_conditionally_bound`.
+        self.cond_spans = [(i.pos, _jump_target(i)) for i in self.instrs
+                           if i.name in JUMP_OPS and _jump_target(i) > i.pos]
+        #: (loop head, back edge) for every backward jump. A read inside the
+        #: loop runs once per iteration, so a value computed before the loop
+        #: cannot be folded into it -- the loop body may assign the slot, and
+        #: the next iteration would then read something else.
+        self.back_edges = [(_jump_target(i), i.pos) for i in self.instrs
+                           if i.name in (*JUMP_OPS, "JMP")
+                           and _jump_target(i) < i.pos]
         self.var_names = {v.stack_offset: v.name for v in fn.variables if v.name}
         self.var_types = {v.stack_offset: v.type for v in fn.variables}
         self.var_names.update(_parameter_layout(fn))
@@ -737,6 +813,15 @@ class FuncDecompiler:
         self.consumed_temps: set[int] = set()
         # slots this simulation promoted from temporary to variable
         self.forced_slots: set[int] = set()
+        #: {slot: (bytecode position, statements emitted)} when its temp was
+        #: bound, so `_stale_fold` can tell an immediate read from a later one
+        #: and put the variable's assignment back where the value was computed.
+        self.temp_bound: dict[int, tuple[int, int]] = {}
+        #: statements emitted so far, and their text. Events are sorted by
+        #: position at the end, not kept in append order, which is what lets a
+        #: promotion insert its assignment where it belongs rather than here.
+        self.stmt_count = 0
+        self.stmt_texts: list[str] = []
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -877,6 +962,10 @@ class FuncDecompiler:
         else:
             self.consumed_temps.discard(off)
             self.temps[off] = a
+            # Where this value was computed, and how much had been emitted by
+            # then. A fold is only safe while nothing has run in between --
+            # see `_stale_fold`.
+            self.temp_bound[off] = (self._pos(), self.stmt_count)
 
     def _emit_declare(self, off: int) -> None:
         """Emit a bare declaration for a named variable (default-constructed)."""
@@ -930,6 +1019,8 @@ class FuncDecompiler:
 
     def _append_stmt(self, type_name: str, text: str) -> None:
         self._order_out_arguments(text)
+        self.stmt_count += 1
+        self.stmt_texts.append(text)
         self.events.append(Event("stmt", self._pos(), (type_name, text)))
 
     def _order_out_arguments(self, text: str) -> None:
@@ -1599,20 +1690,155 @@ class FuncDecompiler:
         return self._slot_atom(off)
 
     def _slot_atom(self, off: int) -> Atom:
-        """Value of a frame slot: temp alias if bound, else the variable."""
+        """Value of a frame slot: temp alias if bound, else the variable.
+
+        A value *pushed from a slot* reads through here, and this used to fold
+        unconditionally -- promoting these to variables once cost 400
+        diagnostics against 93, from declarations landing in the wrong scope.
+        The duplication it would have caught was measured instead and left.
+
+        It is not only duplication. `dynamic_menu::add_item_extended` keeps
+        `item_list.length()` in a local **before** resizing, and folding that
+        call into its four later reads re-evaluates it *after* the resize:
+
+            int new_index = item_list.length();      // the source
+            item_list.resize(new_index + 1);
+            item_list[new_index].option = filename;
+
+            item_list.resize(item_list.length() + 1);          // folded
+            item_list[item_list.length()].option = arg0;       // out of bounds
+
+        That compiles, and Crazy Party's recovered menu dies on the first item
+        with `A runtime error occurred.` -- so this is a wrong *program*, not
+        only a duplicated call.
+
+        **Routing every non-repeatable read through `_read_temp` was tried and
+        is wrong**, and the number that says so is not the diagnostic count:
+        Super Egg Hunt went from **0 residual gotos to 182**, and from 0
+        compiler errors to 187, while still verifying its split. `_read_temp`
+        promotes the slot to a variable, and a loop condition the structurer
+        could read as an expression becomes a statement before a jump, so the
+        loop stops being a loop. The fold is load-bearing for structuring.
+
+        `_stale_fold` is the distinction those two cases turn on, and it is
+        the one the bug is actually about: whether anything has *run* between
+        the value being computed and this read.
+        """
         if off in self.temps:
-            # Deliberately NOT `_read_temp`: a value pushed from a slot is
-            # read through here, and promoting every slot read twice this way
-            # to a variable cost far more than it bought -- 400 diagnostics
-            # against 93, from declarations that then land in the wrong
-            # scope. The duplication it would have caught is real and is
-            # measured instead: `bgt libcheck --decompiler` names the
-            # functions whose call sequence does not match the library's
-            # (`sound_pool::play_extended_1d` folds one `reserve_slot()` into
-            # all forty-five uses of its result).
+            if self._stale_fold(off):
+                return self._promote_temp(off)
             self.consumed_temps.add(off)
             return self.temps[off]
         return self.var_atom(off)
+
+    def _stale_fold(self, off: int) -> bool:
+        """Would folding this temp here re-evaluate it after something ran?
+
+        A fold writes the temp's expression at the read instead of where the
+        value was computed, so it is faithful only while those are the same
+        moment. They stop being the same moment as soon as a statement is
+        emitted in between -- and a value built out of a call can be a
+        different value by then, which is how `item_list.length()` came to be
+        read after the `resize` that changed it.
+
+        A repeatable value -- a constant, a plain variable, `this` -- is the
+        same at both moments by definition, so it still folds.
+
+        "Something ran" is still too broad, and the measurement says so:
+        taking it literally cost Super Egg Hunt 46 residual gotos against 0,
+        because a value computed before a loop body and read at the latch had
+        statements in between and had not changed. So what is required is that
+        something ran **that touched what this value reads** -- an intervening
+        statement naming the call's own receiver. `item_list.length()` is
+        invalidated by `item_list.resize(...)` and by nothing else in that
+        function, which is exactly the dependency the source expressed by
+        keeping the result in a local.
+        """
+        value = self.temps[off]
+        if off <= 0:
+            return False
+        bound = self.temp_bound.get(off)
+        if bound is None:
+            return False
+        declarable = (self.var_types.get(off) or value.data_type) is not None
+        if declarable and self._conditionally_bound(bound[0]):
+            # Computed on one path and read past the join: the read is
+            # reachable without that path, so folding is wrong whatever the
+            # value is -- a constant most of all. This is how
+            # `dynamic_menu::run_extended` came out with
+            # `if (key_pressed(KEY_UP) || key_pressed(KEY_I) || true)`: the
+            # joystick term is a slot set to false inside a branch, folded
+            # into a read after it. The menu's arrow keys did nothing,
+            # because that arm is always taken.
+            return True
+        if _is_repeatable(value):
+            return False
+        if bound[1] == self.stmt_count:
+            return False            # nothing has run since: the same moment
+        receivers = [m.group(1) for m in _CALL_RECEIVER.finditer(value.text)]
+        if not receivers:
+            # No receiver to be invalidated through. A bare call's result can
+            # still go stale through engine state -- `reserve_slot()` hands
+            # out a different slot each time -- but that is the duplication
+            # case, measured by `bgt libcheck` and not guessed at here.
+            return False
+        if not any(_mutates(text, receiver)
+                   for text in self.stmt_texts[bound[1]:]
+                   for receiver in receivers):
+            return False
+        return declarable
+
+    def _conditionally_bound(self, bind_pos: int) -> bool:
+        """Was a value computed at `bind_pos` computed on only one path,
+        relative to where the simulation is reading it now?
+
+        The simulation walks the bytecode linearly, so a store inside a branch
+        and a read after the join look like one straight line. They are not:
+        if a forward conditional jump starts before the store and lands after
+        it but at or before this read, then the store is skipped on the other
+        path while the read happens either way.
+        """
+        now = self._pos()
+        if any(branch < bind_pos < join <= now
+               for branch, join in self.cond_spans):
+            return True
+        # ...or computed before a loop and read inside it. The read runs once
+        # per iteration while the computation ran once, so any assignment the
+        # body makes to that slot is what the next iteration sees.
+        # `dynamic_menu`'s `bool speak_item = false;` sits before the loop and
+        # is set true by every arrow branch inside it; folded, the loop read
+        # `if (false)` and the menu never spoke an item. Arrowing moved the
+        # position silently, which is indistinguishable from arrowing being
+        # broken -- and these are audio games, so it is worse than that.
+        return any(bind_pos < head <= now <= back
+                   for head, back in self.back_edges)
+
+    def _promote_temp(self, off: int) -> Atom:
+        """Give this temp a variable, and put its assignment back where the
+        value was computed.
+
+        The assignment cannot be emitted here -- here is the read, and the
+        call has to run where the bytecode ran it. It does not have to be,
+        either: events are sorted by bytecode position at the end of the
+        simulation rather than kept in append order, so an event carrying the
+        bind position lands exactly where that store was.
+        """
+        value = self.temps[off]
+        pos, _ = self.temp_bound[off]
+        name = self.var_names.setdefault(off, f"local_{off}")
+        known = self.var_types.get(off) or value.data_type
+        self.var_types.setdefault(off, known)
+        # Hoisted, because the store may be inside a branch while a later read
+        # is not, and a declaration inside the branch is out of scope there.
+        self.forced_slots.add(off)
+        self.stmt_count += 1
+        self.stmt_texts.append("")
+        self.events.append(Event("stmt", pos, ("", f"{name} = {value.text};")))
+        replacement = Atom("var", name, 1, data_type=known)
+        self.temps[off] = replacement
+        self.temp_bound[off] = (pos, self.stmt_count)
+        self.consumed_temps.add(off)
+        return replacement
 
     def _is_unwritten(self, atom: Atom) -> bool:
         """Whether this argument is a slot the program never wrote.
@@ -2839,8 +3065,21 @@ class FuncDecompiler:
             # is a ternary over values, which _begin_value_merge handles -- and
             # folding it as `A op uint` gave "No conversion from 'uint' to
             # 'bool'". A short-circuit's value is always a bool.
-            b_type = self.var_types.get(_s16(merge_ins.w_arg))
-            if b_type is None or b_type.format() != "bool":
+            stored = _s16(merge_ins.w_arg)
+            b_type = self.var_types.get(stored)
+            if ((b_type is None or b_type.format() != "bool")
+                    and not self._tested_as_bool(stored, merge_idx + 1)):
+                # Typing is not the only evidence, and on a compiler scratch
+                # slot it is the weaker one: `slot_types` reads widths, and
+                # `SetV4` is as true of an int as of a bool. The bytecode says
+                # it outright when the stored value is tested with `JLow*`,
+                # which tests the low byte -- the bool protocol and nothing
+                # else. Without this, `dynamic_menu::run_extended`'s
+                # `stick.get_y() < -100 && !stick_moved` was declined here,
+                # emitted as an `if` with two empty arms, and dropped out of
+                # the condition it belonged to: the recovered menu read
+                # `key_pressed(KEY_UP) || key_pressed(KEY_I) || true` and the
+                # arrow keys did nothing.
                 return False
         elif merge_ins.name != "CpyVtoR4" or _s16(merge_ins.w_arg) != result_dest:
             return False
@@ -2852,6 +3091,27 @@ class FuncDecompiler:
                                  "op": "&&" if expected == 0 else "||"})
         self.skip_indexes.update((self.k + 1, self.k + 2))
         return True
+
+    def _tested_as_bool(self, slot: int, start: int, window: int = 4) -> bool:
+        """Is this slot loaded and then tested as a boolean, right here?
+
+        `JLowZ` / `JLowNZ` / `JLowS` / `JLowNS` follow no compare: they test
+        the low byte of the value register, which is what a bool leaves there.
+        So a slot copied to the register and tested that way is a bool whatever
+        a width-based type inference called it.
+        """
+        seen_load = False
+        for idx in range(start, min(start + window, len(self.instrs))):
+            op = self.instrs[idx]
+            if op.name == "SUSPEND":
+                continue
+            if not seen_load:
+                if op.name in ("CpyVtoR4", "CpyVtoR8") and _s16(op.w_arg) == slot:
+                    seen_load = True
+                    continue
+                return False
+            return op.name in ("JLowZ", "JLowNZ", "JLowS", "JLowNS")
+        return False
 
     def _begin_value_merge(self, ins: Instr) -> bool:
         """Fold side-effect-free ternary arms which write a common temp.

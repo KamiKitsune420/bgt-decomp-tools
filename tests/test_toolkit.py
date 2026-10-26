@@ -89,6 +89,16 @@ def _len2(s):
     return bytes([len(s) * 2]) + s
 
 
+def _len2_long(s):
+    """`_len2` for a string whose doubled length reaches 64.
+
+    One byte holds 0..63 only: 64 is `40 xx`, the two-byte form, which is the
+    whole point of `read_encoded_uint`. A 32-byte literal -- an AES blob --
+    is exactly the first length that needs this.
+    """
+    return as_write.encode_encoded_uint(len(s) * 2) + s
+
+
 def test_len2_new_string_and_backref():
     data = _len2(b"alpha") + _len2(b"beta") + b"\x01"      # odd 1 -> saved[0]
     r = as_module.Reader(data, as_module.LEN2, 0)
@@ -921,6 +931,59 @@ def test_module_strings_detects_the_dialect_when_not_told():
               + _tagged_str(b"password_here"))
     assert as_module.detect(module)[0] == as_module.TAGGED
     assert b"password_here" in as_module.module_strings(module)
+
+
+def test_a_cipher_blob_is_not_a_plausible_literal_but_is_a_findable_one():
+    """The two literal filters have to disagree, and that is the point.
+
+    `_literal_is_plausible` rejects every byte outside printable ASCII, which
+    is right for a blind scan and discards exactly the literal a BGT game
+    stores its pack key in. Super Egg Hunt's was a 32-byte AES blob, so a
+    harvest over plausible literals reported 3,392 candidates and 0 hits with
+    the password sitting in the file.
+    """
+    blob = bytes(((i * 97 + 29) % 256) for i in range(32))
+    assert not as_module._literal_is_plausible(blob)
+    assert as_module.literal_is_cipher_shaped(blob)
+    # `_len2` writes the length in one byte, and 32 bytes means the value 64,
+    # which is the *two*-byte form -- the trap this format is named for.
+    module = _len2_long(blob) + _len2(b"af-dc7=rqp+")
+    assert blob not in as_module.module_strings(module, as_module.LEN2)
+    assert blob in bgt_crack.harvest_blobs(module, as_module.LEN2)
+    # ...and the narrowness still has to hold: text and part-blocks are not
+    # cipher-shaped, or a blind scan would admit everything.
+    assert not as_module.literal_is_cipher_shaped(b"a" * 32)
+    assert not as_module.literal_is_cipher_shaped(blob[:24])
+    assert not as_module.literal_is_cipher_shaped(blob[:8])
+
+
+def test_the_encrypted_harvester_recovers_a_key_stored_the_way_bgt_stores_one():
+    """`set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"))`.
+
+    A game that cares about its sounds does not write the password as a
+    literal. It writes an encrypted blob and the key to it, and both are in the
+    module -- so the password is recoverable only by a harvest that composes
+    them. This is Super Egg Hunt's exact shape, with its own crypt key.
+    """
+    crypt_key = b"af-dc7=rqp+"
+    password = b"puppiesandpandas"
+    blob = bgt_string_crypt.string_encrypt(password, crypt_key)
+    module = _len2_long(blob) + _len2(crypt_key) + _len2(b"a decoy literal")
+
+    candidates, counts = bgt_crack.build_candidates(
+        module, ["strings", "encrypted"])
+    assert password in candidates
+    # `string_decrypt` is self-checking -- BGT wraps a plaintext as
+    # `printf<len>\0<data>` and `unwrap` returns None otherwise -- so the
+    # cross product yields the one real answer rather than noise.
+    assert counts["encrypted"] == 1
+
+    key = bgt_kdf.aes_key(password)
+    entries = [bgt_pack.Entry("s.ogg", 0, 0, 0,
+                              bgt_pack.encrypt_payload(b"OggS...", key))]
+    result = bgt_crack.search(candidates, bgt_pack.tag_index(entries).keys(),
+                              workers=1, progress=False)
+    assert [c for c, _k in result["matches"]] == [password]
 
 
 def test_build_candidates_deduplicates_across_harvesters():

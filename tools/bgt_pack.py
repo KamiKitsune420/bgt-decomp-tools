@@ -227,7 +227,10 @@ def survey(path: str, sample: int = 0) -> Dict[str, Any]:
     return {"path": path, "version": version, "entries": len(entries),
             "size": os.path.getsize(path), "trailing": trailing,
             "probed": len(probe), "encrypted": encrypted, "plain": plain,
-            "keys": len(tags)}
+            # The tags themselves, not only how many: a key search needs them,
+            # and they are the whole of what it needs -- one AES block against
+            # a tag decides a candidate without touching any ciphertext.
+            "keys": len(tags), "tags": sorted(tags)}
 
 
 def tag_index(entries: Sequence["Entry"]) -> Dict[bytes, List["Entry"]]:

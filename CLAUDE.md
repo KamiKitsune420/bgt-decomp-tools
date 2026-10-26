@@ -1045,22 +1045,25 @@ checks say:
 
 | title | lines | files | goto | unbalanced | split | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,450 | 15 | 0 | 0 | yes | **0 errors, and it runs** |
+| Super Egg Hunt | 6,577 | 14 | 0 | 0 | yes | **compiled cleanly, and it runs** |
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 190,294 | 559 | 0 | 0 | yes | **0 errors, and it runs** |
+| Crazy Party | 196,341 | 558 | 0 | 0 | yes | **0 errors, 2 warnings, and it runs** |
 
-**Three titles compile clean and run**, including the largest. Crazy Party
-is 190,294 lines across 559 files and `bgt compile --run` on the recovered
-project reports `compiled with 4 warning(s), and ran: it opened a window of
-its own titled 'Crazy Party beta77'`. `bgt compile --run` on the recovered
-project reports `compiled with 1 warning(s), and ran: it opened a window of
-its own titled 'Super Egg Hunt Version 1.53'` — which is the title the
-original executable shows, checked by launching it. That is the end-to-end
-check: executable in, source out, source back into the engine, game on
-screen. The one warning left is `The script section is empty`, on the
-generated entry script, which holds nothing but `#include` lines.
+**Three titles compile clean and run**, including the largest. Crazy Party is
+196,341 lines across 558 files and reports `compiled with 2 warning(s)`;
+`bgt compile --run` on it opens a window of its own titled `Crazy Party
+beta77`. Super Egg Hunt reports `compiled cleanly` and `--run` opens
+`Super Egg Hunt Version 1.53` — the title the original executable shows,
+checked by launching it. That is the end-to-end check: executable in, source
+out, source back into the engine, game on screen.
+
+**And a window on screen is not the check that matters** — Super Egg Hunt
+passed every line of this table while its menu could not be navigated. See
+**When a folded temporary stops being the value the bytecode computed**: the
+counts above say the recovery is *structurally* complete, and three separate
+bugs that compiled cleanly and ran were found by pressing an arrow key.
 
 Paladin compiles with no errors and runs too, but **read its window title
 carefully rather than as a match**. Run as a *script*, `get_SCRIPT_COMPILED()`
@@ -1172,6 +1175,70 @@ only includes. That section was already first in the order, so nothing
 moves, and Super Egg Hunt went from `compiled with 1 warning(s)` to
 `compiled cleanly, and ran`.
 
+## A literal has to reach the engine as the bytes the module held
+
+This is the worst failure shape in the whole toolkit, because everything
+reports success: the project recovers with 0 errors, compiles cleanly, opens
+its own window with the right title, and has **no sound**.
+
+The engine reads source as bytes, and a recovered literal is bytes. Every byte
+above 0x7F used to be emitted as a *character* into a UTF-8 file, so `0xAC`
+became `C2 AC` and the engine got two bytes where the module had one. For
+ordinary text that is invisible; for Super Egg Hunt's pack key, which is a
+32-byte AES blob in a literal, it is fatal and the engine says so exactly
+once, in a pane next to the window title:
+
+```
+Error streaming logo.ogg.  Decryption failed because the key was incorrect.
+```
+
+Two cases, and the test between them is decoding rather than taste:
+
+- **The bytes are valid UTF-8.** Then the characters they decode to encode
+  back to exactly those bytes, so they are written as themselves — Crazy
+  Party's `caractère` stays `caractère` *and* stays correct. Correctness here
+  is by construction, not by luck: the round trip is the criterion.
+- **They are not.** Then no character spelling can be trusted and every byte
+  from 0x7F up is written `\xNN`.
+
+**BGT was asked rather than assumed**, the way everything else here is:
+`"\xac\x71\x96"` compiles with no warning and produces those three bytes,
+raw bytes in a byte-preserving file do too, and the octal form `"\254"` is
+`Warning: Invalid escape sequence`. The probe wrote all three spellings to a
+file through `file::write` and the bytes were read back.
+
+`test_regressions.LiteralRenderingTests` renders **all 256 byte values**,
+passes the result through UTF-8, and parses it back with an unescaper written
+from the lexer's rules rather than as `_esc`'s inverse — an inverse built from
+the same table would agree with a wrong table.
+
+Afterwards, `bgt compile --run` on the recovered project reports `compiled
+cleanly, and ran: it opened a window of its own titled 'Super Egg Hunt Version
+1.53'` with **no runtime complaint at all**.
+
+**What found it was the engine talking, so that is now read.** The driver had
+the line in `raw` the whole time; `Report.runtime_complaints` pulls what the
+engine said at run time out of what it said about the source, and the summary
+carries it. A clean compile says nothing about whether the project has the
+files it opens, and this is the one check that costs nothing.
+
+## A staged copy does not sit where its includes point
+
+`bgt compile` stages the script into `_compile_check/` so the executable the
+compiler writes lands there instead of in the project. BGT resolves an include
+against the *including script's* directory, so the copy looked for
+`includes/classes/player.bgt` beside itself and reported, truthfully, that
+there is no such file — one error, blaming the first file it could not find.
+
+Only `bgt recover --compile` knew that, with a `'#include "includes/'` →
+`'../includes/'` string replace of its own. So `bgt compile` on the project
+`bgt recover` had just written — the obvious next command — failed, which
+reads as a broken recovery. One `bgt_compile.stage` now disarms `main` and
+repoints every relative include with `relpath`, and the CLI, the GUI and
+`bgt recover` all go through it. The GUI had the opposite half of the same
+bug: it compiled in place, so the engine's output landed in the folder being
+read.
+
 ## A window, for people who read screens with a screen reader
 
 `bgt gui` is a wxPython front end over `identify`, `recover` and `compile`.
@@ -1250,6 +1317,24 @@ two apart. `--no-stock-includes` keeps everything decompiled.
 entry script lists every file in order, and `types.bgt` already declares
 the funcdefs, so leaving either in is a duplicate declaration.
 
+**A file written is not a file registered, and the ZIP is where that
+showed.** `substitute_stock` writes the engine's copy itself, while
+`project.files` was appended to as each *decompiled* group was written — so
+every substituted file was missing from the file list, from the count, and
+from `game_project.zip`. Unzipping Super Egg Hunt gave an entry script that
+included `number_speaker.bgt` and `sound_positioning.bgt` and two files that
+were not there, which from outside is indistinguishable from "it does not
+copy the stock includes" and is how it was reported. The list is built from
+the include order and from what is actually on disk now, so the three claims
+cannot drift apart.
+
+`recovery.json` also listed `includes/types.bgt` as included when the entry
+script had inlined it. A file list nothing reads is still a claim about the
+project: `includes` is what the entry script really includes, `inlined` is
+the one section it carries instead, `order` is the concatenation the split
+check uses, and the inlined section is no longer also written as a file
+nothing includes.
+
 ## The assets, which the script will go looking for
 
 A recovered script still calls `set_sound_storage("data.dat")`, and if the
@@ -1297,6 +1382,61 @@ Three things this turned up:
   across drives rather than returning a verdict, and Crazy Party's constants
   hit exactly that, so the exception is the answer — different drive,
   therefore outside — rather than a crash out of `bgt recover`.
+- **Packs need not sit beside the executable.** Super Egg Hunt keeps seven in
+  a `data/` subdirectory and names them `data/bgm.dat`, so the name from the
+  string constants is joined to the game's folder rather than looked for in
+  it. Both guards above are what make joining a module's string to a path
+  safe.
+
+### Extracting means decrypting, and the key is in the module
+
+`--extract-data` used to answer *"holds 16 encrypted entries and needs its
+key: bgt crack …"* for every pack and write nothing. That reads like advice
+and is really a gap: the key is whatever the script passed to
+`set_sound_decryption_key`, and the script is in the file being recovered.
+`pack_keys` searches for it, and extraction decrypts with what it finds —
+Super Egg Hunt's seven packs, **344 of 344 entries, every one valid Ogg
+Vorbis, from one key**.
+
+An entry whose key does not verify is **skipped and counted**, never written.
+A file of ciphertext named `music.ogg` is worse than no file, because it looks
+like the extraction worked.
+
+**The harvest could not have found that key, and the reason is a quiet one.**
+`module_strings` accepts a literal only if every byte is printable ASCII, NUL
+or whitespace — which is right for a blind scan and discards exactly the
+literal a game stores a key in. BGT's idiom is
+
+```
+set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"), true);
+```
+
+where `h_key` is a 32-byte AES-CBC blob. So `bgt crack` reported *3,392
+candidates, 0 hits* while both halves of the password sat in the module, and a
+negative result over a candidate set that **cannot contain the answer** is the
+most convincing kind of wrong.
+
+Two things fix it, and both are narrow:
+
+- `as_module.literal_is_cipher_shaped` — a whole number of 16-byte blocks, at
+  least one, mostly bytes that are not text. `module_strings` takes an
+  `accept` predicate so the blind scan's own filter is unchanged.
+- `bgt_crack.harvest_encrypted` — every blob decrypted under every text
+  literal. The cross product is affordable **because `string_decrypt` is
+  self-checking**: BGT wraps a plaintext as `printf<len>\0<data>`, so a wrong
+  pairing is rejected by the format and never reaches the pack. On Super Egg
+  Hunt it yields exactly **one** candidate, `puppiesandpandas`, which opens
+  every entry.
+
+A pack key is confirmed by one AES block against the tag each entry stores, so
+none of this is guesswork: `tag == AES-ECB(key, 16 zero bytes)` cannot be
+satisfied by a wrong key. `bgt_pack.survey` returns the tags themselves now,
+not only how many, because that is all a search needs.
+
+**Extracted assets are not what the script opens.** It still calls
+`set_sound_storage("data/bgm.dat")`, so `--extract-data` gives a project that
+compiles, runs, and says `could not load pack data/bgm.dat.` — which the
+report now says first, pointing at `--with-data`.
 
 ## Compiling without the GUI
 
@@ -1509,9 +1649,138 @@ the source calls it once and keeps the result in a local. The rule that
 prevents exactly this for a dereferenced temporary (`_read_temp`) deliberately
 does **not** apply to a value pushed from a slot: applied there it promoted so
 many slots to variables that the compile went from 93 diagnostics to 400, from
-declarations landing in the wrong scope. So the duplication is known, located
-and measured rather than fixed -- which is the honest state, and the number to
-move next.
+declarations landing in the wrong scope.
+
+## When a folded temporary stops being the value the bytecode computed
+
+The fold is **load-bearing**, which is why this took three attempts and two
+measured rejections. Promoting every compiler temporary to a variable takes
+Super Egg Hunt from **0 residual gotos to 182** and, since AngelScript has no
+`goto`, from **0 compiler errors to 187**: a loop condition promoted to a
+statement before a jump stops being a loop condition. So "fold less" is not
+the fix, and the diagnostic count is not the metric. The question is *when* a
+fold stops being faithful, and there are three answers so far. Every one of
+them produced a program that recovered with 0 errors, compiled cleanly, ran,
+and did the wrong thing -- and all three were in **one function**,
+`dynamic_menu::run_extended`, which is the menu loop every BGT game that
+edits the library ships its own copy of.
+
+**One: the receiver was mutated in between.** `dynamic_menu::add_item` keeps
+the length *before* resizing, and BGT ships the source to prove it:
+
+```
+int new_index = item_list.length();          // the source: length BEFORE
+item_list.resize(new_index + 1);
+item_list[new_index].option = filename;
+
+item_list.resize((item_list.length() + 1));  // folded: re-read AFTER
+item_list[item_list.length()].option = arg0; // ...out of bounds
+```
+
+That is an out-of-bounds write, and Super Egg Hunt's and Crazy Party's
+recovered menus both died on the first item they added with `A runtime error
+occurred.` (Both titles keep their own `dynamic_menu`, for real edits, so the
+stock substitution does not hide it.)
+
+"A statement ran in between" is too broad a test -- it costs 46 residual
+gotos, because a value computed before a loop body and read at the latch has
+statements in between and has not changed. What is required is that something
+ran **that touched what the value reads**: `item_list.length()` is invalidated
+by `item_list.resize(...)` and by nothing else in that function, which is
+precisely the dependency the source expressed by keeping the result in a
+local. A repeatable value -- a constant, a plain variable, `this` -- still
+folds, so conditions stay expressions.
+
+Two details in that test are each worth a title:
+
+- **The receiver is the whole expression, not its first word.**
+  `this.terrain.getTailleX()` has receiver `this.terrain`; taking the leading
+  identifier makes it `this`, and since almost every statement in a method
+  mentions `this`, the test matches everything. That promoted a reused scratch
+  slot inside two nested `for` loops and cost Crazy Party **4 residual gotos
+  and 4 compiler errors** -- caught only because the second title was
+  measured.
+- **Mentioning a receiver is not touching it.** `@local_7 = this.terrain;`
+  reads `this.terrain` and cannot change it. What counts is a call *on* the
+  receiver or an assignment *to* it, never its name on the right of one.
+
+With both: Super Egg Hunt **0 gotos, +19 lines, compiles cleanly**; Crazy
+Party **0 gotos, 0 errors**, and three of the four `sound_pool` bodies that
+differed from BGT's shipped source now match it (only `reserve_slot` is left,
+which is the known duplication case).
+
+**Two: the value was computed on only one path.** The simulation walks the
+bytecode linearly, so a store inside a branch and a read after the join look
+like one straight line. `dynamic_menu::run_extended` sets a joystick flag
+inside a branch and reads it in the arrow condition after it, and the fold
+carried the constant that branch happened to store across the join:
+
+```
+if (key_pressed(KEY_UP) || key_pressed(KEY_I) || true)      // always taken
+if (key_pressed(KEY_DOWN) || key_pressed(KEY_K) || false)   // dead operand
+```
+
+The game launched, spoke its menu, and **the arrow keys did nothing** -- which
+is how it was reported, and is not something a compiler or a window title can
+tell you. A forward conditional jump that starts before the store and lands
+after it but at or before the read says the store is skipped on the other path
+while the read happens either way; the value is then promoted, with its
+assignment put back at the store's own position. Events are sorted by bytecode
+position rather than kept in append order, which is what lets a promotion
+insert its assignment where the value was computed instead of where it is
+read.
+
+**Three: the value was computed before a loop and read inside it.** The same
+problem through a back edge, and the one that mattered most. `dynamic_menu`
+declares `bool speak_item = false;` before its loop, and every arrow branch
+inside the loop sets it true; the read at the top of the loop runs once per
+iteration while the initialisation ran once. Folded, the loop read
+
+```
+if (false) {            // ...speak the current item
+```
+
+so **the menu never spoke anything**. Arrowing worked perfectly --
+`menu_position` moved, wrapped and bounded exactly as the source says -- and
+for an audio game that is indistinguishable from the arrow keys being dead,
+which is how it was reported, twice. A read inside `[loop head, back edge]`
+whose value was bound before the head is promoted.
+
+Nothing about this is visible to the compiler, to a window title, or even to
+`bgt libcheck`'s call-sequence score: `if (false) { speak(...) }` *contains*
+the call, in the right order, with the right literals. It took someone
+pressing an arrow key.
+
+### And a condition dropped on the floor
+
+Fixing the fold left the right shape and the wrong condition:
+`... || (local_20 == 0)`, preceded by `if (stick.get_y() >= -100) { } else { }`
+-- an `if` with two empty arms, which is a condition that has lost its value.
+The `&&` inside the `||` chain was declining to merge, so half the expression
+was emitted as a statement that does nothing and the other half stayed in the
+condition. **An `if` whose both arms are empty is the signature of this class
+of bug**, and worth grepping for.
+
+It declined on a **type**. `_begin_bool_merge` required the slot the merge
+stores into to be declared `bool`, and this one is a compiler scratch slot
+that `slot_types` had typed from widths -- `SetV4` is as true of an int as of
+a bool. The bytecode says it outright instead: the stored value is loaded and
+tested with `JLowZ`, and `JLow*` follows no compare at all, it tests the low
+byte of the value register, which is the bool protocol and nothing else.
+Taking that as evidence recovers
+
+```
+if (key_pressed(KEY_UP) || key_pressed(KEY_I) || (stick.get_y() < -100 && local_20 == 0))
+```
+
+which is the menu the game shipped. **Read the protocol, not the inferred
+type**: on a generated slot the inference is the weaker witness, and it was
+the one being trusted.
+
+The general lesson is the one this file keeps relearning, in both directions.
+**A clean compile measured nothing here** -- all three bugs compiled -- and
+neither did the diagnostic count on the two rejected fixes. Running the result
+found the bugs; a *different* metric, the goto count, rejected the cures.
 
 # Repacking
 
@@ -1702,6 +1971,22 @@ Note `string_hash(data, algorithm=2, binary)` is **SHA-512**.
 
 Titles differ in whether they use one global key or a key per file - `tag_index()`
 shows which immediately, and that decides whether one password is enough.
+
+**The common shape is one step, not a loop, and `bgt crack` does it now.**
+Super Egg Hunt's is
+
+```
+set_sound_decryption_key(string_decrypt(h_key, "af-dc7=rqp+"), true);
+```
+
+- not a literal, so a harvest over literals cannot find it, and not computed
+far enough to need reading either: both halves are in the module. The
+`encrypted` harvester composes them (see **Extracting means decrypting**) and
+`bgt recover --extract-data` runs it without being asked. Where that fails,
+the recovered **source** is now the place to read the caller - `grep -rn
+set_sound_decryption_key` over the project found this one in seconds, where
+the disassembly would have taken an afternoon. Recovering first and cracking
+second is the better order.
 
 ## If you cannot find the password
 
