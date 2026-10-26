@@ -166,7 +166,15 @@ class _Splitter(decompile.ModuleDecompiler):
                       lambda: super(_Splitter, self)._render_globals())
 
     def _render_function(self, f):
-        self._capture("function", f.name,
+        # Qualified, because the namespace is the only thing telling a game's
+        # own copy of a library function from the library's. Manamon 2
+        # declares both `position_sound_1d` and `rhythm::position_sound_1d`,
+        # and keyed on the bare name the namespaced one inherited the
+        # library's file -- moving 71 lines fifty thousand lines earlier,
+        # which is exactly the kind of reordering `verify` exists to catch,
+        # and the only thing it was catching.
+        name = ("%s::%s" % (f.namespace_, f.name)) if f.namespace_ else f.name
+        self._capture("function", name,
                       lambda: super(_Splitter, self)._render_function(f))
 
     def render(self) -> str:

@@ -804,3 +804,62 @@ def test_a_stale_lock_does_not_block_forever():
     finally:
         if os.path.isfile(bgt_compile._LOCK):
             os.unlink(bgt_compile._LOCK)
+
+
+# -- a namespaced copy of a library function --------------------------------
+
+def test_a_namespaced_function_is_keyed_apart_from_the_global_one():
+    """The namespace is the only thing telling the two copies apart.
+
+    Manamon 2 declares `position_sound_1d` and `rhythm::position_sound_1d`.
+    Attribution gets this right -- the global one is the library's, the
+    namespaced one is the game's -- but the section was keyed on the bare
+    name, so the namespaced copy inherited the library's file and moved 71
+    lines fifty thousand lines earlier. That was the only thing wrong with
+    Manamon 2's split, and the only thing `verify` was reporting.
+    """
+    class Fn:
+        def __init__(self, name, namespace):
+            self.name, self.namespace_ = name, namespace
+            self.bytecode = []
+
+    captured = []
+
+    class Splitter(bgt_project._Splitter):
+        def __init__(self):
+            pass                                  # no module needed
+        def _capture(self, kind, name, render):
+            captured.append(name)
+
+    sp = Splitter()
+    for fn in (Fn("position_sound_1d", ""), Fn("position_sound_1d", "rhythm")):
+        bgt_project._Splitter._render_function(sp, fn)
+    assert captured == ["position_sound_1d", "rhythm::position_sound_1d"]
+
+
+def test_a_goto_does_not_make_what_follows_unreachable():
+    """`goto` leaves; it does not end the block.
+
+    What follows a `goto` is a jump target reached from somewhere else, and
+    this decompiler does not even emit the labels, so nothing here could
+    prove otherwise. Counting it dropped seven live lines from Manamon 2's
+    `character::cure_all_statuses` -- including the `if (...) {` -- which left
+    `} else {` with no `if` and a file that could not parse. The structurer's
+    own output was valid; this pass broke it.
+    """
+    body = [
+        "        goto L003b;",
+        "        int local_2 = 1;",
+        "        if (arg0) {",
+        "        } else {",
+        "            x();",
+        "        }",
+    ]
+    assert decompile._drop_unreachable(body) == body
+
+
+def test_a_return_still_ends_its_block():
+    """The pass must still do its job: BGT shows a modal dialog for the
+    "Unreachable code" warning and waits on it."""
+    kept = decompile._drop_unreachable(["    return 1;", "    return 1;"])
+    assert kept == ["    return 1;"]

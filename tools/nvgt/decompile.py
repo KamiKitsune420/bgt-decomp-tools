@@ -420,6 +420,20 @@ def _member_array_sizes(c: TypeInfo) -> dict:
     return out
 
 
+# A statement that ends its block. `goto` is not one of these; see
+# `_drop_unreachable` for why.
+TERMINATOR = re.compile(r"(return\b|break;|continue;)")
+
+
+class UnstructuredSwitch(Exception):
+    """A computed jump whose table neither switch matcher recognised.
+
+    Raised rather than worked around: the alternative is emitting the arms
+    with no `switch` around them, which is unparseable rather than merely
+    ugly. See the `JMPP` branch of `step`.
+    """
+
+
 def _drop_unreachable(lines: list[str]) -> list[str]:
     """Remove statements that follow a terminator in the same block.
 
@@ -445,7 +459,14 @@ def _drop_unreachable(lines: list[str]) -> list[str]:
             else:
                 continue
         out.append(line)
-        if re.match(r"(return\b|break;|continue;|goto\b)", stripped):
+        # `goto` is deliberately NOT a terminator. A `return`, `break` or
+        # `continue` ends its block; a `goto` only leaves, and what follows
+        # it is a jump target reached from somewhere else -- labels this
+        # decompiler does not even emit, so nothing here could prove
+        # otherwise. Counting it dropped seven live lines from Manamon 2
+        # `character::cure_all_statuses`, the `if (...) {` among them, which
+        # left `} else {` with no `if` and a file that cannot parse.
+        if TERMINATOR.match(stripped):
             dead = indent
     return out
 
@@ -478,7 +499,6 @@ def _unwrap_bool(text: str) -> str:
     return text if depth else inner
 
 
-TERMINATOR = re.compile(r"(return\b|break;|continue;)")
 
 
 def _ends_in_terminator(lines) -> bool:
@@ -1341,8 +1361,19 @@ class FuncDecompiler:
         if name == "JMPP":
             if self._begin_switch(ins):
                 return
-            self._stmt("// switch/jump table")
-            return
+            # Neither matcher claimed this table, so its entries are not
+            # skipped: each becomes a `goto` and each arm is emitted as an
+            # ordinary block, closing braces and all, with nothing that
+            # opened them. Manamon 2's `number_key_pressed` came out with ten
+            # unmatched `}` -- which does not parse, and which the compiler
+            # blames on a declaration hundreds of lines later.
+            #
+            # A counted failure is worth more than that. The whole body is
+            # given up on rather than half-emitted, which `_body` turns into a
+            # `// [decompiler error: ...]` line and `bgt recover` counts under
+            # "bodies that failed".
+            raise UnstructuredSwitch(
+                "jump table at 0x%X claimed by neither switch matcher" % ins.pos)
 
         # ---- stack ops ----------------------------------------------------
         if name == "LoadThisR":

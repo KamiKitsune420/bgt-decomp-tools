@@ -865,7 +865,13 @@ Every one of these was wrong first, and read plausibly:
   explains as well is not claimed at all.
 - **Namespaces:** a game's namespaced copy of library code
   (`rhythm::position_sound_1d`) matched the library. The gap-fill between the
-  two copies then absorbed the game code in between.
+  two copies then absorbed the game code in between. Attribution has been
+  right about this for a while, and it bit `bgt recover` anyway: the
+  attribution is keyed by name, and a *section* was keyed by the bare one,
+  so Manamon 2's `rhythm::position_sound_1d` looked up the global entry and
+  inherited `sound_positioning.bgt` — moving 71 lines fifty thousand lines
+  earlier. Qualify the key wherever a namespace can exist; the same name at
+  two scopes is two declarations, and the module keeps them apart.
 - **Lambdas** are compiled after every declaration, so their position says
   nothing. They belong to the file of the function whose `FuncPtr` creates
   them.
@@ -915,10 +921,13 @@ same diagnostics, from 12 of Psycho Strike's 75 files.
 
 A mismatch is reported as a **problem** rather than refused, so the project
 is still there to read — and `recovery.json` says `verified: false`.
-**Manamon 2 fails it**, on every run including a clean one in an isolated
-worktree, so its project is browsable but its include order is not proven
-faithful; the other titles pass. Read the single-file render for that title
-until the cause is found, and do not trust its file split.
+
+It earned its keep on Manamon 2, which was the only title to fail it, and
+for exactly one reason: a 71-line block, `namespace rhythm { void
+position_sound_1d ... }`, emitted fifty thousand lines early. The project
+still compiled and still read correctly; the concatenation check was the
+only thing that knew a declaration had moved. See the namespace note under
+**Source file names** for the cause. All four titles that parse verify now.
 
 ## Why BGT can drive the other engine's decompiler
 
@@ -1034,21 +1043,38 @@ checks say:
 | Super Egg Hunt | 6,450 | 15 | 0 | 0 | yes | **0 errors, and it runs** |
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
-| Manamon 2 | 171,755 | 1,640 | 25 | 3 | **NO** | 68, five files the engine's |
+| Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
 | Crazy Party | — | — | — | — | — | does not parse yet (see below) |
 
 **Two titles compile clean and run.** `bgt compile --run` on the recovered
 project reports `compiled with 1 warning(s), and ran: it opened a window of
 its own titled 'Super Egg Hunt Version 1.53'` — which is the title the
-original executable shows, checked by launching it. Paladin does the same.
-That is the end-to-end check: executable in, source out, source back into the
-engine, game on screen. The one warning left is `The script section is empty`,
-on the generated entry script, which holds nothing but `#include` lines.
+original executable shows, checked by launching it. That is the end-to-end
+check: executable in, source out, source back into the engine, game on
+screen. The one warning left is `The script section is empty`, on the
+generated entry script, which holds nothing but `#include` lines.
+
+Paladin compiles with no errors and runs too, but **read its window title
+carefully rather than as a match**. Run as a *script*, `get_SCRIPT_COMPILED()`
+is false, so it takes its own uncompiled-build path and the first window it
+opens with a title is that path's `input_box("command", ...)`. The driver
+reports the first titled window, so it reports `command` — which is the
+game's behaviour for an uncompiled run, not the recovery's. A separate
+launch of it did show `Paladin of the sky`. The lesson is the usual one: a
+window title is evidence that the module reached the engine and ran, and it
+is not evidence that it ran the same path the shipped executable does.
 
 **Psycho Strike's 33 are all the installed engine's.** 32 are uses of
 `elias`, a plugin type, and one is `tts_voice::speak_to_sound`, which this
 engine does not document and the game's own executable registers. Nothing
 there is the recovery's.
+
+**On both titles that still report errors, every error is the installed
+engine's.** Psycho Strike's 33 are 32 uses of the `elias` plugin type and one
+`tts_voice::speak_to_sound`. Manamon 2's 33 are in five files, and each one
+starts on `protected` or `weakref<T>`: its own newer BGT has both and this one
+has neither, and a parse error stops the compiler, so the rest of each file
+follows from the first line. Nothing left on either title is the recovery's.
 
 **SBYW is absent from this table on purpose.** Its executable is no longer in
 the folder it was read from, so its numbers could not be re-measured against
@@ -1056,18 +1082,26 @@ the current code and are not quoted as if they were. Everything above it in
 this document that mentions SBYW is a *parse* and *lift* result, which stands
 — it is only the recovery table that needs a run.
 
-**Manamon 2 is two different problems, and the brace count tells them apart.**
-Five files stop on `protected` or `weakref<T>`, which only its own newer
-engine has. Three more — `character.bgt`, `part_27.bgt`, `anagrams.bgt` —
-are **structurally broken**: the structurer gave up on a branch, emitted a
-`goto`, and emitted the arm anyway, so `cure_all_statuses` contains
-`} else {` with no `if`. Those files are 2, 10 and 1 braces short, while the
-`protected` file balances at zero. The compiler cannot tell you this: it
-blames a declaration hundreds of lines later with "Expected method or
-property", the same thing it says for a missing keyword. `bgt recover` now
-reports `unbalanced files` and `dangling else` for exactly that reason, and
-Manamon 2 is also the one title whose **split does not verify**, so do not
-trust its file layout either.
+**Manamon 2 got there by three fixes, and the brace count is what found all
+three.** It began the day at 68 errors, three unparseable files, 25 residual
+gotos and a split that did not verify, and the compiler's own messages said
+none of that — they blamed declarations hundreds of lines downstream with
+"Expected method or property", which is exactly what a missing engine keyword
+looks like. Reporting `unbalanced files` separated the two causes
+immediately: the structurally broken files were 2, 10 and 1 braces short
+while the `protected` file balanced at zero. What they were:
+
+- a **namespaced section keyed by its bare name**, which moved 71 lines
+  fifty thousand lines early and was the whole of the split failure;
+- a **jump table claimed by neither switch matcher**, whose arms were emitted
+  with ten unmatched `}`;
+- **`goto` treated as a terminator** by `_drop_unreachable`, which deleted
+  seven live lines of `cure_all_statuses` including its `if (...) {`. The
+  structurer's output was valid; the pass broke it.
+
+It now reports 0 unbalanced files, 0 dangling `else`, a verified split, no
+problems at all, and 3 bodies given up on and counted — the jump tables
+above. 6 residual gotos remain.
 
 ## The engine documents itself
 
@@ -1180,6 +1214,19 @@ found by reading what it said rather than by inspection:
   engine reports as `Failed to initialize global variable 'recorder'` and
   nothing else. The length survives only on the member's *declaration*, since
   the store that applies it is generated prologue and is dropped.
+- **Two matchers for one construct, and nothing owns the gap.** A computed
+  jump is recognised twice: strictly in the simulation (`_begin_switch`, which
+  demands the exact five-instruction prologue) and loosely in the structurer
+  (`_dense_switch_pattern`). When *both* decline, the table's entries are
+  never consumed: each becomes a `goto`, and each arm is emitted as an
+  ordinary block — closing brace and all — with nothing that opened it.
+  Manamon 2's `number_key_pressed` is a `switch` over 0..9 that came out with
+  ten unmatched `}`, so the file could not parse and the compiler blamed a
+  `return true;` hundreds of lines further on. An unclaimed table now raises
+  `UnstructuredSwitch`, which gives up on that one body and counts it, rather
+  than emitting most of it and corrupting the file. Eight sites in Manamon 2,
+  none in any other title. Half-emitting a construct is worse than refusing
+  it, because the damage lands somewhere else.
 - **The last link of a switch chain may be a compare, not a table.** Where
   one of those ranges holds a *single* value there is no table to build, so
   the compiler emits `CMPIi sel, K ; JZ case ; JMP exit` instead. Read as a
