@@ -1003,6 +1003,15 @@ Three things about that are worth keeping:
   exit arrive together. Reading the exit code first threw the report away,
   and Psycho Strike's 33 errors came back as `compiled cleanly`. The text
   is parsed before the exit code is believed.
+- **One compiler at a time, and say so when it could not run.** `bgt.exe` is
+  a GUI program read through the accessibility tree, and two of them at once
+  do not both get read: checking two titles in parallel here gave one real
+  report and one blank `nodriver`, which looks like a broken check rather
+  than a busy one. Checks take a lock and queue; a stale lock from a killed
+  run is cleared rather than waited on. And `nodriver` now carries its
+  reason into both the summary line and `recovery.json`, because an outcome
+  with no explanation reads like a result — and this is the one outcome
+  that is not one.
 - **Ask the compiler about the language rather than guessing.** `string[]()`
   is valid and `weapon@[]()` is a parse error, because the parser takes
   `weapon@[]` as the start of a declaration and nothing else; the template's

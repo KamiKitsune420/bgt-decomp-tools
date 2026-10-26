@@ -51,12 +51,14 @@ the result -- never by the compiler alone.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -211,7 +213,14 @@ class Report:
                 return "compiled with %d warning(s)" % counts.get("Warning", 0)
             return "%d error(s), %d warning(s)" % (counts.get("Error", 0),
                                                    counts.get("Warning", 0))
+        if self.outcome == "nodriver":
+            # The check did not run. Saying only "nodriver" reads like a
+            # result, and a result is exactly what this is not.
+            return "the check could not run: %s" % (self.raw or "no reason recorded")
         return self.outcome
+
+
+_LOCK = os.path.join(tempfile.gettempdir(), "bgt_compile.lock")
 
 
 def find_compiler(explicit: Optional[str] = None) -> Optional[str]:
@@ -307,6 +316,52 @@ def check(script: str, compiler: Optional[str] = None, timeout: float = 60.0,
     if exe is None:
         return Report(outcome="nodriver",
                       raw="no bgt.exe found -- pass --compiler <path to bgt.exe>")
+    with _one_at_a_time(timeout) as held:
+        if not held:
+            return Report(outcome="nodriver",
+                          raw="another compile check still holds %s after %ds"
+                              % (_LOCK, int(timeout)))
+        return _check(exe, script, timeout, keep_driver, build)
+
+
+@contextlib.contextmanager
+def _one_at_a_time(timeout: float):
+    """Serialise compile checks across processes.
+
+    `bgt.exe` is a GUI program driven through the accessibility tree, and two
+    of them at once do not both get read: one run returns `nodriver` with
+    nothing to say. Two titles were checked in parallel here and one came back
+    blank, which looks like a broken check rather than a busy one -- so they
+    queue instead, and a queue that never clears says so.
+    """
+    deadline = time.time() + max(timeout, 60.0)
+    handle = None
+    while handle is None and time.time() < deadline:
+        try:
+            handle = os.open(_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            # A lock left behind by a killed run would block every later
+            # check forever, so an old one is cleared rather than waited on.
+            try:
+                if time.time() - os.path.getmtime(_LOCK) > max(timeout, 60.0) * 2:
+                    os.unlink(_LOCK)
+                    continue
+            except OSError:
+                pass
+            time.sleep(0.5)
+    try:
+        yield handle is not None
+    finally:
+        if handle is not None:
+            os.close(handle)
+            try:
+                os.unlink(_LOCK)
+            except OSError:
+                pass
+
+
+def _check(exe: str, script: str, timeout: float, keep_driver: bool,
+           build: Optional[str]) -> "Report":
     script = os.path.abspath(script)
     workdir = os.path.dirname(script)
     fd, driver = tempfile.mkstemp(suffix=".ps1", prefix="bgtcheck_")

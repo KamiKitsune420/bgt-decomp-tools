@@ -756,3 +756,51 @@ def test_an_else_on_its_own_line_still_sees_its_if():
         text="void f() {\n    if (c) {\n        x();\n    }\n    else {\n        y();\n    }\n}\n")
     section.path = "includes/a.bgt"
     assert bgt_project.dangling_else([section]) == []
+
+
+# -- the check that could not run --------------------------------------------
+
+def test_a_check_that_did_not_run_says_why():
+    """`nodriver` on its own reads like a result, and it is the opposite.
+
+    Two compile checks ran at once here, one came back blank, and the report
+    said `compiler nodriver` with the reason dropped on the floor -- which is
+    indistinguishable from a module the compiler had nothing to say about.
+    """
+    report = bgt_compile.Report(outcome="nodriver", raw="another check holds the lock")
+    assert "could not run" in report.summary()
+    assert "another check holds the lock" in report.summary()
+    assert not report.ok
+
+
+def test_compile_checks_serialise():
+    """One `bgt.exe` at a time: it is driven through the accessibility tree,
+    and two at once do not both get read.
+
+    The mechanism is an exclusive create, so that is what is checked -- and
+    not by *waiting* on it, because a test that takes a minute is a test
+    nobody runs, which is the same failure this whole area is about.
+    """
+    with bgt_compile._one_at_a_time(60.0) as held:
+        assert held
+        assert os.path.isfile(bgt_compile._LOCK)
+        try:
+            os.close(os.open(bgt_compile._LOCK,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            raise AssertionError("a second holder got the lock")
+        except FileExistsError:
+            pass
+    assert not os.path.isfile(bgt_compile._LOCK)
+
+
+def test_a_stale_lock_does_not_block_forever():
+    """A lock left by a killed run would stop every later check."""
+    with open(bgt_compile._LOCK, "w") as fh:
+        fh.write("")
+    os.utime(bgt_compile._LOCK, (0, 0))               # ancient
+    try:
+        with bgt_compile._one_at_a_time(1.0) as held:
+            assert held
+    finally:
+        if os.path.isfile(bgt_compile._LOCK):
+            os.unlink(bgt_compile._LOCK)

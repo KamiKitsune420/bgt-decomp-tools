@@ -663,6 +663,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                    "origins": {s.name: s.origin for s in sections if s.origin},
                    "compile": (None if project.compile_report is None else
                                {"outcome": project.compile_report.outcome,
+                                # When the check could not run at all, the
+                                # reason is the only thing worth having, and
+                                # it used to be dropped here: `nodriver` with
+                                # no explanation reads like a result.
+                                "detail": project.compile_report.raw,
                                 "errors": [d.__dict__ for d in
                                            project.compile_report.errors]})},
                   fh, indent=1)
