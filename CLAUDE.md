@@ -1585,9 +1585,33 @@ handling already renders those as the comparison they are. `bgt libcheck` is the
 check to run for any further readability change: one that alters a call sequence
 or a literal is wrong.
 
-**0.88% residual gotos.** Irreducible flow, switch tails and multi-entry loops
-stay labelled `goto` rather than being forced into a shape they do not have.
-Some of this is genuinely irreducible; some is not yet recognised.
+**Residual gotos are now the thing to work on, and they are the dominant
+error source on two titles** — 17 of Crazy Party's 19 compiler errors and
+6 of Manamon 2's bodies. AngelScript has no `goto`, so every one of those
+lines is an error rather than a blemish. Irreducible flow, switch tails and
+multi-entry loops stay labelled rather than forced into a shape they do not
+have; some is genuinely irreducible and some is not yet recognised.
+
+**One shape is diagnosed, and the obvious fix for it is wrong.**
+`DescenteMine::choisisDirection` is `numTour += 1;` and then
+`do { v = random(-1, 1); } while (v == 0);` and then the rest. The
+do-while handler at the top of `_block` only fires when the backward
+branch is the slice's **last** event, so a loop with a remainder after it
+falls through to the `goto` fallback — which also drops the condition,
+making that output doubly wrong.
+
+Generalising it to "the first backward branch anywhere in the slice" was
+tried and **reverted**: Crazy Party went from 17 goto lines to 55. The
+reason is an ordering mistake worth remembering, because it is the same one
+the switch arms made. Claiming the *first* back edge claims an **inner**
+loop before the outer one has been recognised, which breaks the real
+enclosing loop and turns its `continue`s and `break`s into gotos. A
+`loop.is_continue` guard does not save it, because at a function's top
+level there is no enclosing loop context yet. The next attempt should claim
+the **outermost** back edge first — the one whose target is earliest — and
+should be measured per attempt: `scratch/gotos.py` decompiles only the
+bodies that contain gotos, which is the difference between a seconds-long
+check and a four-minute full recovery.
 
 **No semantic checking on edits.** `bgt asm` proves the *encoding* round-trips,
 not that your edit makes sense. Renaming a literal is safe; changing an
