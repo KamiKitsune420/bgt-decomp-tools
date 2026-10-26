@@ -115,6 +115,8 @@ class Project:
     data: List[str] = field(default_factory=list)
     #: which library files came from the engine rather than the module
     stock: List[str] = field(default_factory=list)
+    #: the screen-reader client DLLs brought in, and why
+    speech: List[str] = field(default_factory=list)
     compile_report: Optional[bgt_compile.Report] = None
 
     def summary(self) -> str:
@@ -146,6 +148,10 @@ class Project:
         if self.data:
             lines.append("%-22s %s" % ("asset packs", self.data[0]))
             for note in self.data[1:]:
+                lines.append("%-22s %s" % ("", note))
+        if self.speech:
+            lines.append("%-22s %s" % ("screen reader", self.speech[0]))
+            for note in self.speech[1:]:
                 lines.append("%-22s %s" % ("", note))
         if self.compile_report is not None:
             used = s.get("compiler_used")
@@ -815,6 +821,75 @@ def _default_includes() -> List[str]:
             if os.path.isdir(folder)]
 
 
+def _bgt_roots() -> List[str]:
+    """Where BGT is installed, derived from where its include folder is."""
+    return [os.path.dirname(folder) for folder in _default_includes()]
+
+
+#: BGT's own redistributables for talking to a screen reader, and the API each
+#: one serves. BGT ships them under `redist/screen_readers/` precisely because
+#: a built game needs them beside it.
+SPEECH_CLIENTS = (
+    ("nvdaControllerClient32.dll", os.path.join("screen_readers", "nvda"), "NVDA"),
+    ("SAAPI32.dll", os.path.join("screen_readers", "system_access"),
+     "System Access"),
+)
+
+#: the APIs whose presence means the module speaks through a screen reader at
+#: all. `screen_reader_speak` and friends fall back to SAPI when no client DLL
+#: is found, which is why a missing DLL is not an error -- it is a game that
+#: suddenly has the wrong voice.
+SPEECH_APIS = ("screen_reader_speak", "screen_reader_speak_interrupt",
+               "screen_reader_is_running", "screen_reader_detect",
+               "screen_reader_output", "screen_reader_output_braille")
+
+
+def speech_clients(module, out_dir: str,
+                   bgt_roots: Optional[Sequence[str]] = None
+                   ) -> Tuple[List[str], List[str]]:
+    """Bring BGT's screen-reader client DLLs into the project.
+
+    A recovered game that calls `screen_reader_speak` needs
+    `nvdaControllerClient32.dll` beside its script to reach NVDA. Without it
+    the engine does not fail -- it falls back to SAPI, so the game talks, in
+    the wrong voice, and nothing says why. That is worth copying rather than
+    mentioning: the file ships with BGT, under `redist/screen_readers/`, and
+    the project is useless to its actual audience without it.
+
+    Only when the module calls one of those APIs, which is what makes this
+    evidence rather than scattering DLLs into every project.
+
+    Returns (copied file names, notes).
+    """
+    called = {f.name for f in getattr(module, "used_functions", ()) or ()
+              if f is not None and f.name}
+    uses = sorted(called & set(SPEECH_APIS))
+    if not uses:
+        return [], []
+
+    copied: List[str] = []
+    notes: List[str] = []
+    for name, where, reader in SPEECH_CLIENTS:
+        source = next((os.path.join(root, "redist", where, name)
+                       for root in (bgt_roots or _bgt_roots())
+                       if os.path.isfile(os.path.join(root, "redist", where, name))),
+                      None)
+        if source is None:
+            notes.append("%s was not found in BGT's redist folder, so this "
+                         "project cannot talk to %s and the engine will fall "
+                         "back to SAPI" % (name, reader))
+            continue
+        shutil.copy2(source, os.path.join(out_dir, name))
+        copied.append(name)
+        notes.append("%s copied in, so speech reaches %s rather than falling "
+                     "back to SAPI" % (name, reader))
+    if copied:
+        notes.append("keep %s beside the script: this game calls %s, and the "
+                     "engine looks for the client DLL in the script's own "
+                     "folder" % (" and ".join(copied), ", ".join(uses[:3])))
+    return copied, notes
+
+
 def _library(include_dirs: Optional[Sequence[str]]):
     dirs = list(include_dirs) if include_dirs else _default_includes()
     return script_files.library_index(dirs, extensions=("*.bgt",)) if dirs else []
@@ -1205,22 +1280,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             "the files do not concatenate back to the one-file source: "
             "a declaration moved, which can change global initialisation order")
 
-    if make_zip:
-        archive = os.path.join(out_dir, name + "_project.zip")
-        progress("writing %s" % os.path.basename(archive))
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for path in project.files:
-                zf.write(os.path.join(out_dir, path.replace("/", os.sep)), path)
-        with zipfile.ZipFile(archive) as zf:
-            bad = zf.testzip()
-            if bad is not None:
-                project.problems.append("the archive is corrupt at %s" % bad)
-            elif len(zf.namelist()) != len(project.files):
-                project.problems.append("the archive holds %d of %d files"
-                                        % (len(zf.namelist()), len(project.files)))
-        project.stats["zip"] = archive
-        project.stats["zip_entries"] = len(project.files)
-
+    # The runtime files the project needs beside its script, before the ZIP is
+    # written -- they used to be copied after it, so a plugin DLL was listed in
+    # `recovery.json` and absent from the archive. Same mistake as the stock
+    # library files, one directory up.
+    #
     # A plugin include needs the DLL itself to compile. It ships with the game,
     # so it is beside the executable; copying it in is what makes the recovered
     # project build on its own, and a missing one is reported rather than left
@@ -1236,6 +1300,28 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             project.problems.append(
                 "%s is included but not beside the executable: copy it in, or "
                 "the types it registers have no declaration" % dll)
+
+    # ...and the screen-reader client, which is the difference between the
+    # game speaking through NVDA and the engine quietly falling back to SAPI.
+    spoken, speech_notes = speech_clients(module, out_dir)
+    project.speech = list(speech_notes)
+    project.files += [dll for dll in spoken if dll not in project.files]
+
+    if make_zip:
+        archive = os.path.join(out_dir, name + "_project.zip")
+        progress("writing %s" % os.path.basename(archive))
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in project.files:
+                zf.write(os.path.join(out_dir, path.replace("/", os.sep)), path)
+        with zipfile.ZipFile(archive) as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                project.problems.append("the archive is corrupt at %s" % bad)
+            elif len(zf.namelist()) != len(project.files):
+                project.problems.append("the archive holds %d of %d files"
+                                        % (len(zf.namelist()), len(project.files)))
+        project.stats["zip"] = archive
+        project.stats["zip_entries"] = len(project.files)
 
     if compile_check:
         progress("compiling the project with BGT's own compiler")

@@ -1258,6 +1258,51 @@ def test_an_entry_whose_key_does_not_verify_is_skipped_and_counted():
         assert "1 skipped: no key that verifies" in notes[0]
 
 
+def test_the_screen_reader_client_is_brought_in_for_a_game_that_speaks():
+    """Without `nvdaControllerClient32.dll` beside the script the engine does
+    not fail -- it falls back to SAPI, so the game talks in the wrong voice
+    and nothing says why. For an audio game that is the whole product.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        redist = os.path.join(tmp, "bgt", "redist", "screen_readers")
+        for sub, name in (("nvda", "nvdaControllerClient32.dll"),
+                          ("system_access", "SAAPI32.dll")):
+            os.makedirs(os.path.join(redist, sub), exist_ok=True)
+            with open(os.path.join(redist, sub, name), "wb") as fh:
+                fh.write(b"MZ-not-really-a-dll")
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+
+        speaking = _Mod([], called=["screen_reader_speak", "key_pressed"])
+        copied, notes = bgt_project.speech_clients(
+            speaking, out, bgt_roots=[os.path.join(tmp, "bgt")])
+        assert copied == ["nvdaControllerClient32.dll", "SAAPI32.dll"]
+        assert os.path.isfile(os.path.join(out, "nvdaControllerClient32.dll"))
+        assert any("NVDA" in note for note in notes)
+        assert any("beside the script" in note for note in notes)
+
+        # A game that never speaks through a screen reader gets nothing: this
+        # is evidence from the module, not a DLL scattered into every project.
+        quiet = os.path.join(tmp, "quiet")
+        os.makedirs(quiet)
+        assert bgt_project.speech_clients(
+            _Mod([], called=["key_pressed"]), quiet,
+            bgt_roots=[os.path.join(tmp, "bgt")]) == ([], [])
+        assert os.listdir(quiet) == []
+
+
+def test_a_missing_screen_reader_client_is_said_out_loud_not_skipped():
+    """Falling back to SAPI is the quiet failure, so the absence is reported."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        copied, notes = bgt_project.speech_clients(
+            _Mod([], called=["screen_reader_speak"]), out,
+            bgt_roots=[os.path.join(tmp, "no-bgt-here")])
+        assert copied == []
+        assert any("fall back to SAPI" in note for note in notes)
+
+
 def test_survey_reports_the_tags_themselves_not_only_how_many():
     """A key search needs the tags, and they are all it needs."""
     with tempfile.TemporaryDirectory() as tmp:

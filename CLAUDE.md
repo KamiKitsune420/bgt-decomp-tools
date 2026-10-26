@@ -1612,6 +1612,41 @@ That closes Psycho Strike out: **all 33 of its remaining diagnostics are the
 installed engine's absences** -- 32 uses of the `elias` plugin type and this
 one method -- and none of them is the recovery's.
 
+## A recovered game keeps its own licensing, and reads the same store
+
+Worth knowing before concluding that a port behaves differently from the
+original. A game's registration check is ordinary script code, so it recovers
+like everything else and **still runs**: Super Egg Hunt's `match_id` and
+`register_check` come back in full, the latter called from inside the menu
+loop, and it `exit()`s the process when the stored id does not match.
+
+It reads the *same* store, too. `game_data.setup("LWorks", "Super Egg Hunt",
+false)` keys the settings by company and product rather than by executable
+path, so a recovered build sees whatever the installed original wrote. A
+registered install stays registered in the port, and an unregistered one
+stays unregistered -- neither is something the recovery changes.
+
+## The screen-reader client, which decides whose voice the game has
+
+These are audio games, and a recovered one that calls `screen_reader_speak`
+needs `nvdaControllerClient32.dll` beside its script to reach NVDA. Without
+it the engine **does not fail** -- it falls back to SAPI, so the game talks,
+in the wrong voice, and nothing in any report says why.
+
+BGT ships both clients under `redist/screen_readers/`, so `bgt recover`
+copies them in rather than mentioning them: `nvdaControllerClient32.dll` for
+NVDA and `SAAPI32.dll` for System Access. Only when the module actually calls
+one of the `screen_reader_*` APIs, which is what makes it evidence rather
+than a DLL scattered into every project, and a client BGT does not have is
+reported with the consequence rather than skipped.
+
+**The ZIP had the same ordering bug as the stock library files.** Plugin DLLs
+were copied *after* the archive was written and appended to `project.files`
+afterwards, so they were listed in `recovery.json` and absent from
+`game_project.zip` -- and the archive's own "holds n of m files" check ran
+before the append, so it passed. Everything a project needs beside its script
+is now copied before the ZIP.
+
 ## Plugins: a type no stock engine has
 
 Psycho Strike uses `elias`, and the installed BGT 1.3 has no such type, no
@@ -1644,12 +1679,28 @@ still the better-validated path for reading one function, and this is the path
 that compiles.
 
 That check found the duplication the compiler cannot see:
-`sound_pool::play_extended_1d` calls `reserve_slot()` forty-five times where
-the source calls it once and keeps the result in a local. The rule that
-prevents exactly this for a dereferenced temporary (`_read_temp`) deliberately
-does **not** apply to a value pushed from a slot: applied there it promoted so
-many slots to variables that the compile went from 93 diagnostics to 400, from
-declarations landing in the wrong scope.
+`sound_pool::play_extended_1d` called `reserve_slot()` forty-five times where
+the source calls it once and keeps the result in a local. **That is fixed**
+-- by the fold rules in the next section, not by promoting every slot -- and
+`play_extended_1d`, `play_extended_2d` and `play_stationary_extended` now
+have the source's exact call sequence on Crazy Party where all three
+differed. Super Egg Hunt's decompiled `sound_pool` and `dynamic_menu` score
+43 of 47 library functions identical and 46 of 47 on literals.
+
+The one left, `sound_pool::reserve_slot` at 0.86, **is not a defect**, and it
+is worth saying why rather than leaving a number looking like debt. Stock
+writes
+
+```
+if(current.handle.playing==false) { slot=i; break; }     // last in the loop
+sound temp;  @current.handle=temp;
+```
+
+and the recovery writes `if (local_4.handle.get_playing()) { continue; }`
+followed by the assignment, plus `sound()` where the source declared
+`sound temp;`. Same program, different shape -- which is exactly the
+ambiguity this comparison cannot resolve on its own, and why a difference is
+a lead and not a verdict.
 
 ## When a folded temporary stops being the value the bytecode computed
 
@@ -1706,8 +1757,10 @@ Two details in that test are each worth a title:
 
 With both: Super Egg Hunt **0 gotos, +19 lines, compiles cleanly**; Crazy
 Party **0 gotos, 0 errors**, and three of the four `sound_pool` bodies that
-differed from BGT's shipped source now match it (only `reserve_slot` is left,
-which is the known duplication case).
+differed from BGT's shipped source now match it -- including
+`play_extended_1d`, which is where the forty-five `reserve_slot()` calls
+were. Only `reserve_slot` itself is left, and that one is a shape difference
+rather than a defect (see the section above).
 
 **Two: the value was computed on only one path.** The simulation walks the
 bytecode linearly, so a store inside a branch and a read after the join look
