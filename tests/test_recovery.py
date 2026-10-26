@@ -971,3 +971,41 @@ def test_a_delegate_passed_as_an_argument_names_its_funcdef():
     # Two funcdefs of one shape is ambiguous, so neither is chosen.
     stub.m = Module([Fn("A", "void", ["int"]), Fn("B", "void", ["int"])])
     assert match(stub, Fn("x", "void", ["int"])) == ""
+
+
+# -- a loop whose body folded into its condition ----------------------------
+
+def test_a_back_edge_with_no_events_becomes_an_empty_bodied_loop():
+    """`do { y = random(0, h); } while (f(y) < 3);` has no statements left.
+
+    Every statement folds into the condition, so the back edge's target
+    resolves to the branch's own event index and there is nothing between
+    them to put in a body. An empty-bodied `while (cond) { }` re-evaluates
+    the condition per iteration, which is what the loop does -- and unlike a
+    `goto` it compiles. This was all 17 of Crazy Party's residual gotos.
+
+    Two earlier attempts missed it: the original handler needs the branch to
+    be its slice's last event, and generalising to "the first backward branch
+    anywhere in the slice" took the count from 17 to 55 by claiming inner
+    loops before the outer ones were recognised.
+    """
+    # A lone backward branch: its target, 225, lies before the branch at 247
+    # and no event sits there, so it resolves to the branch itself.
+    events = [decompile.Event("branch", 247, ("(c)", 225))]
+    rendered = decompile.Structurer(events, None, ()).render(0)
+    assert rendered == ["while (c) {", "}"], rendered
+    assert not any("goto" in line for line in rendered)
+
+
+def test_a_backward_branch_with_a_real_body_is_still_a_do_while():
+    """The folded case must not swallow the ordinary one.
+
+    With a statement between the target and the branch there is a body, and
+    the existing do-while handling renders it.
+    """
+    events = [decompile.Event("stmt", 225, ("", "y = roll();")),
+              decompile.Event("branch", 247, ("(c)", 225))]
+    rendered = decompile.Structurer(events, None, ()).render(0)
+    assert "do {" in rendered[0], rendered
+    assert any("y = roll();" in line for line in rendered), rendered
+    assert not any("goto" in line for line in rendered), rendered

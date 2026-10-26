@@ -1047,7 +1047,7 @@ checks say:
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 190,277 | 559 | 17 | 0 | yes | 19, of which 17 are those gotos |
+| Crazy Party | 190,294 | 559 | 0 | 0 | yes | **2**, both one line |
 
 **Two titles compile clean and run.** `bgt compile --run` on the recovered
 project reports `compiled with 1 warning(s), and ran: it opened a window of
@@ -1585,33 +1585,48 @@ handling already renders those as the comparison they are. `bgt libcheck` is the
 check to run for any further readability change: one that alters a call sequence
 or a literal is wrong.
 
-**Residual gotos are now the thing to work on, and they are the dominant
-error source on two titles** — 17 of Crazy Party's 19 compiler errors and
-6 of Manamon 2's bodies. AngelScript has no `goto`, so every one of those
-lines is an error rather than a blemish. Irreducible flow, switch tails and
-multi-entry loops stay labelled rather than forced into a shape they do not
-have; some is genuinely irreducible and some is not yet recognised.
+**Residual gotos: Crazy Party went from 17 to 0, and every one was a loop
+whose body folded into its condition.** They had been the dominant error
+source — 17 of that title's 19 compiler errors — and AngelScript has no
+`goto`, so each line was an error rather than a blemish.
 
-**One shape is diagnosed, and the obvious fix for it is wrong.**
-`DescenteMine::choisisDirection` is `numTour += 1;` and then
-`do { v = random(-1, 1); } while (v == 0);` and then the rest. The
-do-while handler at the top of `_block` only fires when the backward
-branch is the slice's **last** event, so a loop with a remainder after it
-falls through to the `goto` fallback — which also drops the condition,
-making that output doubly wrong.
+The shape is a backward branch whose target resolves to **the branch's own
+event index**: no *event* lies between the target and the branch, because the
+whole body folded into the condition expression. Source like
 
-Generalising it to "the first backward branch anywhere in the slice" was
-tried and **reverted**: Crazy Party went from 17 goto lines to 55. The
-reason is an ordering mistake worth remembering, because it is the same one
-the switch arms made. Claiming the *first* back edge claims an **inner**
-loop before the outer one has been recognised, which breaks the real
-enclosing loop and turns its `continue`s and `break`s into gotos. A
-`loop.is_continue` guard does not save it, because at a function's top
-level there is no enclosing loop context yet. The next attempt should claim
-the **outermost** back edge first — the one whose target is earliest — and
-should be measured per attempt: `scratch/gotos.py` decompiles only the
-bodies that contain gotos, which is the difference between a seconds-long
-check and a four-minute full recovery.
+```
+do { y = random(0, h - 1); } while (absolute(centre - y) < 3);
+```
+
+arrives as one expression that does the work and one branch that repeats it.
+An empty-bodied `while (cond) { }` says exactly that, since the condition is
+re-evaluated per iteration either way — and unlike a `goto` it compiles.
+Almost all fifteen were a minigame's `placeZone` picking a spot far enough
+from something; `DescenteMine::choisisDirection` is the same thing as
+`do { v = random(-1, 1); } while (v == 0);`.
+
+**Two wrong attempts came first, and the second is the lesson.** Generalising
+the existing do-while handler to "the first backward branch anywhere in the
+slice" took Crazy Party from 17 gotos to **55**: claiming the first back edge
+claims an *inner* loop before the outer one is recognised, which breaks the
+real enclosing loop and turns its `continue`s and `break`s into gotos. A
+`loop.is_continue` guard cannot save that, because at a function's top level
+there is no enclosing loop context yet. It was reverted. The point is not
+that the idea was bad but that **neither attempt matched the actual shape**,
+and the only reason that was visible is that each one was measured.
+
+**Measure a structurer change per attempt, and make it cheap enough to.**
+Decompiling Crazy Party's 4,601 bodies takes minutes; the sixteen that
+contained gotos take about twenty seconds. That difference is what turned
+this from guessing into looking, and it is worth rebuilding for the next
+shape. Cross-check the titles that are already clean by **diffing their
+rendered output**, not just their counts: this fix leaves Super Egg Hunt,
+Paladin and Psycho Strike byte-identical, which is what a correctly scoped
+structurer change looks like.
+
+What is left is irreducible flow, switch tails and multi-entry loops in other
+titles — Manamon 2 still reports 6 — which stay labelled rather than forced
+into a shape they do not have.
 
 **No semantic checking on edits.** `bgt asm` proves the *encoding* round-trips,
 not that your edit makes sense. Renaming a literal is safe; changing an
@@ -1641,10 +1656,9 @@ With those two, **every stage passes, byte-exact rewrite included**, and the
 module recovers to 190,277 lines across 559 files with 0 unmodelled opcodes
 and 0 bodies that failed.
 
-Recovery went from **170 compiler errors to 19, of which 17 are the residual
-gotos** -- so the only thing really left on this title is the structurer. It
-found four latent decompiler bugs on the way, none of which any earlier title
-happened to need:
+Recovery went from **170 compiler errors to 2, and both are the same single
+line** -- the engine funcdef described below. It found five latent decompiler
+bugs on the way, none of which any earlier title happened to need:
 
 - **A delegate is not a call to the factory, and naming it takes two
   sources.** The handling existed and was right as far as it went — bind the

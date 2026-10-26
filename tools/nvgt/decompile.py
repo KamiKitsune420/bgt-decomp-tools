@@ -3329,7 +3329,21 @@ class Structurer:
                 i += 1
                 continue
             if t_idx <= i:              # backward latch with no entry JMP
-                self.out.append((indent, f"goto L{target:04x};"))
+                if t_idx == i:
+                    # The back edge resolves to this branch itself, so no
+                    # *event* lies between the target and here: the loop body
+                    # folded entirely into the condition. `do { y =
+                    # random(0, h - 1); } while (absolute(c - y) < 3);` comes
+                    # through as one expression doing the work and one branch
+                    # repeating it, which an empty-bodied loop says exactly:
+                    # the condition is re-evaluated per iteration either way.
+                    # 15 of Crazy Party's 17 gotos are this, almost all of
+                    # them a `placeZone` picking a spot that is far enough
+                    # from somewhere, and a `goto` does not compile at all.
+                    self.out.append((indent, f"while {_condition(cond)} {{"))
+                    self.out.append((indent, "}"))
+                else:
+                    self.out.append((indent, f"goto L{target:04x};"))
                 i += 1
                 continue
 
