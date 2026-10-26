@@ -146,3 +146,35 @@ def test_the_window_disables_its_controls_while_working(frame):
     frame.busy(False)
     assert frame.recover_button.IsEnabled()
     assert frame.exe.IsEnabled()
+
+
+def test_a_browse_default_is_only_passed_when_it_exists(frame, tmp_path):
+    """An empty or bogus starting path reaches the shell as a real one.
+
+    `wx.DirDialog(defaultPath="")` answers with
+    `IShellItem::GetDisplayName failed with error 0x80070057` -- which is what
+    the output-folder button did on an empty field, twice. The dialog itself
+    cannot be opened in a test, so the decision it is built from is what gets
+    checked here.
+    """
+    import os as _os
+    assert not _os.path.isdir("")                  # the empty case
+    assert not _os.path.isdir(str(tmp_path / "nope"))
+    assert _os.path.isdir(str(tmp_path))           # and a real one
+
+
+def test_focus_is_taken_after_the_frame_exists(frame):
+    """Focusing a window Windows has not realised yet fails with error 87.
+
+    The frame asks for focus through `wx.CallAfter`, so by the time anything
+    runs the control is focusable -- which is what this asserts, rather than
+    the call having been made.
+    """
+    frame.Show()
+    for _ in range(20):
+        wx.Yield()
+    assert frame.exe.CanAcceptFocus()
+    frame.exe.SetFocus()
+    for _ in range(10):
+        wx.Yield()
+    frame.Hide()

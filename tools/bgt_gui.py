@@ -76,13 +76,21 @@ def _labelled(parent, sizer, label, value="", wildcard=None, directory=False):
     browse.SetName("Browse for %s" % label.rstrip(":").lower())
 
     def pick(_event):
+        # Only pass a starting place that actually exists. An empty or bogus
+        # path reaches the shell as one, and it answers with
+        # `IShellItem::GetDisplayName failed` -- twice, on an empty field.
+        start = (field.GetValue() or "").strip().strip('"')
         if directory:
             dialog = wx.DirDialog(parent, "Choose %s" % label.rstrip(":"),
-                                  defaultPath=field.GetValue() or "")
+                                  **({"defaultPath": start}
+                                     if os.path.isdir(start) else {}))
         else:
+            folder = os.path.dirname(start)
             dialog = wx.FileDialog(parent, "Choose %s" % label.rstrip(":"),
                                    wildcard=wildcard or WILDCARD,
-                                   style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+                                   style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+                                   **({"defaultDir": folder}
+                                      if os.path.isdir(folder) else {}))
         with dialog:
             if dialog.ShowModal() == wx.ID_OK:
                 field.SetValue(dialog.GetPath())
@@ -152,7 +160,10 @@ class Frame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
         self.worker: threading.Thread | None = None
-        self.exe.SetFocus()
+        # After the frame is on screen, not during construction: focusing a
+        # window Windows has not realised yet fails with error 87, which wx
+        # reports and the user never sees the point of.
+        wx.CallAfter(self.exe.SetFocus)
         self.say("Ready. Choose a game executable and an output folder.")
         self.say("Everything here runs the same code as the `bgt` command "
                  "line, so any result can be reproduced with one command.")
