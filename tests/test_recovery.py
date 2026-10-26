@@ -928,3 +928,46 @@ def test_a_global_call_shadowed_by_a_method_is_qualified():
     # A free function with no enclosing class needs no qualification.
     stub.fn.object_type = None
     assert not decompile.FuncDecompiler._shadowed_by_enclosing_class(stub, "anything")
+
+
+def test_a_delegate_passed_as_an_argument_names_its_funcdef():
+    """With no `STOREOBJ` after it there is no slot to take the type from.
+
+    Crazy Party passes the delegate straight into a call, and the bare method
+    is rejected: "Can't pass class method as arg directly". The bound
+    method's own signature names the funcdef instead -- `Jeu::att(int, bool)`
+    against the module's `void CbFade(int, bool)`. Ambiguity is left alone,
+    because an unwrapped delegate fails visibly while the wrong funcdef would
+    compile and bind the wrong callback.
+    """
+    class Dt:
+        def __init__(self, text):
+            self.text = text
+        def format(self):
+            return self.text
+
+    class Fn:
+        def __init__(self, name, ret, params, ns=""):
+            self.name, self.return_type = name, Dt(ret)
+            self.param_types = [Dt(p) for p in params]
+            self.namespace_ = ns
+
+    class Module:
+        def __init__(self, funcdefs):
+            self.funcdefs = funcdefs
+
+    class Stub:
+        pass
+
+    stub = Stub()
+    stub.m = Module([Fn("CbFade", "void", ["int", "bool"]),
+                     Fn("menu_callback", "int", ["dynamic_menu@", "string"])])
+    match = decompile.FuncDecompiler._funcdef_matching
+    assert match(stub, Fn("att", "void", ["int", "bool"])) == "CbFade"
+    assert match(stub, Fn("other", "int", ["dynamic_menu@", "string"])) == "menu_callback"
+    # No funcdef has this shape, and nothing is invented.
+    assert match(stub, Fn("nope", "void", ["string"])) == ""
+    assert match(stub, None) == ""
+    # Two funcdefs of one shape is ambiguous, so neither is chosen.
+    stub.m = Module([Fn("A", "void", ["int"]), Fn("B", "void", ["int"])])
+    assert match(stub, Fn("x", "void", ["int"])) == ""

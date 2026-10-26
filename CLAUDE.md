@@ -1047,7 +1047,7 @@ checks say:
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 190,277 | 559 | 17 | 0 | yes | see below |
+| Crazy Party | 190,277 | 559 | 17 | 0 | yes | 19, of which 17 are those gotos |
 
 **Two titles compile clean and run.** `bgt compile --run` on the recovered
 project reports `compiled with 1 warning(s), and ran: it opened a window of
@@ -1617,15 +1617,28 @@ With those two, **every stage passes, byte-exact rewrite included**, and the
 module recovers to 190,277 lines across 559 files with 0 unmodelled opcodes
 and 0 bodies that failed.
 
-It then found three things on the *decompiler* side, each of which had been
-latent because no earlier title happened to need it:
+Recovery went from **170 compiler errors to 19, of which 17 are the residual
+gotos** -- so the only thing really left on this title is the structurer. It
+found four latent decompiler bugs on the way, none of which any earlier title
+happened to need:
 
-- **A delegate is not a call to the factory.** The handling existed and was
-  right — bind the object and method, take the funcdef type from the
-  following `STOREOBJ` — but matched `$dlgte` only, so 132 sites emitted
-  `fadeOut(arg0, %delegate_factory(), arg1)`. The source is
-  `fadeOut(arg0, CbFade(this.att), arg1)`, and BGT 1.3 compiles that form:
-  asked directly, rather than assumed.
+- **A delegate is not a call to the factory, and naming it takes two
+  sources.** The handling existed and was right as far as it went — bind the
+  object and method, take the funcdef type from the following `STOREOBJ` —
+  but it matched `$dlgte` only, so 43 sites emitted
+  `fadeOut(arg0, %delegate_factory(), arg1)`. Matching the other spelling was
+  not enough: where the delegate is passed **straight into a call** there is
+  no `STOREOBJ`, so no slot to take the type from, and the bare method is
+  rejected just as firmly ("Can't pass class method as arg directly"). The
+  bound method's own signature names it instead — `Jeu::att(int, bool)`
+  against the module's one matching `void CbFade(int, bool)` — and an
+  ambiguous match is left unwrapped on purpose, because that fails visibly
+  while the wrong funcdef would compile and bind the wrong callback. The
+  source form `CbFade(this.att)` was put to BGT 1.3 rather than assumed.
+- **`do while` had a second emit site** that never went through `_condition`,
+  which is why fixing the first one left `} while (local_4 - local_1) < 1;`
+  behind. Two places answering one question is the recurring shape of
+  everything in this list.
 - **`_condition` asked the wrong question.** It tested
   `startswith("(") and endswith(")")`, which is true of `(0 + 2) < (x)` —
   a string enclosing nothing — so it added no parentheses and emitted
@@ -1649,6 +1662,15 @@ own source files, but they are a *generator's output*, not a record of the
 build, so they still do not give the compiler's file list. They do mean a
 string search for `.bgt` in this title finds source rather than a sound —
 and they explain why one function is a million instructions long.
+
+**One site needs a name the module does not carry.** `pathfinder::set_callback_function`
+takes an *engine* funcdef, and `objVariableTypes` records every funcdef-typed
+value under the `_builtin_function_` placeholder with no signature, so neither
+the slot nor the module's own funcdefs can name it. The engine's documentation
+can — `bgt api pathfinder` gives
+`bool set_callback_function(pathfinder_callback@ callback)` — but wiring
+`bgt_api` into the decompiler is plumbing that has not been done. Two of
+Crazy Party's nineteen errors are that one line.
 
 **What Ghidra contributed here was nothing, and that is worth recording.**
 The binary analysed fine (at a 5G heap; 2G runs out on this one), but the

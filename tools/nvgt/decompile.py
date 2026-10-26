@@ -1924,6 +1924,19 @@ class FuncDecompiler:
             dt = self.var_types.get(_s16(following.w_arg)) if following and following.name == "STOREOBJ" else None
             if dt and dt.obj_type:
                 expression = f"{dt.obj_type.name}({expression})"
+            else:
+                # No `STOREOBJ` after it means the delegate is passed straight
+                # as an argument, so there is no slot to take the funcdef from.
+                # The bound method's own signature names it instead: the
+                # compiler rejects the bare method ("Can't pass class method as
+                # arg directly"), and Crazy Party passes `Jeu::att(int, bool)`
+                # where the module declares exactly one matching funcdef,
+                # `void CbFade(int, bool)`.
+                bound = next((i.func_ref for i in reversed(self.instrs[:self.k])
+                              if i.name == "FuncPtr" and i.func_ref is not None), None)
+                funcdef = self._funcdef_matching(bound)
+                if funcdef:
+                    expression = f"{funcdef}({expression})"
             self.value_reg = Atom("call", expression)
             self.pending_value_call = None
             return
@@ -2339,6 +2352,26 @@ class FuncDecompiler:
                     return True
             owner = getattr(owner, "derived_from", None)
         return False
+
+    def _funcdef_matching(self, fn) -> str:
+        """The module's funcdef with this function's signature, if just one has it.
+
+        Ambiguity is left alone rather than guessed: an unwrapped delegate
+        does not compile, which is a visible failure, where the wrong funcdef
+        would compile and bind the wrong callback.
+        """
+        if fn is None:
+            return ""
+        want = (fn.return_type.format(),
+                tuple(p.format() for p in fn.param_types))
+        hits = []
+        for fd in getattr(self.m, "funcdefs", ()) or ():
+            if fd is None:
+                continue
+            if (fd.return_type.format(),
+                    tuple(p.format() for p in fd.param_types)) == want:
+                hits.append((fd.namespace_ + "::" if fd.namespace_ else "") + fd.name)
+        return hits[0] if len(hits) == 1 else ""
 
     def _call_ptr(self, ins: Instr) -> None:
         self._flush_pending_call()
@@ -3099,7 +3132,9 @@ class Structurer:
                         self.out.append((indent, "do {"))
                         self._block(indent + 1, t_idx, end - 1,
                                     LoopCtx(e.data[1], e.pos, e.pos, e.pos + 2))
-                        self.out.append((indent, f"}} while {e.data[0]};"))
+                        # `_condition`, not the raw text: this site emitted
+                        # `} while (local_4 - local_1) < 1;` on Crazy Party.
+                        self.out.append((indent, f"}} while {_condition(e.data[0])};"))
                         return
 
         i = start
