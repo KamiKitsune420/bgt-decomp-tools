@@ -1143,6 +1143,27 @@ Three things it settles that were guesses before:
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
 
+### What the documentation does not say, the engine will
+
+A signature is not semantics, and recovered source is only as meaningful as
+the primitives it calls. These were put to `bgt.exe` directly -- a script
+that calls each one and writes the result to a file through `file::write`,
+compared byte for byte against Python:
+
+| primitive | what it actually does |
+|---|---|
+| `string_hash(s, 2, true)` | raw SHA-512, 64 bytes, NULs and all |
+| `string_reverse(s)` | reverses **bytes**, not characters |
+| `string_base64_encode(s)` | standard alphabet, standard `=` padding |
+| `string_mid(s, start, count)` | **1-based**: `(s, 5, 4)` of `0123456789abcdef` is `4567` |
+
+`string_mid` is the one worth the trouble. Nothing in a decompiled body can
+settle 1-based against 0-based -- both read perfectly -- so every recovered
+`string_mid(x, n, k)` is `x[n-1 : n-1+k]`, and reading it as `x[n : n+k]` is
+off by one in a way that only shows up in the output. The same probe shape
+settles any other primitive the same way, and it is cheaper than arguing
+about it.
+
 ## Which BGT compiled it, and an entry script that declares something
 
 Two things that between them cost a user an afternoon, both because the
@@ -2020,7 +2041,9 @@ point, and returned the iteration whose 64 bytes held the most NUL bytes. Read t
 function out of the recovered bytecode rather than guessing - the raw disassembly is
 clearer than the lifted output here, because the selection loop lifts poorly.
 
-Note `string_hash(data, algorithm=2, binary)` is **SHA-512**.
+Note `string_hash(data, algorithm=2, binary)` is **SHA-512**, verified against
+the engine along with `string_reverse`, `string_base64_encode` and
+`string_mid` -- see **What the documentation does not say, the engine will**.
 
 Titles differ in whether they use one global key or a key per file - `tag_index()`
 shows which immediately, and that decides whether one password is enough.
