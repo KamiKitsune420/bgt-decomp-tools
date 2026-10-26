@@ -2228,6 +2228,49 @@ def test_dialect_probe_reads_a_tagged_module():
     assert "tagged" in bgt_unpack.angelscript_probe(head)
 
 
+def test_instruction_count_is_bounded_by_the_stream_not_a_constant():
+    """A real function can be larger than any round number you pick.
+
+    The guard was `count > 1 << 20`, and Crazy Party's generated
+    `ajouteLangue` declares 1,074,460 instructions -- which decodes to exactly
+    that many and ends on `RET`. The guess was the only thing standing between
+    that title and a full parse, so the bound is now the bytes remaining,
+    since every instruction costs at least its opcode byte.
+    """
+    body = _eu(4) + bytes([1, 1, 1, 0])            # 4 instructions: SUSPEND x3, RET
+    r = as_module.Reader(body, as_module.LEN2, 0, opcodes=_TEST_OPCODES)
+    count, span = r.bytecode()
+    assert count == 4 and span == (len(_eu(4)), len(body))
+
+    # A count larger than the bytes left cannot be real, and still raises.
+    too_big = _eu(5000) + bytes([1, 1, 0])
+    r = as_module.Reader(too_big, as_module.LEN2, 0, opcodes=_TEST_OPCODES)
+    try:
+        r.bytecode()
+    except as_module.ParseError as exc:
+        assert "bytes left" in str(exc), exc
+    else:
+        raise AssertionError("a count past the end of the stream was accepted")
+
+
+def test_the_delegate_factory_is_known_by_either_name():
+    """Its record is the name alone, and the name differs between builds.
+
+    Nothing in the stream says so: read on and the next field is taken as a
+    parameter count. Crazy Party spells it `%delegate_factory` and that cost
+    a table 200 entries in, reported as an inOutFlag count of 660 against 28
+    parameters.
+    """
+    for spelling in (b"$dlgte", b"%delegate_factory"):
+        raw = (bytes([0x61]) + _eu(len(spelling) * 2) + spelling + bytes([0xFF, 0xFF, 0xFF]))
+        r = as_module.Reader(raw, as_module.LEN2, 0)
+        rec = r.used_function()
+        assert rec["name"] == spelling.decode()
+        assert rec["params"] == [] and rec["funcType"] is None
+        # Nothing after the name belongs to this record.
+        assert r.p == 1 + len(_eu(len(spelling) * 2)) + len(spelling)
+
+
 if __name__ == "__main__":
     failures = 0
     for _name, _fn in sorted(globals().items()):

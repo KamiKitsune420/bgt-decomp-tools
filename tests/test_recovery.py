@@ -863,3 +863,68 @@ def test_a_return_still_ends_its_block():
     "Unreachable code" warning and waits on it."""
     kept = decompile._drop_unreachable(["    return 1;", "    return 1;"])
     assert kept == ["    return 1;"]
+
+
+# -- parentheses after if/while ---------------------------------------------
+
+def test_a_condition_gets_parentheses_unless_they_already_enclose_it():
+    """`(0 + 2) < (x)` begins with `(` and ends with `)` and encloses nothing.
+
+    A `startswith`/`endswith` test said it was already parenthesised, so
+    nothing was added and the output read `while (0 + 2) < (x) {`. That was
+    110 of Crazy Party's compiler errors, across `while` and `do while`. The
+    file already had `_encloses` for this question; the condition wrapper was
+    asking a different, wrong one.
+    """
+    assert decompile._condition("(0 + 2) < (x)") == "((0 + 2) < (x))"
+    assert decompile._condition("(a) + (b)") == "((a) + (b))"
+    assert decompile._condition("x") == "(x)"
+    # ...and a condition that really is enclosed is left alone.
+    assert decompile._condition("(a && b)") == "(a && b)"
+
+
+def test_the_delegate_factory_renders_as_a_delegate():
+    """Both spellings bind an object and a method; neither is a callable name.
+
+    Left as the factory's own name, Crazy Party emitted
+    `fadeOut(arg0, %delegate_factory(), arg1)` 132 times. BGT 1.3 compiles the
+    delegate form `CbFade(this.att)`, which was checked by putting it to the
+    compiler rather than assumed.
+    """
+    assert "$dlgte" in decompile.DELEGATE_FACTORIES
+    assert "%delegate_factory" in decompile.DELEGATE_FACTORIES
+
+
+def test_a_global_call_shadowed_by_a_method_is_qualified():
+    """`::f(...)` when the enclosing class has its own `f`.
+
+    Crazy Party's `Case::lanceMenu` calls the *global* 8-parameter
+    `lanceMenu`. Unqualified, the class's own 6-parameter method shadows it
+    and the compiler reports a 6-parameter candidate called with 8 arguments
+    -- which reads like a decompiler arity bug and is a scoping one. BGT
+    accepts `::f(...)`; that was checked against the compiler.
+    """
+    class Fn:
+        def __init__(self, name):
+            self.name = name
+
+    class Ti:
+        def __init__(self, methods, base=None):
+            self.methods, self.derived_from = methods, base
+
+    class Stub:
+        pass
+
+    stub = Stub()
+    stub.fn = Fn("caller")
+    stub.fn.object_type = Ti([Fn("lanceMenu")])
+    assert decompile.FuncDecompiler._shadowed_by_enclosing_class(stub, "lanceMenu")
+    assert not decompile.FuncDecompiler._shadowed_by_enclosing_class(stub, "other")
+
+    # An inherited method shadows just as well.
+    stub.fn.object_type = Ti([], base=Ti([Fn("inherited")]))
+    assert decompile.FuncDecompiler._shadowed_by_enclosing_class(stub, "inherited")
+
+    # A free function with no enclosing class needs no qualification.
+    stub.fn.object_type = None
+    assert not decompile.FuncDecompiler._shadowed_by_enclosing_class(stub, "anything")

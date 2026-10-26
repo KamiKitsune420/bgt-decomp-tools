@@ -25,9 +25,11 @@ a **PE overlay** — past the last section, so it is never mapped into memory an
 section dump will show it.
 
 The important property: **the runtime is the same across titles.** BGT games do not
-need per-title reverse engineering. This has been confirmed against three unrelated
-shipped titles spanning 2014–2019 — same trailer, same key, same container magic,
-same compression, same pack format, all opened by this toolchain unmodified.
+need per-title reverse engineering. This has been confirmed against six unrelated
+shipped titles — same trailer, same key, same container magic, same
+compression, same pack format, all opened by this toolchain unmodified. The two
+that needed a change needed it in *this reader's guesses*, not in the format: a
+hardcoded size limit and one spelling of a name (see **Crazy Party** below).
 
 The corollary is worth stating because it is a common assumption: a developer
 shipping several BGT games is almost certainly shipping **stock BGT**. If a title
@@ -348,6 +350,7 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | Manamon 2 | len2 | 1,604 / 1,604 | 9,924 | ends exactly at EOF |
 | SBYW | tagged | 154 / 154 | 2,348 | ends exactly at EOF |
 | Super Egg Hunt | tagged | 10 / 10 | 141 | ends exactly at EOF |
+| Crazy Party | tagged | 550 / 550 | 4,486 | ends exactly at EOF |
 
 Super Egg Hunt is the fifth, and the first picked up cold after all of the
 above: `bgt validate` passed it on every stage, byte-exact rewrite included,
@@ -1044,7 +1047,7 @@ checks say:
 | Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | — | — | — | — | — | does not parse yet (see below) |
+| Crazy Party | 190,277 | 559 | 17 | 0 | yes | see below |
 
 **Two titles compile clean and run.** `bgt compile --run` on the recovered
 project reports `compiled with 1 warning(s), and ran: it opened a window of
@@ -1591,45 +1594,69 @@ not that your edit makes sense. Renaming a literal is safe; changing an
 instruction's stack effect or pointing a `CALL` outside `usedFunctions` yields a
 module that loads and then misbehaves.
 
-**Crazy Party does not parse, and it is the first title that does not.** It is
-the sixth, and the biggest by a wide margin: a 9.3 MB module, `tagged`
-dialect, 550 classes. Everything up to the module is unaffected -- stock key
-seed, stock container, the overlay decrypts and decompresses -- and so is most
-of the module: 11 enums, **550 / 550 class declarations, 550 / 550 class
-blocks**, 132 global properties, and **806 of its 883 module functions**, each
-decoding to exactly its declared instruction count.
+**Crazy Party was the sixth title, and the first that did not parse. It was
+not a new format.** It is the biggest by a wide margin -- a 9.3 MB module,
+`tagged` dialect, 550 classes, 4,486 bodies -- and two *guesses in this
+reader* were the entire obstacle. Both are the same mistake in different
+clothes: a round number, and one spelling of a name.
 
-Then one record will not read. `void ajouteLangue()` at `0x2B3177` has a valid
-`'f'` tag, name, return type, zero parameters, funcType 1, no owner and an
-empty namespace -- and the four bytes where its instruction count belongs,
-`70 10 65 1c`, decode to 1,074,460, which is more instructions than the rest
-of the file could hold. The other 38 failures are that one desync cascading;
-the resynchroniser limps to the end of the section, and the global-function
-count after it is garbage, so `tail()` refuses at `0x2EB831`.
+- **A sanity guard rejecting real data.** The instruction count was checked
+  against `1 << 20`. Crazy Party generates part of its own source, and the
+  generated `ajouteLangue` declares **1,074,460** instructions, which walk to
+  exactly that count and end on `RET`. The bound is now the bytes remaining,
+  since every instruction costs at least its opcode byte. That is exact where
+  the constant was a guess, and the constant was the only thing between this
+  title and a full parse.
+- **The delegate factory has two names.** `usedFunctions[334]` is
+  `%delegate_factory`; the reader knew only `$dlgte`. That record is the name
+  alone, and nothing in the stream says so, so reading on takes the next
+  field as a parameter count — which surfaced 200 entries later as an
+  "inOutFlag count 660 > 28 params". Both spellings are known now.
 
-What has been ruled out, so a next pass need not redo it: it is not the byte
-count (every alignment from `-8` to `+8` was tried, and each fails inside the
-body or on the record after it); it is not a missing flags byte, because with
-one skipped the object-variable section does not read either; and it is not a
-long body misread, because no offset anywhere near the record disassembles a
-clean run to a `RET` of the right length. The declaration sections being
-exact to the last class block means the desync starts *in this record*.
+With those two, **every stage passes, byte-exact rewrite included**, and the
+module recovers to 190,277 lines across 559 files with 0 unmodelled opcodes
+and 0 bodies that failed.
 
-So this is the case the conventions were written for: **read the reader**.
-`asCReader::ReadFunction` is statically linked into `Crazy Party.exe`, and
-the branch it takes for a funcType-1 module function in that build is the
-answer. `bgt ghidra decompile "Crazy Party.exe" --string _builtin_function_`
-is where that starts.
+It then found three things on the *decompiler* side, each of which had been
+latent because no earlier title happened to need it:
+
+- **A delegate is not a call to the factory.** The handling existed and was
+  right — bind the object and method, take the funcdef type from the
+  following `STOREOBJ` — but matched `$dlgte` only, so 132 sites emitted
+  `fadeOut(arg0, %delegate_factory(), arg1)`. The source is
+  `fadeOut(arg0, CbFade(this.att), arg1)`, and BGT 1.3 compiles that form:
+  asked directly, rather than assumed.
+- **`_condition` asked the wrong question.** It tested
+  `startswith("(") and endswith(")")`, which is true of `(0 + 2) < (x)` —
+  a string enclosing nothing — so it added no parentheses and emitted
+  `while (0 + 2) < (x) {`. 110 errors, in `while` and `do while` alike. The
+  file already had `_encloses` for exactly this; the wrapper was not using it.
+- **A global function a method shadows needs its scope said out loud.**
+  `Case::lanceMenu` calls the *global* 8-parameter `lanceMenu`; unqualified,
+  the class's own 6-parameter method shadows it and the compiler reports a
+  6-parameter candidate called with 8 arguments, which reads like an arity
+  bug in the lifter and is a scoping one. `::lanceMenu(...)` is what source
+  would write, and the compiler accepts it. The change alters no output at
+  all on the other titles, which is how a fix of this shape should look.
 
 **Crazy Party generates part of its own source**, which is worth knowing
 before reading its code and is the one real exception to the note above about
 file names. `genereHelp` and `genereAjouteLangue` emit `.bgt` text at runtime --
-the module carries literals like `// ce code est généré
-automatiquement par la fonction genereAjouteLangue`, `void ajouteLangue() {`
-and the file names `help.bgt` and `ajouteLangue.bgt`. Those are real names of
-the game's own source files, but they are a *generator's output*, not a record
-of the build, so they still do not give the compiler's file list. They do mean
-a string search for `.bgt` in this title finds source rather than a sound.
+the module carries literals like `// ce code est généré automatiquement
+par la fonction genereAjouteLangue`, `void ajouteLangue() {` and the file
+names `help.bgt` and `ajouteLangue.bgt`. Those are real names of the game's
+own source files, but they are a *generator's output*, not a record of the
+build, so they still do not give the compiler's file list. They do mean a
+string search for `.bgt` in this title finds source rather than a sound —
+and they explain why one function is a million instructions long.
+
+**What Ghidra contributed here was nothing, and that is worth recording.**
+The binary analysed fine (at a 5G heap; 2G runs out on this one), but the
+xref search for `LoadByteCode failed` found no referencing function. What
+cracked it was the self-verifying criteria the rest of this document is
+built on: a declared count that walks to exactly a `RET`, and a tail that
+lands exactly on EOF. Read the reader when the format is in question; when
+your *own* reader is in question, the checks are what tell you.
 
 **A fifth title may differ again.** Three builds produced two answers for the
 template-namespace field and two for the script-object flag. The fourth (SBYW)

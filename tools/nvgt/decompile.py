@@ -235,8 +235,15 @@ def _negate_cond(c: str) -> str:
 
 
 def _condition(c: str) -> str:
-    """AngelScript requires parentheses after if/while."""
-    return c if c.startswith("(") and c.endswith(")") else f"({c})"
+    """AngelScript requires parentheses after if/while.
+
+    Whether the text already has them is `_encloses`'s question, not a
+    `startswith`/`endswith` one: `(0 + 2) < (x)` begins with `(` and ends
+    with `)` while enclosing nothing, so the naive test added no
+    parentheses and emitted `while (0 + 2) < (x) {`. That was 110 of
+    Crazy Party's compiler errors, in `while` and `do while` alike.
+    """
+    return c if _encloses(c) else f"({c})"
 
 
 def _type_stack_size(dt: DataType) -> int:
@@ -418,6 +425,15 @@ def _member_array_sizes(c: TypeInfo) -> dict:
             if out[name] is None:
                 del out[name]
     return out
+
+
+# AngelScript's delegate factory, which binds an object and one of its
+# methods into a funcdef handle. Its name differs between versions, and
+# the call renders as `Type(object.method)` rather than as a call to it:
+# left as the factory's own name, Crazy Party emitted
+# `fadeOut(arg0, %delegate_factory(), arg1)` 132 times, which is not an
+# expression. BGT 1.3 compiles the delegate form, asked directly.
+DELEGATE_FACTORIES = ("$dlgte", "%delegate_factory")
 
 
 # A statement that ends its block. `goto` is not one of these; see
@@ -1900,7 +1916,7 @@ class FuncDecompiler:
         # from its `data_helper.list_keys()` branch too.
         self.obj_reg = None
         fr = ins.func_ref
-        if fr is not None and fr.name == "$dlgte":
+        if fr is not None and fr.name in DELEGATE_FACTORIES:
             method = self.stack.pop() if self.stack else Atom("raw", "<?method>")
             owner = self._deref(self.stack.pop()) if self.stack else Atom("raw", "<?owner>")
             expression = f"{owner.text}.{method.text.lstrip('@')}"
@@ -2252,6 +2268,16 @@ class FuncDecompiler:
                 calltxt = f"{meth}({', '.join(a.text for a in args)})"
         else:
             qualified = (fr.namespace_ + "::" if fr and fr.namespace_ else "") + base
+            # A global function the enclosing class also has a method for
+            # needs the global scope said out loud, or the method shadows it
+            # and the compiler reports the wrong candidate: Crazy Party's
+            # `Case::lanceMenu` calls the global 8-parameter `lanceMenu`, and
+            # unqualified that read as a 6-parameter method called with 8
+            # arguments. `::f(...)` was put to the compiler before being
+            # emitted.
+            if (fr is not None and fr.object_type is None and not fr.namespace_
+                    and self._shadowed_by_enclosing_class(base)):
+                qualified = "::" + base
             calltxt = f"{qualified}({', '.join(a.text for a in args)})"
 
         if has_out and pop_out is not None and pop_out.is_ptr \
@@ -2297,6 +2323,22 @@ class FuncDecompiler:
             self._stmt(f"{dest.text} = {txt};")
         else:
             self.value_reg = Atom("call", txt)
+
+    def _shadowed_by_enclosing_class(self, name: str) -> bool:
+        """Does the class this body belongs to declare a method of this name?
+
+        Only then does an unqualified call to a global function resolve to the
+        wrong thing. Inherited methods shadow too, so the bases are walked.
+        """
+        owner = self.fn.object_type
+        seen = set()
+        while owner is not None and id(owner) not in seen:
+            seen.add(id(owner))
+            for method in owner.methods or ():
+                if method is not None and method.name == name:
+                    return True
+            owner = getattr(owner, "derived_from", None)
+        return False
 
     def _call_ptr(self, ins: Instr) -> None:
         self._flush_pending_call()

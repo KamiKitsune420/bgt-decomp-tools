@@ -50,6 +50,10 @@ class ParseError(Exception):
 
 
 # (mask, match, value bits kept from the lead byte, extra bytes to read)
+# AngelScript's delegate factory, whose record is the name alone.
+DELEGATE_FACTORY = (b"$dlgte", b"%delegate_factory")
+
+
 _ENC_WIDTHS = (
     (0x7F, 0x7F, 0x00, 8),
     (0x7E, 0x7E, 0x01, 6),
@@ -349,8 +353,16 @@ class Reader:
             count = self.eu()
         finally:
             self._mute -= 1
-        if count < 0 or count > 1 << 20:
-            raise ParseError("implausible instruction count %d" % count)
+        # The only honest bound is the stream itself: every instruction costs
+        # at least its opcode byte, so a count larger than the bytes remaining
+        # cannot be real. A round constant here was a guess, and it was wrong
+        # -- `1 << 20` rejected Crazy Party's `ajouteLangue`, a generated
+        # function of 1,074,460 instructions that decodes to exactly its
+        # declared count and ends on `RET`. The guard was the only thing
+        # standing between that title and a full parse.
+        if count < 0 or count > len(self.d) - self.p:
+            raise ParseError("instruction count %d exceeds the %d bytes left"
+                             % (count, len(self.d) - self.p))
         # Recorded as a marker rather than a plain integer: the writer recounts
         # the instructions that follow, so inserting or removing one keeps the
         # declared count correct. It is a count of INSTRUCTIONS, not dwords.
@@ -373,10 +385,17 @@ class Reader:
     def function_signature(self) -> Dict[str, Any]:
         """asCReader::ReadFunctionSignature."""
         name = self.string()
-        if name == b"$dlgte":
+        if name in DELEGATE_FACTORY:
             # The delegate factory copies its whole signature from the engine's
-            # registered one and reads nothing further from the stream.
-            return {"name": "$dlgte", "funcType": None, "params": [], "owner": None}
+            # registered one and reads nothing further from the stream. Its
+            # name differs between AngelScript versions, and the stream gives
+            # no other sign: read on and the next field is taken as a
+            # parameter count. Crazy Party spells it `%delegate_factory`,
+            # and its `usedFunctions[334]` was where this showed up -- as an
+            # inOutFlag count of 660 against 28 parameters, 200 entries into a
+            # table that had been reading perfectly.
+            return {"name": name.decode("latin1"), "funcType": None,
+                    "params": [], "owner": None}
 
         ret = self.data_type()
         nparams = self.eu()
