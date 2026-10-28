@@ -221,6 +221,65 @@ class FoldSafetyTests(unittest.TestCase):
         self.assertNotIn(3, slots)
 
 
+    def test_an_object_slot_an_arm_constructs_belongs_to_that_arm(self):
+        """An object slot is written by a *behaviour*, not by an opcode that
+        names it.
+
+        A string is filled by pushing its address and calling the constructor
+        -- `PSF n` then `CALLSYS $beh0` -- so nothing in `_SLOT_WRITE_OPS`
+        mentions slot `n` at all. Paladin's `item_type_to_function` is
+        `arg0 == "healing potion" || arg0 == "medical miracle" || ...` over
+        one reused string slot; forced to be a variable, the four assignments
+        hoisted out ahead of the `if` and every comparison read the last, so
+        three of the four healing items were classified as something else.
+
+        **And a behaviour has two spellings.** The disassembler prints
+        `string::_beh_0_`, which is what a reader reaches for; the name the
+        IR carries is `$beh0`. Matching only the pretty one matched nothing,
+        silently -- the same trap as the delegate factory's
+        `%delegate_factory` / `$dlgte`.
+        """
+        from decompile import FuncDecompiler, Function
+
+        def op(name, pos, w_arg=0, w_arg2=0, dw_arg=0, jump_target=None,
+               func=None):
+            instr = Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                          w_arg=w_arg, w_arg2=w_arg2, dw_arg=dw_arg,
+                          jump_target=jump_target)
+            instr.func_ref = Function(name=func) if func else None
+            return instr
+
+        def build(behaviour):
+            #   CpyVtoR4 5 ; JLowZ -> arm ; SetV1 1,1 ; JMP -> merge
+            #   arm: PSF 2 ; CALLSYS <behaviour> ; CpyVtoV4 1,4
+            #   merge: CpyVtoR4 1
+            instrs = [
+                op("CpyVtoR4", 0, w_arg=5),
+                op("JLowZ", 1, jump_target=4),
+                op("SetV1", 2, w_arg=1, dw_arg=1),
+                op("JMP", 3, jump_target=7),
+                op("PSF", 4, w_arg=2),
+                op("CALLSYS", 5, func=behaviour),
+                op("CpyVtoV4", 6, w_arg=1, w_arg2=4),
+                op("CpyVtoR4", 7, w_arg=1),
+                op("RET", 8),
+            ]
+            sim = object.__new__(FuncDecompiler)
+            sim.instrs = instrs
+            sim.pos_of = {i.pos: k for k, i in enumerate(instrs)}
+            return sim._short_circuit_slots()
+
+        # the name the IR really carries
+        self.assertIn(2, build("$beh0"))
+        # ...the destructor marks it too: a slot torn down inside the arm was
+        # never one the enclosing scope owned
+        self.assertIn(2, build("$beh2"))
+        # ...and the spelling a reader would copy out of the disassembly
+        self.assertIn(2, build("_beh_0_"))
+        # an ordinary call on a slot is a READ, not a write: counting it would
+        # unforce a real local and fold its value into every use
+        self.assertNotIn(2, build("get_length"))
+
 class LiteralRenderingTests(unittest.TestCase):
     """A literal has to reach the engine as the bytes the module held.
 

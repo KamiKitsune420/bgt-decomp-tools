@@ -3385,10 +3385,43 @@ class FuncDecompiler:
             arm_idx = self.pos_of.get(_jump_target(ins))
             if arm_idx is None:
                 continue
-            for op in self.instrs[arm_idx:merge_idx]:
+            for index in range(arm_idx, merge_idx):
+                op = self.instrs[index]
                 if op.name in _SLOT_WRITE_OPS:
                     off = _s16(op.w_arg)
                     if off > 0:
+                        slots.add(off)
+                elif op.name == "PSF":
+                    # **An object slot is written by a behaviour, not by an
+                    # opcode that names it.** A string is filled by pushing
+                    # its address and calling the constructor -- `PSF n` then
+                    # `CALLSYS string::_beh_0_` -- and emptied by `_beh_2_`,
+                    # so no entry in `_SLOT_WRITE_OPS` mentions slot `n` at
+                    # all. A slot constructed or destroyed *inside* an arm
+                    # belongs to that arm: one declared outside is built and
+                    # torn down outside.
+                    #
+                    # Paladin's `item_type_to_function` is
+                    # `arg0 == "healing potion" || arg0 == "medical miracle"
+                    # || arg0 == "levelup erb" || arg0 == "perfect healing"`,
+                    # with one string slot reused for all four literals.
+                    # Forced to be a variable, the four assignments were
+                    # hoisted out ahead of the `if` and every comparison read
+                    # the last one, so three of the four healing items were
+                    # classified as something else.
+                    off = _s16(op.w_arg)
+                    if off <= 0:
+                        continue
+                    nxt = next((self.instrs[j] for j in range(index + 1, merge_idx)
+                                if self.instrs[j].name != "SUSPEND"), None)
+                    callee = getattr(getattr(nxt, "func_ref", None), "name", "")
+                    # **A behaviour has two spellings**, the same trap as the
+                    # delegate factory's `%delegate_factory` / `$dlgte`. The
+                    # disassembler prints `string::_beh_0_`, which is what a
+                    # reader sees and reaches for; the name the module stores
+                    # and the IR carries is `$beh0`. Matching only the pretty
+                    # one matched nothing at all, silently.
+                    if (callee or "").startswith(("$beh", "_beh_")):
                         slots.add(off)
         return slots
 

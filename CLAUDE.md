@@ -187,6 +187,31 @@ bgt ghidra install                                   # fetch it (asks first)
 bgt ghidra decompile game.exe --string _builtin_function_ -o readers.c
 ```
 
+**Analyse `bgt.exe` once and keep the project.** The engine is the authority
+for every "what does BGT actually do here?" question this document keeps
+asking, and `--project` makes asking cheap: the import and analysis take
+about fifteen minutes, and every query after that takes **about twenty
+seconds**.
+
+```bash
+bgt ghidra decompile "<BGT>/bgt.exe" --string factstub     --project <somewhere outside this repo>/bgt_ghidra_project --max-mem 4G
+```
+
+Two things about that, both learned the hard way on a 15.5 GB machine:
+
+- **The heap has to be 4G.** 2G dies with `OutOfMemoryError: Java heap space`
+  in `X86Analyzer`, and 5G dies *before* Java starts, with
+  `os::commit_memory ... The paging file is too small` -- which is the system
+  refusing the reservation rather than Ghidra needing it. 4G commits and
+  completes.
+- **A failed import leaves a project that cannot be retried into.** The
+  second attempt reuses the directory, finds no program in it, and aborts
+  with `No program files found within specified project folder: /`. Delete
+  the project directory and start over.
+
+Keep the project and its output outside this repository -- it is 25 MB of
+engine, not toolkit.
+
 Modules work both ways on purpose — run directly and the script's own directory is
 on `sys.path`; installed, the package-relative import resolves instead. Neither form
 needs a `sys.path` fixup at the call site.
@@ -2222,7 +2247,9 @@ it was written for. Instead `_short_circuit_slots()` finds the slots a merge
 carries its value through, from the bytecode alone, and those are excluded:
 
 * `dest`, which the merge's value arrives in on both paths;
-* every slot the **arm** writes, which holds part of the right-hand operand.
+* every slot the **arm** writes, which holds part of the right-hand operand;
+* every **object** slot the arm constructs or destroys, which no opcode in
+  that first list mentions at all -- see below.
 
 **The slot the jump tested is deliberately not one of them**, and that is the
 whole difference between this working and doing harm. The left-hand operand is
@@ -2237,6 +2264,52 @@ With both, all three titles hold at 0 residual gotos and a verified split, and
 `bgt libcheck --decompiler` scores identically before and after on every one
 of them -- 39/47 call sequences on Paladin, 43/47 on Super Egg Hunt, 129/153
 on Crazy Party -- which is the check that says no call was duplicated.
+
+#### An object slot is written by a behaviour, not by an opcode
+
+"Every slot the arm writes" means the slots named by an opcode that assigns
+to them, and a string is not one of those. It is filled by pushing its
+address and calling the constructor -- `PSF n` then `CALLSYS $beh0` -- and
+emptied by `$beh2`, so nothing that names slot `n` appears in the arm. A slot
+constructed *or* destroyed inside an arm belongs to that arm, by scope: one
+declared outside is built and torn down outside.
+
+Paladin's `item_type_to_function` is what that costs:
+
+```
+if (arg0 == "healing potion" || arg0 == "medical miracle"
+    || arg0 == "levelup erb" || arg0 == "perfect healing") return 0;
+```
+
+over one reused string slot. Forced to be a variable, the four assignments
+hoisted out ahead of the `if` and every comparison read the last of them --
+
+```
+local_2 = "healing potion";
+local_2 = "medical miracle";
+local_2 = "levelup erb";
+local_2 = "perfect healing";
+if ((((arg0 == local_2) || (arg0 == local_2)) || ...
+```
+
+-- so three of the four healing items were classified as something else. It
+compiles, it runs, and the only way to notice is to use a potion.
+
+**And a behaviour has two spellings**, which is the delegate factory's
+`%delegate_factory` / `$dlgte` all over again. The disassembler prints
+`string::_beh_0_`, which is what a reader sees and reaches for; the name the
+module stores and the IR carries is `$beh0`. Matching only the pretty one
+matched nothing, silently, and the output did not change by a single line.
+
+With it, Paladin recovers 83 lines shorter and `get_active_reader` -- whose
+four `return`s used to collapse into one `return WINDOW_EYES;` -- comes back
+as the accumulator the source wrote, from the same pass. What is left of this
+class is one case and it is the expensive one: a **computed** value bound on
+one path and read past the join, which `sound_pool`'s `true_y` clamp is
+(`if (listener_y < delta_backward) true_y = delta_backward;` folds away and
+the call receives `delta_forward` instead). Promoting computed values the
+same way took Paladin from 0 compiler errors to 16, so it stays open rather
+than guessed at, and the signature to grep for is an `if` with two empty arms.
 
 ### Typing the promoted local took three tries, and the declaration wins
 
