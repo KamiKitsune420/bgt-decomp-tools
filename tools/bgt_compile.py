@@ -61,7 +61,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 DEFAULT_COMPILERS = (
     r"C:\Program Files (x86)\BGT\bgt.exe",
@@ -279,6 +279,49 @@ SHELL_VERBS = ("open", "run", "compile", "compile_debug", "compile_release")
 _VERB_EXE = re.compile(r'^"([^"]+)"')
 
 
+#: Where the shell resolves a ProgID from, in the order it wins. `HKEY_CLASSES_ROOT`
+#: is the merged view and therefore the authoritative answer; the other two are
+#: named only so a failure can say which hive it came from. **HKCU outranks HKLM**,
+#: which is what makes a per-user override possible without an administrator -- and
+#: reading HKLM first, as this once did, reports the overridden value as the live one.
+_VERB_HIVES = ("HKEY_CLASSES_ROOT", "HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE")
+
+#: The key a verb's command lives under, per hive. HKCR is already rooted at the
+#: class table; the other two reach it through `SOFTWARE\\Classes`.
+_VERB_KEYS = {
+    "HKEY_CLASSES_ROOT": r"bgtscript\shell\%s\command",
+    "HKEY_CURRENT_USER": r"SOFTWARE\Classes\bgtscript\shell\%s\command",
+    "HKEY_LOCAL_MACHINE": r"SOFTWARE\Classes\bgtscript\shell\%s\command",
+}
+
+
+def verb_commands(hive: str = "HKEY_CLASSES_ROOT") -> Dict[str, str]:
+    """{verb: the whole command string} for a `.bgt` file, out of one hive.
+
+    The command and not just the executable, because repointing a verb has to
+    keep its switch: `open` and `run` pass the script bare, `compile` passes
+    `-c"%1"` and `compile_release` `-C"%1"`, and the switch is the difference
+    between compiling the script and running it.
+    """
+    if hive not in _VERB_HIVES:
+        raise ValueError("unknown hive %r; expected one of %s"
+                         % (hive, ", ".join(_VERB_HIVES)))
+    try:
+        import winreg
+    except ImportError:                      # not Windows
+        return {}
+    root = getattr(winreg, hive)
+    found: Dict[str, str] = {}
+    for verb in SHELL_VERBS:
+        try:
+            with winreg.OpenKey(root, _VERB_KEYS[hive] % verb) as handle:
+                command, _ = winreg.QueryValueEx(handle, "")
+        except OSError:
+            continue
+        found[verb] = str(command).strip()
+    return found
+
+
 def shell_verbs() -> Dict[str, str]:
     """{verb: bgt.exe} as the shell would run it for a `.bgt` file.
 
@@ -292,25 +335,117 @@ def shell_verbs() -> Dict[str, str]:
     That is a hundred errors in a project that compiles cleanly one verb over,
     and nothing in the report could see it, because the report only knew about
     the compiler *this toolkit* chose.
+
+    **Read the merged view, not HKLM.** This looked in HKLM first and stopped
+    there, which is the wrong way round: the shell reads `HKEY_CLASSES_ROOT`,
+    where a per-user key outranks the machine one. With an override in place
+    the old order went on reporting the *overridden* path, so the one check
+    that could confirm the fix would have denied it.
+    """
+    out: Dict[str, str] = {}
+    for verb, command in verb_commands().items():
+        match = _VERB_EXE.match(command)
+        if match and os.path.isfile(match.group(1)):
+            out[verb] = match.group(1)
+    return out
+
+
+#: The verbs a person reaches by hand, which are exactly the ones a stale
+#: install captures: double-clicking is `open`, "Run Script" is `run`, and
+#: "Compile Script" is `compile`. `compile_debug` and `compile_release` are
+#: left out because BGT's installer does not take them.
+HAND_VERBS = ("open", "run", "compile")
+
+
+def repoint_verbs(compiler: Optional[str] = None,
+                  verbs: Sequence[str] = HAND_VERBS,
+                  dry_run: bool = False) -> List[Tuple[str, str, str]]:
+    """Point the hand-reached shell verbs at a BGT that can parse a project.
+
+    Returns `(verb, was, now)` for each verb changed.
+
+    Three things decide the shape of this, and each one is why it is safe to
+    offer at all:
+
+    - **It writes HKCU, never HKLM.** The machine key needs an administrator
+      and would change the association for every account; the per-user key
+      needs neither and wins anyway. So this is a change one person can make
+      and one person can undo.
+    - **The undo is structural.** `restore_verbs()` deletes the override, and
+      HKLM's own value applies again *by construction* -- there is no saved
+      copy to lose, and no way for the restore to write a path that was never
+      there.
+    - **Only the executable is substituted.** The rest of the command string
+      is kept verbatim, so each verb keeps the switch that decides whether it
+      runs the script or compiles it. Rebuilding the command from a table of
+      switches would work until BGT's installer used a different one.
+
+    It refuses rather than guesses when the target cannot parse a default
+    argument: repointing a verb at a *second* engine with the same gap would
+    report success and change nothing that matters.
     """
     try:
         import winreg
     except ImportError:                      # not Windows
-        return {}
-    found: Dict[str, str] = {}
+        raise RuntimeError("shell verbs are a Windows thing")
+
+    target = find_compiler(compiler)
+    if not target:
+        raise RuntimeError("no bgt.exe found to point the verbs at")
+    if not capabilities(target).get("default_arguments", False):
+        raise RuntimeError(
+            "%s cannot parse default arguments either, so pointing the shell "
+            "at it would fix nothing. Pass --compiler with the path to a "
+            "BGT 1.3 install." % target)
+
+    live = verb_commands()
+    changed: List[Tuple[str, str, str]] = []
+    for verb in verbs:
+        command = live.get(verb)
+        if not command:
+            continue
+        match = _VERB_EXE.match(command)
+        if not match:
+            continue
+        was = match.group(1)
+        if os.path.normcase(was) == os.path.normcase(target):
+            continue
+        rebuilt = '"%s"%s' % (target, command[match.end():])
+        if not dry_run:
+            key = _VERB_KEYS["HKEY_CURRENT_USER"] % verb
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as handle:
+                winreg.SetValueEx(handle, "", 0, winreg.REG_SZ, rebuilt)
+        changed.append((verb, was, target))
+    return changed
+
+
+def restore_verbs() -> List[str]:
+    """Delete the per-user verb overrides, so the machine's own values apply.
+
+    Returns the verbs that had an override. Nothing is reconstructed: removing
+    the key that shadows HKLM is the whole undo, which is why this cannot put
+    back a path that was never registered.
+    """
+    try:
+        import winreg
+    except ImportError:                      # not Windows
+        return []
+    removed: List[str] = []
     for verb in SHELL_VERBS:
-        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            key = r"SOFTWARE\Classes\bgtscript\shell\%s\command" % verb
-            try:
-                with winreg.OpenKey(root, key) as handle:
-                    command, _ = winreg.QueryValueEx(handle, "")
+        # Deepest first: a key with subkeys cannot be deleted.
+        base = r"SOFTWARE\Classes\bgtscript\shell\%s" % verb
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, base + r"\command")
+        except OSError:
+            continue
+        removed.append(verb)
+        for dead in (base, r"SOFTWARE\Classes\bgtscript\shell",
+                     r"SOFTWARE\Classes\bgtscript"):
+            try:                             # only if now empty
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, dead)
             except OSError:
-                continue
-            match = _VERB_EXE.match(str(command).strip())
-            if match and os.path.isfile(match.group(1)):
-                found[verb] = match.group(1)
                 break
-    return found
+    return removed
 
 
 def verb_warnings(needs_default_args: bool = True) -> List[str]:

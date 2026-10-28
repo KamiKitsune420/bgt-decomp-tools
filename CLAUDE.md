@@ -126,7 +126,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `as_write.py` | writes a module back out — byte-exact round-trip, and length-changing edits |
 | `bgt_asir.py` | presents a BGT module as the AngelScript IR the NVGT decompiler reads |
 | `bgt_api.py` | `bgt api`: the engine's documented API, read out of the installed `bgt.chm` |
-| `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic |
+| `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
@@ -175,6 +175,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 bgt recover game.exe -o recovered/ --compile
 bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt compile recovered/game.bgt            # just the compiler, on any script
+bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 ```
 
 Extending the reader means reading `asCReader` out of the binary, and the Ghidra
@@ -1200,10 +1201,62 @@ installing 1.0 after 1.3 leaves three of them pointing at 1.0:
 | `compile_debug`, `compile_release` | BGT 1.3 |
 
 So a project that reports `compiled cleanly` here gives a hundred
-`Expected ')' or ','` on a double-click, which is how it was reported, and
-the fix is to use "Compile Script (Debug)". `bgt_compile.shell_verbs()`
-reads them out of the registry and `verb_warnings()` names any whose engine
-cannot parse what was just written.
+`Expected ')' or ','` on a double-click, which is how it was reported.
+`bgt_compile.shell_verbs()` reads them out of the registry and
+`verb_warnings()` names any whose engine cannot parse what was just written.
+
+### Repointing them, which needs no administrator
+
+Naming the fault is not fixing it, and "use Compile Script (Debug) instead"
+is a workaround a person has to remember every time. `bgt verbs` shows what
+the shell will run and `--repoint` changes it:
+
+```bash
+bgt verbs                      # what the shell runs for a .bgt file
+bgt verbs --repoint            # point open/run/compile at a BGT that parses this
+bgt verbs --restore            # remove the override again
+```
+
+Three things decide the shape of it, and each is what makes a change to
+somebody's machine safe to offer at all:
+
+- **It writes `HKEY_CURRENT_USER`, never `HKEY_LOCAL_MACHINE`.** The machine
+  key needs an administrator and would change the association for every
+  account on the box. The per-user key needs neither **and wins anyway**,
+  because `HKEY_CLASSES_ROOT` is a merged view in which HKCU outranks HKLM.
+- **The undo is structural, not a saved copy.** `--restore` deletes the
+  override and HKLM's own value applies again *by construction*. There is no
+  backup file to lose, and no way for a restore to write a path that was
+  never registered.
+- **Only the executable is substituted.** The rest of the command string is
+  kept verbatim, because the switch is the whole difference between running a
+  script and compiling it -- `open` passes it bare, `compile` passes
+  `-c"%1"`, `compile_release` `-C"%1"`. Rebuilding the command from a table
+  of switches would work right up until BGT's installer used a different one,
+  and a `compile` verb that quietly started *running* the game instead would
+  look exactly like a repoint that had worked.
+
+It refuses rather than guesses when the target cannot parse a default
+argument -- including when the probe was inconclusive -- since repointing a
+verb at a *second* engine with the same gap reports success and fixes
+nothing.
+
+**And the check that was supposed to confirm this would have denied it.**
+`shell_verbs()` read HKLM first and stopped on the first hit, which is the
+wrong way round: the shell resolves a ProgID through the merged view, where
+the per-user key wins. With an override in place the old order went on
+reporting the *overridden* path -- so the fix would have worked while the
+only thing able to see it said it had not. It reads `HKEY_CLASSES_ROOT` now,
+which is what the docstring always claimed.
+
+**Verified against the shell, not against the registry.** Reading your own
+write back through your own function proves nothing about what Windows will
+do with it. Two independent checks, in order of strength: `AssocQueryStringW`
+-- the shell's own resolver -- reports the 1.3 path for `open`, `run`,
+`compile` and for the *default* verb, which is the double-click; and a
+`ShellExecuteW` of a probe script whose only unusual feature is a default
+argument reaches `main()` and leaves its file behind, which BGT 1.0 could
+never do, because it stops at the `=`.
 
 Both installs were put to each failing shape rather than assumed:
 

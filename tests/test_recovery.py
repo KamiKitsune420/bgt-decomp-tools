@@ -1544,3 +1544,202 @@ def test_no_compiler_means_no_claim_about_it():
         assert bgt_compile.capabilities() == {}
     finally:
         bgt_compile.find_compiler = real
+
+
+class _FakeKey:
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeWinreg:
+    """Just enough of `winreg` to watch what repoint/restore would write.
+
+    `repoint_verbs` imports winreg *inside* the function, so substituting the
+    module in `sys.modules` reaches it without touching the machine's own
+    registry -- which matters, because a test that rewrites a file association
+    is a test that changes the computer it runs on.
+    """
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE = 0, 1, 2
+    REG_SZ = 1
+
+    def __init__(self, existing=None):
+        self.written = {}
+        self.deleted = []
+        self.existing = dict(existing or {})
+
+    def CreateKey(self, root, path):
+        return _FakeKey((root, path))
+
+    def SetValueEx(self, handle, name, reserved, kind, value):
+        self.written[handle.path] = value
+
+    def OpenKey(self, root, path, *rest):
+        if (root, path) not in self.existing:
+            raise OSError(2, "no such key")
+        return _FakeKey((root, path))
+
+    def QueryValueEx(self, handle, name):
+        return self.existing[handle.path], self.REG_SZ
+
+    def DeleteKey(self, root, path):
+        if (root, path) not in self.existing:
+            raise OSError(2, "no such key")
+        del self.existing[(root, path)]
+        self.deleted.append(path)
+
+
+def _with_fake_registry(body, existing=None, **patches):
+    """Run `body(fake)` with a fake winreg and `bgt_compile` attrs patched."""
+    fake = _FakeWinreg(existing=existing)
+    saved_module = sys.modules.get("winreg")
+    saved = {name: getattr(bgt_compile, name) for name in patches}
+    sys.modules["winreg"] = fake
+    try:
+        for name, value in patches.items():
+            setattr(bgt_compile, name, value)
+        return body(fake)
+    finally:
+        for name, value in saved.items():
+            setattr(bgt_compile, name, value)
+        if saved_module is None:
+            sys.modules.pop("winreg", None)
+        else:
+            sys.modules["winreg"] = saved_module
+
+
+def test_the_merged_view_is_what_the_shell_reads_not_hklm():
+    """HKCU outranks HKLM, and reading them the other way round hides the fix.
+
+    `shell_verbs` used to try HKLM first and stop on the first hit. The shell
+    resolves a ProgID through `HKEY_CLASSES_ROOT`, where a per-user key wins --
+    so once `bgt verbs --repoint` writes that key, the old order went on
+    reporting the *overridden* path. The one check able to confirm the repoint
+    would have denied it, which is the worst shape a check can have.
+    """
+    assert bgt_compile._VERB_HIVES[0] == "HKEY_CLASSES_ROOT"
+    hives = list(bgt_compile._VERB_HIVES)
+    assert hives.index("HKEY_CURRENT_USER") < hives.index("HKEY_LOCAL_MACHINE")
+    # HKCR is already rooted at the class table; the other two are not, and a
+    # missing `SOFTWARE\Classes` would read nothing while looking fine.
+    assert bgt_compile._VERB_KEYS["HKEY_CLASSES_ROOT"].startswith("bgtscript")
+    # The hive name is validated against that same tuple, so the list and the
+    # lookup cannot drift apart without something failing.
+    try:
+        bgt_compile.verb_commands("HKEY_USERS")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown hive must be refused, not guessed")
+    for hive in ("HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE"):
+        assert bgt_compile._VERB_KEYS[hive].startswith("SOFTWARE" + chr(92) + "Classes")
+
+
+def test_repointing_a_verb_keeps_the_switch_that_decides_what_it_does():
+    """Only the executable is substituted, never the rest of the command.
+
+    The switch is the whole difference between running a script and compiling
+    it -- `open` passes it bare, `compile` passes `-c"%1"` and
+    `compile_release` `-C"%1"`. Rebuilding the command from a table of
+    switches would work right up until BGT's installer used a different one,
+    and a verb that silently started *running* a game instead of compiling it
+    would look exactly like a repoint that had worked.
+    """
+    old = "C:" + chr(92) + "BGTV1.0" + chr(92) + "bgt.exe"
+    new = "C:" + chr(92) + "BGT" + chr(92) + "bgt.exe"
+    commands = {"open": '"%s" "%%1"' % old,
+                "run": '"%s" "%%1"' % old,
+                "compile": '"%s" -c"%%1"' % old}
+
+    result = {}
+
+    def body(fake):
+        result["changed"] = bgt_compile.repoint_verbs()
+        result["written"] = dict(fake.written)
+
+    _with_fake_registry(body,
+                        verb_commands=lambda *a, **k: dict(commands),
+                        capabilities=lambda exe: {"default_arguments": True},
+                        find_compiler=lambda explicit=None: new)
+
+    changed = result["changed"]
+    assert [v for v, _, _ in changed] == ["open", "run", "compile"]
+    assert all(was == old and now == new for _, was, now in changed)
+    written = {path[1].split(chr(92))[-2]: value
+               for path, value in result["written"].items()}
+    assert written["open"] == '"%s" "%%1"' % new
+    assert written["run"] == '"%s" "%%1"' % new
+    assert written["compile"] == '"%s" -c"%%1"' % new     # the switch survived
+
+
+def test_repointing_refuses_an_engine_with_the_same_gap():
+    """Pointing the shell at a second BGT 1.0 would report success and fix
+    nothing. An inconclusive capability is refused the same way: this writes
+    to the user's machine, so it declines rather than guesses."""
+    commands = {"open": '"C:' + chr(92) + 'old.exe" "%1"'}
+
+    for caps in ({"default_arguments": False}, {}):
+        seen = {}
+
+        def body(fake, caps=caps, seen=seen):
+            try:
+                bgt_compile.repoint_verbs()
+            except RuntimeError as exc:
+                seen["error"] = str(exc)
+            seen["written"] = dict(fake.written)
+
+        _with_fake_registry(body,
+                            verb_commands=lambda *a, **k: dict(commands),
+                            capabilities=lambda exe, caps=caps: dict(caps),
+                            find_compiler=lambda explicit=None: "C:" + chr(92) + "other.exe")
+        assert "error" in seen, "a compiler with the same gap must be refused: %r" % caps
+        assert seen["written"] == {}, "a refusal must not have written anything"
+
+
+def test_repointing_is_idempotent_and_leaves_a_correct_verb_alone():
+    """A verb already on the right engine is not rewritten, so running this
+    twice does not accumulate per-user keys -- and `--repoint` on a healthy
+    machine reports honestly that there was nothing to do. The comparison is
+    case-insensitive because the registry's spelling of a path is not."""
+    good = "C:" + chr(92) + "BGT" + chr(92) + "bgt.exe"
+    result = {}
+
+    def body(fake):
+        result["changed"] = bgt_compile.repoint_verbs()
+        result["written"] = dict(fake.written)
+
+    _with_fake_registry(body,
+                        verb_commands=lambda *a, **k: {
+                            "open": '"%s" "%%1"' % good,
+                            "compile": '"%s" -c"%%1"' % good.lower()},
+                        capabilities=lambda exe: {"default_arguments": True},
+                        find_compiler=lambda explicit=None: good)
+    assert result["changed"] == []
+    assert result["written"] == {}
+
+
+def test_the_undo_is_structural_rather_than_a_saved_copy():
+    """`restore_verbs` deletes the override and HKLM's value applies again by
+    construction. There is no backup file to lose and no way for the restore
+    to write a path that was never registered -- which is what makes changing
+    the association safe to offer at all."""
+    hkcu = _FakeWinreg.HKEY_CURRENT_USER
+    base = "SOFTWARE" + chr(92) + "Classes" + chr(92) + "bgtscript" + chr(92) + "shell"
+    existing = {(hkcu, base + chr(92) + "open" + chr(92) + "command"): "x",
+                (hkcu, base + chr(92) + "run" + chr(92) + "command"): "y"}
+    result = {}
+
+    def body(fake):
+        result["removed"] = bgt_compile.restore_verbs()
+        result["written"] = dict(fake.written)
+        result["deleted"] = list(fake.deleted)
+
+    _with_fake_registry(body, existing=existing)
+    assert result["removed"] == ["open", "run"]
+    assert result["written"] == {}, "an undo writes nothing, it only removes"
+    assert all("command" in path for path in result["deleted"])

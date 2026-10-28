@@ -19,6 +19,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt gui                                a window for the above (wxPython)
     bgt compile recovered/game.bgt         BGT's own compiler, every diagnostic
     bgt api garbage_collect                what the engine documents, from bgt.chm
+    bgt verbs [--repoint]                  which BGT the shell runs for a .bgt
     bgt validate game.exe patched.exe
     bgt libcheck work/game_bytecode.bin game.exe   recovered code vs BGT's own library
                [--decompiler]                       source: the lifter, or `bgt recover`
@@ -305,6 +306,57 @@ def cmd_gui(args: argparse.Namespace) -> int:
 def cmd_compile(args: argparse.Namespace) -> int:
     """Everything after `bgt compile` is handled by bgt_compile's own parser."""
     return _run(bgt_compile.main, args.rest, prog="bgt compile")
+
+
+def cmd_verbs(args: argparse.Namespace) -> int:
+    """Which BGT the shell runs for a `.bgt` file, and optionally fix it.
+
+    This exists because the answer is not the one anybody expects: BGT's
+    installer registers five verbs and the *newest install does not win*, so
+    running a recovered game from source can use an engine that cannot parse
+    what `bgt recover` just wrote, while this toolkit's own check -- which
+    picks its compiler itself -- reports the project clean.
+    """
+    if args.restore:
+        removed = bgt_compile.restore_verbs()
+        if not removed:
+            print("no per-user overrides to remove; the machine's own verbs apply")
+        else:
+            print("removed the per-user override for: %s" % ", ".join(removed))
+
+    elif args.repoint:
+        try:
+            changed = bgt_compile.repoint_verbs(compiler=args.compiler,
+                                                dry_run=args.dry_run)
+        except RuntimeError as exc:
+            return _fail(str(exc))
+        if not changed:
+            print("nothing to change: every hand-reached verb already runs a "
+                  "BGT that parses default arguments")
+        for verb, was, now in changed:
+            print("%s %-8s %s" % ("would repoint" if args.dry_run else "repointed",
+                                  verb, was))
+            print("%s %-8s -> %s" % (" " * 13, "", now))
+        if changed and not args.dry_run:
+            print()
+            print("Written to HKEY_CURRENT_USER, which outranks the machine "
+                  "key and needs no administrator.")
+            print("Undo with: bgt verbs --restore")
+
+    verbs = bgt_compile.verb_commands()
+    if not verbs:
+        print("no `.bgt` shell verbs are registered (is BGT installed?)")
+        return 0
+    print()
+    print("what the shell runs for a .bgt file:")
+    for verb in bgt_compile.SHELL_VERBS:
+        if verb not in verbs:
+            continue
+        hand = " <- by hand" if verb in bgt_compile.HAND_VERBS else ""
+        print("  %-16s %s%s" % (verb, verbs[verb], hand))
+    for note in bgt_compile.verb_warnings():
+        print("  ! %s" % note)
+    return 0
 
 
 def cmd_files(args: argparse.Namespace) -> int:
@@ -609,6 +661,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--missing", action="store_true")
     p.add_argument("--json", metavar="FILE")
     p.set_defaults(func=cmd_api)
+
+    p = sub.add_parser("verbs",
+                       help="which BGT the shell runs for a .bgt file, and fix it")
+    p.add_argument("--repoint", action="store_true",
+                   help="point open/run/compile at a BGT that parses this source")
+    p.add_argument("--restore", action="store_true",
+                   help="remove the per-user override again")
+    p.add_argument("--compiler", help="the bgt.exe to point them at")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_verbs)
 
     p = sub.add_parser("files",
                        help="which source files a module was built from (BGT or NVGT)")
