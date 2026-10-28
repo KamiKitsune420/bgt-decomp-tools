@@ -1077,7 +1077,7 @@ checks say:
 | Paladin of the Sky | 28,223 | 61 | 0 | 0 | yes | 7,145 | **compiled cleanly, and it runs** |
 | Psycho Strike | 28,067 | 75 | 0 | 0 | yes | 6,462 | 33, every one the engine's |
 | Manamon 2 | 175,032 | 1,638 | 4 | 0 | yes | 51,249 | 33 parse errors, so **nothing** |
-| Crazy Party | 195,364 | 558 | 0 | 0 | yes | 90,606 | **compiled cleanly, and it runs** |
+| Crazy Party | 196,488 | 560 | 0 | 0 | yes | 90,494 | **compiled cleanly, and it runs** |
 
 The line and goto counts are a fresh run of all five, not the figures this
 table carried before: Manamon 2's gotos are 4 rather than 6, and the rest
@@ -2121,9 +2121,9 @@ funcdef's, not the variable's.
 | Psycho Strike | 6,462 | 33, every one the engine's |
 | Paladin of the Sky | 7,145 | compiled cleanly |
 | Manamon 2 | 51,249 | **nothing** -- 33 parse errors stop it |
-| Crazy Party | 90,606 | compiled cleanly |
+| Crazy Party | 90,494 | compiled cleanly |
 
-**157,069 calls, and not one mismatch.** That is worth nothing on its own --
+**156,957 calls, and not one mismatch.** That is worth nothing on its own --
 a check that reports nothing may simply be blind -- so it is measured in
 both directions. Injecting a defect into the recovered text finds it every
 time: an argument dropped from `string_replace(a, b, c, d)`, an argument
