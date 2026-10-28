@@ -149,6 +149,17 @@ def read(chm: Optional[str] = None, cache: Optional[str] = None) -> Dict[str, ob
                 match = SIGNATURE.match(line)
                 if match:
                     name = match.group("name").split("::")[-1]
+                    # **A reference page is named after the one API it
+                    # documents.** Every other signature on it is example
+                    # code -- `garbage_collect`'s page defines
+                    # `generate_garbage`, `get_call_stack`'s defines
+                    # `first_dummy_method`, `serialize`'s defines `save`.
+                    # Counted as API, those eleven tutorial names made the
+                    # list this module exists to be: a name it wrongly holds
+                    # is a gap it will not report. The PROPERTY branch below
+                    # has always applied exactly this rule.
+                    if name != page:
+                        continue
                     if owner:
                         entry = types.setdefault(owner, {"methods": [], "properties": []})
                         if line not in entry["methods"]:
@@ -174,13 +185,136 @@ def documented(api: Dict[str, object]) -> set:
     return set(api["functions"]) | set(api["types"])        # type: ignore[arg-type]
 
 
-def missing(names: Sequence[str], api: Dict[str, object]) -> List[str]:
-    """Which of these names the installed engine does not document.
+#: An AngelScript declaration, as the engine hands it to `RegisterX`. The
+#: return type may be a template (`array<T>@`), an array (`string[]@`) or a
+#: handle, and a method's may end in `const`. The first version of this
+#: rejected an array return, so `string[]@ find_files(string& in)` read as
+#: four functions the engine did not have -- which is this repository's own
+#: lesson about an extractor that answers anyway, in a new costume.
+_REG_TYPE = (r"(?:const\s+)?[A-Za-z_]\w*(?:<[^<>()]*>)?(?:\s*\[\s*\])?")
+#: The handle or reference marker may sit against either side: the engine
+#: writes a factory `network_event @f()` and a getter `network_event@
+#: request()`, so a rule that demands whitespace between the type and the
+#: name finds the second and silently loses all eighteen of the first.
+REGISTRATION = re.compile(r"^(?P<ret>%s)\s*(?P<mark>[@&](?:\s*(?:in|out|inout))?)?"
+                          r"\s*(?P<name>[A-Za-z_]\w*)\s*"
+                          r"\((?P<params>[^()]*)\)(?:\s*const)?$" % _REG_TYPE)
+#: A declaration's parameters are *types*. `All Files (*.*)` and `BGT
+#: Scripts (*.bgt)` are file-dialog filters shaped exactly like a
+#: declaration, and this is what tells them apart.
+_PARAM = re.compile(r"^(?:const\s+)?(?:\?|[A-Za-z_]\w*)")
+
+
+def registered(exe: Optional[str] = None) -> Dict[str, List[str]]:
+    """The engine's **registered** interface, read out of `bgt.exe` itself.
+
+    AngelScript registers everything by handing the engine a declaration
+    *string*, so the whole interface is a literal in the binary -- exact
+    parameter types, `&in`/`&out`, `const`, and the default arguments the
+    engine gives its own functions. That makes the executable a stronger
+    oracle than the help file for the one question this module is asked:
+    BGT 1.3 registers `string_compress`, `string_decompress`, `crc32`,
+    `add_fx`, `delete_fx`, `hex_string_to_number`, `screen_reader_braille`
+    and `string_create_from_pointer`, and documents **none** of them --
+    while Paladin's save path calls `string_compress`. Asked of the
+    documentation alone, "does this engine have that?" answered no.
+
+    It registers two types the help file omits as well, `network_event` and
+    `library_structure`, so a game using either would have been reported as
+    needing a newer engine than the one installed.
+
+    The two sources answer different questions and neither subsumes the
+    other: a signature here has no parameter names, and the five documented
+    `position_sound_*`/`convert_to_currency` functions are not registered at
+    all because they are *library* code in `include/*.bgt`, which recovers
+    like any other script. Returns `{}` when no executable can be found.
+    """
+    if exe is None:
+        try:                                     # imported late on purpose:
+            from . import bgt_compile            # only finding the exe needs
+        except ImportError:                      # the compiler driver, and
+            import bgt_compile                   # nothing else here does
+        exe = bgt_compile.find_compiler()
+    if not exe or not os.path.isfile(exe):
+        return {}
+    try:
+        with open(exe, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for match in re.finditer(rb"[\x20-\x7e]{5,}", data):
+        text = match.group().decode("latin1").strip()
+        found = REGISTRATION.match(text)
+        if found is None:
+            continue
+        # **A return type and a name must be separated by something.** The
+        # type pattern backtracks, so a bare `send()` splits into a return
+        # type `sen` and a function `d` -- which is how four names out of
+        # the import table became registered types. Whitespace or the
+        # handle marker is that something, and there is always one.
+        if found.start("name") == found.end("ret"):
+            continue
+        if any(not _PARAM.match(p.strip())
+               for p in found.group("params").split(",") if p.strip()):
+            continue
+        out.setdefault(found.group("name"), []).append(text)
+    return out
+
+
+#: A type as it appears inside a declaration: `const network_event &in`,
+#: `string[]@`, `array<T>@`. Only the identifier is wanted.
+_BARE_TYPE = re.compile(r"[A-Za-z_]\w*")
+
+
+def registered_types(exe: Optional[str] = None,
+                     decls: Optional[Dict[str, List[str]]] = None) -> set:
+    """Every type the engine's own registrations name.
+
+    A reference type is registered with a factory, which the engine declares
+    as `network_event @f()` -- that is the direct evidence, and it finds all
+    eighteen of them. A value type has no factory, so `string`, `vector` and
+    `array` are reached the other way: a type named as a return or a
+    parameter of a registration is a type the engine has. That also sweeps
+    in the primitives and the template placeholder `T`, which costs nothing
+    -- this is a set of names the engine *has*, used to stop an absence
+    being claimed, and `int` is not a name anyone is missing.
+    """
+    found: set = set()
+    for name, signatures in (decls if decls is not None
+                             else registered(exe)).items():
+        for text in signatures:
+            match = REGISTRATION.match(text)
+            if match is None:
+                continue
+            for part in [match.group("ret")] + match.group("params").split(","):
+                head = _BARE_TYPE.search(part.replace("const", "", 1))
+                # `&in` / `&out` qualify a reference; they are not types.
+                if head is not None and head.group() not in ("in", "out",
+                                                             "inout"):
+                    found.add(head.group())
+    return found
+
+
+def available(api: Optional[Dict[str, object]] = None,
+              exe: Optional[str] = None) -> set:
+    """Every name this engine has: documented, registered, or both."""
+    names = documented(api) if api else set()
+    decls = registered(exe)
+    return names | set(decls) | registered_types(decls=decls)
+
+
+def missing(names: Sequence[str], api: Dict[str, object],
+            exe: Optional[str] = None) -> List[str]:
+    """Which of these names the installed engine does not have.
 
     Primitives and the names the module declares itself are the caller's
-    business to exclude; this only answers the documentation question.
+    business to exclude. The engine's registrations are consulted as well as
+    its documentation, because the help file omits some of what it registers
+    and a name wrongly called absent is the dangerous direction: it reports
+    the installed engine's age for something the installed engine has.
     """
-    known = documented(api)
+    known = available(api, exe)
     return [name for name in dict.fromkeys(names) if name not in known]
 
 
@@ -193,8 +327,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--cache", help="where to unpack it (default: a temp directory)")
     ap.add_argument("--list", metavar="SUBSTRING",
                     help="every documented name containing this")
+    ap.add_argument("--exe", help="path to bgt.exe, whose registrations are "
+                                  "consulted as well (default: the installed one)")
     ap.add_argument("--missing", action="store_true",
-                    help="report which of the given names are NOT documented")
+                    help="report which of the given names this engine lacks")
     ap.add_argument("--json", metavar="FILE", help="write the whole API as JSON")
     args = ap.parse_args(argv)
 
@@ -206,8 +342,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     functions: Dict[str, List[str]] = api["functions"]        # type: ignore[assignment]
     types: Dict[str, Dict[str, List[str]]] = api["types"]     # type: ignore[assignment]
+    reg = registered(args.exe)
     print("%d functions, %d types documented in %s"
           % (len(functions), len(types), api["source"]), file=sys.stderr)
+    if reg:
+        print("%d names and %d types registered by the engine itself"
+              % (len(reg), len(registered_types(decls=reg))), file=sys.stderr)
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
@@ -215,9 +355,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("written to %s" % args.json)
 
     if args.missing:
-        absent = missing(args.name, api)
+        absent = missing(args.name, api, args.exe)
         for name in args.name:
-            print("%-24s %s" % (name, "NOT documented" if name in absent else "documented"))
+            if name in absent:
+                verdict = "NOT in this engine"
+            elif name in functions or name in types:
+                verdict = "documented"
+            else:
+                verdict = "registered, undocumented"
+            print("%-24s %s" % (name, verdict))
         return 0
 
     if args.list:
@@ -242,8 +388,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("      %s" % signature)
             for signature in entry["properties"]:
                 print("      %s" % signature)
+        elif name in reg:
+            for signature in reg[name]:
+                print("  %s        [registered, not documented]" % signature)
         else:
-            print("  %s: not documented by this engine" % name)
+            print("  %s: this engine neither documents nor registers it" % name)
     return 0
 
 

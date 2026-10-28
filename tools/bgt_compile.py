@@ -480,6 +480,74 @@ def verb_warnings(needs_default_args: bool = True) -> List[str]:
 
 #: a one-line script whose only unusual feature is a default argument, which
 #: is how the compiler is asked whether it has them.
+#: Two markers of default-argument support, both in the executable itself.
+#:
+#: **The engine registers three of its own functions with one.** AngelScript
+#: registers everything by handing the engine a declaration string, and that
+#: string goes through the same parser a script does, so
+#: `string string_create_from_pointer(uint, uint size=0)` is the feature in
+#: use rather than a marker that might coincide with it. BGT 1.3 has three
+#: such registrations and BGT 1.0 has none.
+#:
+#: **And the compiler carries the diagnostics for a bad one.** A message
+#: exists only if the code path that emits it does.
+_DEFAULT_ARG_SIGNS = (
+    b"default arg for parameter %d in function '%s'",
+    b"All subsequent parameters after the first default value must have "
+    b"default values in function '%s'",
+    b"default argument expression doesn't match the function parameter type",
+)
+
+
+def _default_args_in_binary(exe: str) -> Optional[bool]:
+    """Whether this `bgt.exe` parses default arguments, read off the file.
+
+    Asking the compiler means launching it, and a compiler that rejects the
+    probe puts a **modal error dialog** in front of whoever is at the
+    machine -- once per install, and once per candidate that
+    `bgt verbs --repoint` considers. The file answers for free.
+
+    Two independent markers are required to agree, and on the two installs
+    here they do: BGT 1.3 has both, BGT 1.0 neither. Where they disagree
+    this returns `None` and the probe decides, because two markers pointing
+    opposite ways is exactly the case a reader should decline rather than
+    answer. `None` also covers a file that cannot be read.
+
+    What the markers prove is not symmetric, and the docstring should say so
+    rather than the code imply otherwise: a registration *using* the feature
+    proves support, while neither marker appearing is the absence of the
+    implementation's own strings, which is strong evidence and not a proof.
+    The probe remains the arbiter and the cache still remembers whatever
+    answered.
+    """
+    try:
+        with open(exe, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    try:
+        from . import bgt_api
+    except ImportError:
+        import bgt_api
+    interface = bgt_api.registered(exe)
+    uses_one = any("=" in signature
+                   for signatures in interface.values()
+                   for signature in signatures)
+    diagnoses_one = any(sign in data for sign in _DEFAULT_ARG_SIGNS)
+    if uses_one and diagnoses_one:
+        return True
+    # **A negative is only worth anything from a file whose interface is
+    # legible.** Both markers are absences, and everything is absent from a
+    # file this cannot read: a stub, or a packed `bgt.exe` whose strings are
+    # inside the compressed image -- which is not hypothetical, since BGT's
+    # own runtime ships that way inside `exec.bin`. A real engine registers
+    # hundreds of declarations (1.0 registers 240, 1.3 registers 432), so
+    # finding almost none means this reader is the thing that is missing.
+    if not uses_one and not diagnoses_one and len(interface) >= 50:
+        return False
+    return None
+
+
 _DEFAULT_ARG_PROBE = chr(10).join([
     "int f(int a, bool b = false) { return a; }",
     "void main() { f(1); }",
@@ -547,6 +615,16 @@ def capabilities(compiler: Optional[str] = None) -> Dict[str, bool]:
     if key in stored:
         _CAPABILITIES[exe] = stored[key]
         return stored[key]
+    # The file first: it answers without launching anything, which is the
+    # difference between asking once per install and never putting a modal
+    # dialog in front of the user at all.
+    read_off = _default_args_in_binary(exe)
+    if read_off is not None:
+        found = {"default_arguments": read_off}
+        _CAPABILITIES[exe] = found
+        stored[key] = found
+        _save_caps(stored)
+        return found
     folder = tempfile.mkdtemp(prefix="bgtcaps_")
     script = os.path.join(folder, "probe.bgt")
     try:

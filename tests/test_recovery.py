@@ -441,6 +441,15 @@ def test_an_inconclusive_check_is_not_a_capability_answer():
         with open(exe, "wb") as fh:
             fh.write(b"MZ not really")
         real_check = bgt_compile.check
+        # **A test must not write to the user's cache.** `capabilities`
+        # remembers its answer on disk, so this one has been appending an
+        # entry keyed on a throwaway 13-byte "bgt.exe" to the real
+        # `%TEMP%/bgt_capabilities.json` on every run -- thirty of them on
+        # this machine. They never match again, so nothing was ever read
+        # back wrongly; a test that used a stable path would have poisoned
+        # the answer for a real install.
+        real_cache = bgt_compile._CAPS_CACHE
+        bgt_compile._CAPS_CACHE = os.path.join(tmp, "caps.json")
         bgt_compile._CAPABILITIES.clear()
         try:
             for outcome in ("nodriver", "timeout", "crashed"):
@@ -455,6 +464,7 @@ def test_an_inconclusive_check_is_not_a_capability_answer():
             assert bgt_compile.capabilities(exe) == {"default_arguments": True}
         finally:
             bgt_compile.check = real_check
+            bgt_compile._CAPS_CACHE = real_cache
             bgt_compile._CAPABILITIES.clear()
 
 
@@ -595,7 +605,85 @@ def test_the_documented_api_is_read_out_of_the_reference_pages():
             "bool require_full_delimiter)"]
         assert api["types"]["timer"]["methods"] == ["void timer::restart()"]
         assert "made_up_example" not in api["functions"]
-        assert bgt_api.missing(["string_split", "timer", "weakref"], api) == ["weakref"]
+        # No executable, so this is the documentation's answer alone.
+        assert bgt_api.missing(["string_split", "timer", "weakref"], api,
+                               exe="X:/no/such/bgt.exe") == ["weakref"]
+
+
+def test_example_code_on_a_reference_page_is_not_an_api():
+    """A reference page is named after the one API it documents.
+
+    `garbage_collect`'s page defines `generate_garbage` to have something to
+    collect, `get_call_stack`'s defines `first_dummy_method`, `serialize`'s
+    defines `save`. Every signature on a page that is not the page's own is
+    example code, and eleven of them were being counted as engine API --
+    which matters in the dangerous direction, because this list is what
+    decides whether an absence gets reported: a name it wrongly holds is a
+    gap it will not report. The engine's registrations settle it, and so
+    does the help file's own tree: not one of the eleven has a page.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "references", "foundation_layer",
+                            "function_reference", "miscellaneous")
+        os.makedirs(root)
+        with open(os.path.join(root, "garbage_collect.htm"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("<html><body><p>void garbage_collect()</p>"
+                     "<p>Example:</p><p>void generate_garbage()</p>"
+                     "</body></html>")
+        open(os.path.join(tmp, "bgt.hhc"), "w").close()
+        chm = os.path.join(tmp, "bgt.chm")
+        open(chm, "w").close()
+        api = bgt_api.read(chm, cache=tmp)
+        assert "garbage_collect" in api["functions"]
+        assert "generate_garbage" not in api["functions"]
+
+
+def test_the_engines_own_registrations_are_read_off_the_executable():
+    """AngelScript registers everything by handing over a declaration string.
+
+    So the whole interface is a literal in `bgt.exe`, which is a stronger
+    oracle than the help file for the one question asked of it: BGT 1.3
+    registers `string_compress` and documents it nowhere, and Paladin's save
+    path calls it. Asked of the documentation alone, "does this engine have
+    that?" answered no.
+
+    Three shapes have to be read and two refused, and each of the refusals
+    was a real false positive:
+
+    * an array return (`string[]@ find_files(...)`) -- rejecting it lost
+      four functions the help file *did* document, which is the only reason
+      it was noticed;
+    * a factory, whose handle marker sits against the name
+      (`network_event @f()`) -- all eighteen of them;
+    * a file-dialog filter is shaped exactly like a declaration
+      (`All Files (*.*)`), and a declaration's parameters are types;
+    * a bare import name (`send()`) splits into a return type `sen` and a
+      function `d`, because the type pattern backtracks -- four names out of
+      the import table became registered types that way.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "bgt.exe")
+        with open(exe, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"string[]@ find_files(string& in)",
+                b"network_event @f()",
+                b"string string_compress(const string& in)",
+                b"int pathfinder_callback(int x, int y, string data)",
+                b"All Files (*.*)",
+                b"BGT Scripts (*.bgt)",
+                b"send()",
+                b"socket()",
+            ]))
+        reg = bgt_api.registered(exe)
+        assert sorted(reg) == ["f", "find_files", "pathfinder_callback",
+                               "string_compress"]
+        assert bgt_api.registered_types(decls=reg) == {
+            "string", "network_event", "int"}
+        # ...and nothing registered is ever reported absent.
+        api = {"functions": {}, "types": {}}
+        assert bgt_api.missing(["string_compress", "network_event", "weakref"],
+                               api, exe=exe) == ["weakref"]
 
 
 def test_engine_gap_names_a_type_the_installed_compiler_lacks():
@@ -1521,6 +1609,61 @@ def test_the_default_argument_probe_is_one_small_script():
     assert "bool b = false" in probe
     assert "void main()" in probe          # it has to be runnable, not just parsable
     assert probe.count(chr(10)) >= 2
+
+
+def test_default_argument_support_is_read_off_the_executable():
+    """Asking the compiler puts a modal dialog in front of the user.
+
+    The probe launches `bgt.exe`, and a `bgt.exe` that rejects the probe
+    shows a modal error dialog on whoever is at the machine -- once per
+    install, and once per candidate `bgt verbs --repoint` considers. The
+    file answers for free, because **the engine registers three of its own
+    functions with a default argument**: a registration string goes through
+    the same parser a script does, so `string_create_from_pointer(uint,
+    uint size=0)` is the feature in use rather than a marker that might
+    coincide with it. The compiler also carries the diagnostics for a bad
+    default argument, and a message exists only if the code path that emits
+    it does.
+
+    Both markers must agree, and on the two installs here they do. Where
+    they disagree the file declines and the probe decides, because that is
+    the case a reader should refuse rather than answer.
+
+    **A negative needs a legible interface**, which is the guard that makes
+    this safe rather than merely cheap: both markers are absences, and
+    everything is absent from a file this cannot read -- a stub, or a packed
+    `bgt.exe` whose strings sit inside the compressed image, which is not
+    hypothetical when BGT's own runtime ships that way inside `exec.bin`.
+    """
+    def engine(path, extra=b""):
+        body = b"\x00".join(b"void fn%d(int a)" % n for n in range(60))
+        with open(path, "wb") as fh:
+            fh.write(body + b"\x00" + extra)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        yes = os.path.join(tmp, "yes.exe")
+        engine(yes, b"\x00".join([
+            b"string string_create_from_pointer(uint, uint size=0)",
+            b"default arg for parameter %d in function '%s'"]))
+        assert bgt_compile._default_args_in_binary(yes) is True
+
+        no = os.path.join(tmp, "no.exe")
+        engine(no)
+        assert bgt_compile._default_args_in_binary(no) is False
+
+        # one marker without the other is not an answer
+        half = os.path.join(tmp, "half.exe")
+        engine(half, b"default arg for parameter %d in function '%s'")
+        assert bgt_compile._default_args_in_binary(half) is None
+
+        # ...and neither is a file whose interface cannot be read at all,
+        # which is what keeps a packed or stubbed engine out of the answer.
+        stub = os.path.join(tmp, "stub.exe")
+        with open(stub, "wb") as fh:
+            fh.write(b"MZ not really")
+        assert bgt_compile._default_args_in_binary(stub) is None
+        assert bgt_compile._default_args_in_binary(
+            os.path.join(tmp, "absent.exe")) is None
 
 
 def test_capabilities_are_cached_per_compiler():

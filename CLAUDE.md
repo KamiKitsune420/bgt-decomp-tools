@@ -125,7 +125,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `as_lift.py` | lifts disassembly to pseudo-source — a symbolic stack machine plus control flow |
 | `as_write.py` | writes a module back out — byte-exact round-trip, and length-changing edits |
 | `bgt_asir.py` | presents a BGT module as the AngelScript IR the NVGT decompiler reads |
-| `bgt_api.py` | `bgt api`: the engine's documented API, read out of the installed `bgt.chm` |
+| `bgt_api.py` | `bgt api`: the engine's API -- documented, from `bgt.chm`, and registered, from `bgt.exe`'s own declaration strings |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
@@ -1158,17 +1158,35 @@ bgt api elias weakref --missing    # NOT documented
 
 `bgt_api` unpacks it with Windows' own `hh.exe` (the only thing that reads the
 format), caches the result outside this repository, and parses the reference
-tree -- 140 functions and 25 types with 273 methods, from 413 of its 421
+tree -- 125 functions and 25 types with 273 methods, from 413 of its 421
 pages. Tutorial pages are skipped, because example code is not an API.
+
+**And example code inside a *reference* page was not.** A reference page is
+named after the one API it documents, so `garbage_collect`'s page defines
+`generate_garbage` to have something to collect, `get_call_stack`'s defines
+`first_dummy_method`, `serialize`'s defines `save`. Every signature on a page
+whose name is not the page's own is example code, and eleven of them were
+being counted as engine API -- which is the count above moving from 140 to
+125. That matters in the dangerous direction: this list is what decides
+whether an absence gets reported, so **a name it wrongly holds is a gap it
+will not report**. The engine's own registrations settle it, and so does the
+help file's own tree -- not one of the eleven has a page. The `PROPERTY`
+branch two lines below had applied exactly this rule all along, which is the
+recurring shape here: two places answering one question, one of them stricter.
 
 Three things it settles that were guesses before:
 
 - **The documented type list is the oracle for the engine gap.** Searching a
   binary for a name is a guess; this is a list. `bgt recover` uses it, and
   falls back to the binary search only when the help file cannot be read.
+  It is not the *whole* list, though -- see **The engine registers itself**
+  below, because `bgt.exe` holds a list too, and a longer one.
 - **The language has no `goto` and no `protected`.** Neither word appears
   anywhere in the help file. So a residual `goto` can never compile, however
   it is spelled -- and Manamon 2's `protected` really is a newer engine's.
+  Confirmed independently since, in the binaries: neither string occurs in
+  BGT 1.0's `bgt.exe` or 1.3's, while `private`, `funcdef`, `interface` and
+  `cast` occur in both.
 - **The command-line options are documented** (Appendix G), and match what the
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
@@ -1194,6 +1212,91 @@ off by one in a way that only shows up in the output. The same probe shape
 settles any other primitive the same way, and it is cheaper than arguing
 about it.
 
+### The engine registers itself, and the binary is the longer list
+
+AngelScript registers everything by handing the engine a **declaration
+string**, and that string is a literal in the executable. So the whole
+registered interface is sitting in `bgt.exe` -- exact parameter types,
+`&in`/`&out`, `const`, and the default arguments the engine gives its own
+functions. `bgt_api.registered()` reads it (432 names and 34 types in BGT
+1.3, 240 and 23 in 1.0), and `bgt api` consults it alongside the help file:
+
+```bash
+bgt api string_compress        # registered, not documented
+bgt api --missing network_event weakref
+```
+
+**The help file is not the whole list, and the gap has teeth.** BGT 1.3
+registers `string_compress`, `string_decompress`, `crc32`, `add_fx`,
+`delete_fx`, `hex_string_to_number`, `screen_reader_braille` and
+`string_create_from_pointer`, and documents **none** of them -- and
+Paladin's save path is
+`serialize_all()` -> `serialize()` -> `string_compress()` -> `string_encrypt(...)`.
+Asked of the documentation alone, "does this engine have that?" answered no
+about a function a shipped title calls. It registers two *types* the help
+file omits as well, `network_event` (what `network::request()` returns) and
+`library_structure`, so a game using either would have been reported as
+needing a newer engine than the one installed.
+
+**Nothing on the four titles moves**, and that is the result rather than a
+disappointment: `engine_gap` and `method_gap` are identical before and after
+on Paladin, Psycho Strike, Manamon 2 and Super Egg Hunt. The hole is
+provable and latent, which is the only honest way to describe it -- the
+evidence is `string_compress` and `network_event`, not a changed report.
+
+That gives three sources that answer three different questions, and the
+split is clean:
+
+| where a name is | what it is |
+|---|---|
+| a registration string in `bgt.exe` | engine API -- authoritative |
+| a declaration in `include/*.bgt` | library API, which recovers like any script |
+| a reference page named after it | documented |
+| a signature on some *other* page | example code, and not an API at all |
+
+The five documented functions that are registered nowhere --
+`position_sound_1d`, `position_sound_2d`, `position_sound_custom_1d`,
+`position_sound_custom_2d` and `convert_to_currency` -- are exactly the
+library ones, in `sound_positioning.bgt` and `finance.bgt`. The same split
+holds for types: the nine documented types with no factory registration are
+`array`, `string` and `vector` (value types) plus `audio_form`,
+`dynamic_menu`, `logger`, `number_speaker`, `sound_pool` and `soundtrack`,
+which are the helper-layer *script* classes.
+
+Three refusals make this a reader rather than a guess, and each was a real
+false positive first:
+
+- **An array return.** `string[]@ find_files(string& in)` was rejected by
+  the first pattern, which reported four functions as absent that the help
+  file *did* document -- and the documentation disagreeing is the only
+  reason it was caught. An extractor that answers anyway, in a new costume.
+- **The handle marker sits against either side.** The engine writes a
+  factory `network_event @f()` and a getter `network_event@ request()`, so
+  demanding whitespace between the type and the name finds the second and
+  silently loses all eighteen of the first.
+- **A return type and a name must be separated by something.** The type
+  pattern backtracks, so a bare `send()` from the import table splits into a
+  return type `sen` and a function `d`. Four import names became registered
+  types that way. And a file-dialog filter is shaped exactly like a
+  declaration (`All Files (*.*)`), which is told apart by the fact that a
+  declaration's parameters are *types*.
+
+### What else the two binaries differ on
+
+The compiler's diagnostic table is a per-version artifact -- a message
+exists only if the code path that emits it does -- so diffing the two
+installed engines' strings gives a **list** of what the language gained,
+where `capabilities()` launches a compiler to ask about one item of it.
+BGT 1.0 has none of `namespace`, `mixin`, `final`, `override`, `shared` or
+`auto`, nor default arguments; 1.3 has all of them. `protected`, `weakref`
+and `goto` are in neither, which independently confirms what the help file
+said about Manamon 2 and about residual gotos.
+
+**And `garbage_collect()` takes no argument** -- the registration string
+says so, matching the help file. So a recovered Manamon 2 calling
+`garbage_collect(int(1000))` is not a decompilation error but one more
+newer-engine gap, alongside its `protected` and `weakref`.
+
 ## Which BGT compiled it, and an entry script that declares something
 
 Two things that between them cost a user an afternoon, both because the
@@ -1206,13 +1309,64 @@ gives a cascade that reads exactly like a broken decompilation:
 then "Unexpected token '}'" at the end of the class. The same project
 compiles cleanly under 1.3.
 
-There is no version string in `bgt.exe` and no version metadata on the
-file, so the installs cannot be told apart by looking. They can be told
-apart by asking: `bgt_compile.capabilities()` compiles a two-line script
-whose only unusual feature is a default argument. `bgt recover --compile`
-reports **which** `bgt.exe` it used, and says so plainly when that one
-cannot parse what the source contains. The missing fact was never the
-diagnostics; it was whose.
+`bgt_compile.capabilities()` answers which install this is, and
+`bgt recover --compile` reports **which** `bgt.exe` it used, saying so
+plainly when that one cannot parse what the source contains. The missing
+fact was never the diagnostics; it was whose.
+
+### Asking the file instead of the compiler
+
+This section used to say there is no version string in `bgt.exe` and no
+version metadata on the file, so the installs could only be told apart by
+putting something to them. Both halves were wrong, and the correction is
+worth more than the fact: **BGT 1.0 carries the AngelScript library version
+`2.20.2`** as a literal (1.3 carries none), and both carry a PE
+`TimeDateStamp` -- 2010-12-30 for 1.0 and 2014-06-01 for 1.3. Neither of
+those is the *capability*, though, which is why the better answer is a
+different one.
+
+The capability is in the file too, twice over:
+
+- **The engine registers three of its own functions with a default
+  argument** -- `string_create_from_pointer(uint, uint size=0)`,
+  `tone_synth`'s `void f(float, float y = 0, float z = 0)`, and
+  `dictionary::call`'s ten `?&in paramN=null`. A registration string goes
+  through the same parser a script does, so this is **the feature in use**
+  rather than a marker that might coincide with it. BGT 1.0 has none.
+- **And the compiler carries the diagnostics for a bad one**: `Failed while
+  compiling default arg for parameter %d in function '%s'` and two others.
+  A message exists only if the code path that emits it does.
+
+`_default_args_in_binary` requires both markers to agree, and on the two
+installs here they do -- 1.3 both, 1.0 neither, matching what the probe had
+already measured. Where they disagree it returns `None` and the probe
+decides, because two markers pointing opposite ways is the case a reader
+should decline rather than answer.
+
+**Why bother, when the answer was already cached once per install:** the
+probe launches the compiler, and a compiler that *rejects* the probe puts a
+modal error dialog in front of whoever is at the machine. That is the 1.0
+case -- the very one worth knowing about -- and `bgt verbs --repoint` pays
+it again per candidate it considers.
+
+**What the markers prove is not symmetric, and the code says so rather than
+implying otherwise.** A registration using the feature proves support;
+neither marker appearing is the absence of the implementation's own strings,
+which is strong evidence and not a proof. So a negative is believed only
+from a file whose interface is *legible* -- at least 50 registrations, where
+1.0 has 240 and 1.3 has 432. Everything is absent from a file this cannot
+read: a stub, or a packed `bgt.exe` whose strings sit inside the compressed
+image, which is not hypothetical when BGT's own runtime ships exactly that
+way inside `exec.bin`. Without that guard a packed engine would be reported,
+confidently, as having no default arguments.
+
+**A test must not write to the user's cache**, which this one had been doing
+all along. `capabilities()` remembers its answer on disk, and the test that
+pins "an inconclusive check is not an answer" hands it a throwaway 13-byte
+`bgt.exe` -- so every run appended an entry to the real
+`%TEMP%/bgt_capabilities.json`, thirty of them on this machine. Nothing was
+ever read back wrongly, because a temp path never recurs; a test that used a
+stable path would have poisoned the answer for a real install.
 
 **And the compiler this toolkit picks is not the one a person reaches.**
 BGT's installer registers five shell verbs for a `.bgt` file, and
@@ -1799,7 +1953,8 @@ module.
 `bgt recover` reports this from the one piece of evidence available: a type the
 module uses, does not declare, appears in the game's own executable, and does
 not appear in the installed compiler or its `exec.bin`. For Manamon 2 that
-names `weakref` and `ecdh`. (`protected` is a keyword rather than a type, so it
+names five: `weakref`, and a whole crypto family -- `ecdh`, `encryption`,
+`decryption` and `decryption_key`. (`protected` is a keyword rather than a type, so it
 is found the same way by hand and not by that check.) Saying so is the
 difference between a report and a mystery -- and it is why a diagnostic count
 is only ever a statement about *this* engine.
