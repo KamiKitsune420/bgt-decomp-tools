@@ -2016,7 +2016,7 @@ position rather than kept in append order, which is what lets a promotion
 insert its assignment where the value was computed instead of where it is
 read.
 
-**Two and a half: the rule is about the PATH, not the kind of value.**
+**Two and a half: the rule is about the PATH, and only about the path.**
 This test read `value.kind == "const"` before consulting the path, on the
 argument that both bugs it caught were constants. A parameter copy proved the
 line was in the wrong place. `dynamic_menu::run_extended` opens with
@@ -2034,10 +2034,24 @@ arrowing to an item and stopping made the menu say its name again, and again,
 forever. It is the same defect as `|| true` and `if (false)`, and what decides
 it is whether the slot is written again on another path.
 
-So the test is now *repeatable* rather than *constant*. A **computed** value is
-still left alone, and that boundary is still the measured one: promoting those
-emitted holds for binds the source never made (`__nvgt_hold_7_116 =
-__nvgt_out_7_215;`) and took Paladin from 0 compiler errors to 16.
+So the test is the path, not the kind. It said `const`, then *repeatable*,
+and each narrowing left real stores on the floor -- the third one being
+`sound_pool`'s clamp, `int true_y = listener_y; if (listener_y <
+delta_backward) true_y = delta_backward;`, a **computed** store that folded
+away so the call received `delta_forward` and positioned 2D sound from the
+wrong y.
+
+**That boundary was measured, and the measurement went stale.** Promoting
+computed values was rejected for taking Paladin from 0 compiler errors to 16,
+with holds like `__nvgt_hold_7_116 = __nvgt_out_7_215;` as the evidence --
+and those names say what really caused it: a *fresh local per promotion*,
+which was separately fixed to one name per slot (see below). Re-measured
+after that fix, promoting any declarable conditional bind holds all three
+titles at 0 residual gotos with a verified split, leaves every `bgt libcheck`
+score untouched, and takes Paladin's empty-bodied `if`s -- the signature this
+class of bug leaves behind -- from 33 to 9 and Super Egg Hunt's from 5 to 4.
+A value with no declarable type still folds, because a slot that cannot be
+declared cannot be a variable.
 
 It is worth knowing what else came back with it, because it was never only a
 menu bug. `sound_pool`'s distance code is

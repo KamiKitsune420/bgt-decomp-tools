@@ -124,18 +124,38 @@ class FoldSafetyTests(unittest.TestCase):
         sim = self._sim(instrs=[op("CpyVtoV4"), op("SUSPEND"),
                                 op("CpyVtoR4", 28), op("JLowNZ")])
         self.assertTrue(sim._tested_as_bool(28, 1))
-    def test_a_repeatable_value_bound_on_one_path_is_promoted_too(self):
-        """The rule is about the PATH, not about the kind of value.
+    def test_any_declarable_value_bound_on_one_path_is_promoted(self):
+        """The rule is about the PATH, and only about the path.
 
-        `_stale_fold` tested `value.kind == "const"` before consulting
-        `_conditionally_bound`, so a parameter copy never reached it:
-        `dynamic_menu::run_extended` opens with
-        `bool initial = auto_speak_first;` and clears it at five sites once
-        the first item has been announced. A parameter is repeatable, so the
-        fold took it first, every read became `arg3` -- which never changes --
-        and all five `initial = false;` stores went with it. The block then
-        re-armed `speak_item` every iteration: arrow to an item, stop, and the
-        menu says its name again and again, forever.
+        `_stale_fold` tested the *kind* of value before consulting
+        `_conditionally_bound`, first `const` and then `_is_repeatable`, and
+        each narrowing left real stores on the floor. A store inside a branch
+        whose slot is read past the join is wrong to fold whatever it holds:
+        the read is reachable without that path, so it sees whichever arm ran
+        last in the bytecode rather than the one that ran.
+
+        Three bugs, each the same shape. `dynamic_menu::run_extended` opens
+        with `bool initial = auto_speak_first;` and clears it at five sites
+        once the first item has been announced -- a parameter is repeatable,
+        so the fold took it first, every read became `arg3`, which never
+        changes, and the block re-armed `speak_item` every iteration: arrow to
+        an item, stop, and the menu says its name again, forever.
+        `sound_pool` clamps with `int true_y = listener_y; if (listener_y <
+        delta_backward) true_y = delta_backward;` -- a *computed* store, so it
+        folded away and the call received `delta_forward`, positioning 2D
+        sound from the wrong y. And `person::teleport` accumulates
+        `local_5 = this.entering_x; local_5 -= (this.x - xpos);`, which
+        vanished outright.
+
+        **The old boundary was measured, and the measurement went stale.**
+        Promoting computed values was rejected for taking Paladin from 0
+        compiler errors to 16, with holds like `__nvgt_hold_7_116 =
+        __nvgt_out_7_215;` as the evidence -- and those names say what really
+        caused it: a fresh local per promotion, which was separately fixed to
+        one name per slot. Re-measured after that, all three titles hold at 0
+        residual gotos with a verified split, every `bgt libcheck` score is
+        unchanged, and Paladin's empty-bodied `if`s -- the signature this
+        class of bug leaves behind -- fall from 33 to 9.
         """
         from decompile import Atom, DataType
         instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
@@ -153,12 +173,11 @@ class FoldSafetyTests(unittest.TestCase):
         self.assertTrue(sim_for(param)._stale_fold(7))
         self.assertTrue(sim_for(Atom("const", "0",
                                      data_type=DataType(token_type=67)))._stale_fold(7))
-        # A computed value is still left alone here -- promoting those is a
-        # different question (duplication, not a dead branch) and took Paladin
-        # from 0 compiler errors to 16.
+        # ...and a computed value too: `true_y = delta_backward` is as
+        # conditional as `initial = false`, and folding it loses the clamp.
         call = Atom("call", "menu.run_extended(x)",
                     data_type=DataType(token_type=70))
-        self.assertFalse(sim_for(call)._stale_fold(7))
+        self.assertTrue(sim_for(call)._stale_fold(7))
         # ...and with no declared type there is nothing to declare, so the
         # value still folds rather than becoming an undeclared name.
         bare = self._sim(instrs=instrs, k=5, cond_spans=[], back_edges=[(16, 32)],

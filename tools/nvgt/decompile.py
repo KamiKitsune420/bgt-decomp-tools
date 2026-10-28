@@ -1863,7 +1863,7 @@ class FuncDecompiler:
         # `if (false)`, and what decides it is whether the slot is written
         # again on another path, not what kind of value it happened to start
         # with.
-        if declarable and _is_repeatable(value) and self._conditionally_bound(bound[0]):
+        if declarable and self._conditionally_bound(bound[0]):
             # Computed on one path and read past the join: the read is
             # reachable without that path, so folding is wrong whatever the
             # value is -- a constant most of all. This is how
