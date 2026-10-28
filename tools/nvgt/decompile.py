@@ -3069,11 +3069,34 @@ class FuncDecompiler:
                   if op.name in ("JP", "JS", "JNS", "JNP")]
         next_range = _jump_target(guards[-1]) if guards else None
 
-        # The default is the entry the gaps share; with no repeated entry the
-        # table has no default of its own and the outermost guard supplies it.
+        # **Where the guards agree, they name the default outright.** A
+        # switch that is one table has no next range to be sent to, so every
+        # guard jumps to the same place and that place is the default. Say so
+        # rather than counting.
+        #
+        # Counting is what was here, on the argument that the compiler fills
+        # a range's gaps with the default label -- true, and bounded: it
+        # starts a new table when `values[n-1] + 5 < values[n]`, read out of
+        # `asCCompiler::CompileSwitchStatement`, so a run of filler is at
+        # most four. But several case labels stacked on one body,
+        #
+        #     case 1: case 2: case 3: speak("..."); break;
+        #
+        # put that arm in the table as many times, and nothing stops a real
+        # case outnumbering the gaps. Manamon 2 has two: `ms_davidson`'s
+        # table is `[38, 45, 45, 52, 59, 66, 144]` with the default at 0x95,
+        # which is not in the table at all -- counted, the default became the
+        # arm two cases share, and the real default arm was dropped. It
+        # compiles, it runs, and a dialogue function answers the wrong line.
         counts = collections.Counter(targets)
         default, repeats = counts.most_common(1)[0]
-        if repeats == 1:
+        guard_targets = {_jump_target(op) for op in guards}
+        if len(guard_targets) == 1:
+            default = next(iter(guard_targets))
+        elif repeats == 1:
+            # No repeated entry and the guards disagree: this table is a link
+            # in a chain, so it has no default of its own and the outermost
+            # guard -- the one bounding the whole switch -- supplies it.
             if not guards:
                 return None
             default = _jump_target(guards[0])

@@ -1978,7 +1978,9 @@ found by reading what it said rather than by inspection:
   ten unmatched `}`, so the file could not parse and the compiler blamed a
   `return true;` hundreds of lines further on. An unclaimed table now raises
   `UnstructuredSwitch`, which gives up on that one body and counts it, rather
-  than emitting most of it and corrupting the file. Eight sites in Manamon 2,
+  than emitting most of it and corrupting the file. **The three bodies left
+  are diagnosed rather than mysterious now** -- see **The three tables
+  nothing claims** below. Eight sites in Manamon 2,
   none in any other title. Half-emitting a construct is worse than refusing
   it, because the damage lands somewhere else.
 - **The last link of a switch chain may be a compare, not a table.** Where
@@ -2019,7 +2021,9 @@ found by reading what it said rather than by inspection:
   first switch's extent swallows the later ranges' bodies, which come out as
   `return` statements with no `case` above them: `day_to_word` answered
   "twentieth" for every day from 13 to 31. Merged, it is one switch with all
-  fourteen cases the source wrote.
+  fourteen cases the source wrote. **And a gap of more than five splits the
+  table** -- see **Reading the compiler, not only the reader** below, where
+  that constant comes from and what it is worth.
 - **A `for` header may not hoist the increment** when something jumps straight
   to the condition. That jump is a `continue` in a loop whose increment is
   part of the body; hoisted into the header it would run on that path too.
@@ -2636,6 +2640,109 @@ one path and read past the join, which `sound_pool`'s `true_y` clamp is
 the call receives `delta_forward` instead). Promoting computed values the
 same way took Paladin from 0 compiler errors to 16, so it stays open rather
 than guessed at, and the signature to grep for is an `if` with two empty arms.
+
+### Reading the compiler, not only the reader
+
+This document's first rule is to read `asCReader` rather than infer the
+format. The same rule applies one level up and had never been used: the
+*shapes* the structurer matches are emitted by `asCCompiler`, which is in
+the same binary. `CompileSwitchStatement` is at `FUN_00426160`, found
+through `Switch expressions must be integral numbers`.
+
+**The first thing it said killed a hypothesis, cheaply.** The compiler emits
+a range guard as `SetV4 tmp,K ; CMPi var,tmp` and the normalisation as
+`SetV4 tmp,min ; SUBi var,tmp` -- never the immediate forms. `_begin_switch`
+accepts only `CMPIi`/`SUBIi`, so it looked as though an unfused table would
+slip past every matcher and explain the bodies given up on. It does not:
+the peephole pass fuses every one. All **82** computed jumps in the four
+titles carry the fused form. Worth ten minutes to find out, and worth
+writing down so nobody pays for it twice.
+
+**The second thing it said is a constant worth having.** After sorting the
+case values the compiler starts a new table whenever
+
+    values[n-1] + 5 < values[n]
+
+so a gap of up to five is absorbed into the current table, filled with
+entries pointing at the default, and a gap of six or more splits. That makes
+a prediction the bytecode can refuse: **no table can hold a run of more than
+four default entries.** Measured across all 82 tables -- Paladin 3, Psycho
+Strike 4, Manamon 2 4, Super Egg Hunt 3. Reached twice, never exceeded,
+which is the same saturating-maximum argument that settled the operand
+tables.
+
+#### The entry the gaps share is not always the default
+
+`_dense_table` identified the default by counting: the most common target in
+the table, on the argument that the gaps all carry the default label. The
+constant above says how far that argument reaches, and it is not far enough.
+Several case labels stacked on one body,
+
+```
+case 1: case 2: case 3: speak("..."); break;
+```
+
+put that arm in the table as many times, and nothing stops a real case
+outnumbering the gaps.
+
+Where a switch is a *single* table there is no next range to be sent to, so
+every guard jumps to the same place -- and that place is the default, said
+outright rather than counted. Checked against every single-table switch in
+the corpus, the two answers agree 25 times and **disagree twice**, both in
+Manamon 2. `ms_davidson`'s table is `[38, 45, 45, 52, 59, 66, 144]` with the
+default at `0x95`, which is not in the table at all: counted, the default
+became the arm that `case 2` and `case 3` share, so both labels vanished
+from the output and a `break` landed in the wrong arm.
+`get_madam_boveels_table_text_seulee` is the same shape. Both are dialogue
+functions, so the symptom is an NPC answering the wrong line -- it compiles,
+it runs, and nothing reports it.
+
+Counting still answers where the guards disagree, which is a link in a chain:
+its own high bound sends larger values on to the next range, so the guards
+differ and the gaps are the only evidence left.
+
+`get_madam_boveels_table_text_seulee` lost a whole arm the same way --
+`case 20: case 22:` and the line of dialogue they return.
+
+**Which switches this can touch is exhaustive, not sampled.** The new
+branch fires only when every guard agrees; there, a table with no repeated
+entry already took `guards[0]`, which *is* that agreed target, so nothing
+moves. What moves is a table with a repeated entry whose count disagrees
+with the guards -- and every single-table switch in the corpus was
+enumerated for exactly that: 2 in Manamon 2, 0 in the other three.
+
+Paladin, Psycho Strike and Super Egg Hunt render **byte-identical** before
+and after, which is what a correctly scoped structurer change looks like.
+
+#### The three tables nothing claims
+
+Manamon 2's three given-up bodies have been "claimed by neither switch
+matcher" for as long as the message has existed, which is a symptom and not
+a cause. `_dense_table` reads all three perfectly; it is
+`_dense_switch_pattern`'s checks *after* it that decline, and they decline
+for **three different reasons**. Written down so the next attempt starts
+from a diagnosis:
+
+- **`number_key_pressed`** -- the arms leave the switch to two places.
+  Cases 0..8 end `JMP 0x12C` and case 9 ends `JMP 0x12F`, and the check
+  wants one shared join. 0x12C is the function's tail and 0x12F is three
+  instructions into it, so both *are* leaving; one arm jumps deeper in. A
+  switch that is the last statement of a function exits straight into the
+  epilogue, and the epilogue has more than one entry point.
+- **`type_effectiveness`** -- the chain's tables and arms interleave.
+  Twenty-two tables, laid out `table, arms, table, arms`, so merging the
+  chain grows `cursor` to 0x508 while the first merged table's arms sit at
+  0xAE. The guard `entries[0] <= instrs[cursor - 1].pos`, which exists to
+  catch an entry jumping *backwards into the table*, then fires on a
+  perfectly ordinary layout. The check assumes tables come before arms.
+- **`artisoul_tutor`** -- the same guard, failing by one: the span ends at
+  exactly 0x263 and the first arm begins at exactly 0x263, and the
+  comparison is `<=`.
+
+Each wants a different relaxation and each relaxation is the kind this
+file keeps recording as expensive -- "generalising the existing do-while
+handler took Crazy Party from 17 gotos to 55". So they stay counted.
+What is new is that they are three problems rather than one, and named.
 
 ### Typing the promoted local took three tries, and the declaration wins
 

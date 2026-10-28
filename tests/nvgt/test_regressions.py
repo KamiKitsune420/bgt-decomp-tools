@@ -567,3 +567,81 @@ class BaseMethodCallTests(unittest.TestCase):
         self.assertTrue(sim._calls_a_base_method("interact", "reset"))
         top.derived_from = here          # a cycle must not loop forever
         self.assertFalse(sim._calls_a_base_method("nowhere", "reset"))
+
+
+class SwitchDefaultTests(unittest.TestCase):
+    """The entry the gaps share is not always the default.
+
+    `_dense_table` took the default to be the most common target in the jump
+    table, on the argument that the compiler fills a range's gaps with the
+    default label. That is true, and bounded: `asCCompiler::
+    CompileSwitchStatement` starts a new table when
+    `values[n-1] + 5 < values[n]`, so a run of filler is at most four -- a
+    prediction the corpus confirms, with 4 reached in two titles and never
+    exceeded across 82 tables.
+
+    But several case labels stacked on one body put that arm in the table as
+    many times, and nothing stops a real case outnumbering the gaps:
+
+        case 1: case 2: case 3: speak("..."); break;
+
+    Where a switch is a single table there is no next range to be sent to,
+    so every guard jumps to the same place and *that* is the default, said
+    outright instead of counted. Manamon 2 has two of these; `ms_davidson`
+    has the table `[38, 45, 45, 52, 59, 66, 144]` with the default at 0x95,
+    which is not in the table at all -- counted, the default became the arm
+    two cases share, `case 2` and `case 3` vanished, and a `break` landed in
+    the wrong arm. It compiles, it runs, and a dialogue function answers the
+    wrong line.
+    """
+
+    def _sim(self, instrs):
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        sim.instrs = instrs
+        sim.pos_of = {i.pos: k for k, i in enumerate(instrs)}
+        return sim
+
+    @staticmethod
+    def _op(name, pos, w_arg=0, w_arg2=0, dw_arg=0, jump_target=None):
+        return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                     w_arg=w_arg, w_arg2=w_arg2, dw_arg=dw_arg,
+                     jump_target=jump_target)
+
+    def _table(self, targets, guard_target):
+        #   CMPIi v1, hi ; JP out ; CMPIi v1, lo ; JS out ; SUBIi v2,v1,1
+        #   JMPP v2 ; JMP t0 ; JMP t1 ; ...
+        op = self._op
+        instrs = [
+            op("CMPIi", 0, w_arg=1, dw_arg=len(targets)),
+            op("JP", 1, jump_target=guard_target),
+            op("CMPIi", 2, w_arg=1, dw_arg=1),
+            op("JS", 3, jump_target=guard_target),
+            op("SUBIi", 4, w_arg=2, w_arg2=1, dw_arg=1),
+            op("JMPP", 5, w_arg=2),
+        ]
+        instrs += [op("JMP", 6 + i, jump_target=t)
+                   for i, t in enumerate(targets)]
+        return instrs
+
+    def test_the_guards_name_the_default_when_they_agree(self):
+        # `case 2:` and `case 3:` share one arm, so it appears twice while
+        # the real default -- where both guards go -- appears not at all.
+        instrs = self._table([38, 45, 45, 52, 59, 66, 144], guard_target=0x95)
+        sim = self._sim(instrs)
+        _, cases, default, _, _ = sim._dense_table(5)
+        self.assertEqual(default, 0x95)
+        self.assertEqual([value for value, _ in cases],
+                         [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(dict(cases)[2], dict(cases)[3])
+
+    def test_counting_still_answers_when_the_guards_disagree(self):
+        # A link in a chain: its own high bound sends larger values to the
+        # next range, so the guards differ and the gaps are the evidence
+        # left. 0x40 is both the repeated entry and the right answer.
+        instrs = self._table([0x30, 0x40, 0x40, 0x50], guard_target=0x99)
+        instrs[1] = self._op("JP", 1, jump_target=0x77)     # -> next range
+        sim = self._sim(instrs)
+        _, cases, default, _, next_range = sim._dense_table(5)
+        self.assertEqual(default, 0x40)
+        self.assertEqual(cases, [(1, 0x30), (4, 0x50)])
