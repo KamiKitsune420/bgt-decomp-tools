@@ -71,34 +71,108 @@ TypeInfo = asreader.TypeInfo
 
 
 SIGNATURE_PARAMS = re.compile(r"\((.*)\)\s*(?:const)?$")
+#: The identifier inside a declaration's parameter: `pathfinder_callback@
+#: callback` -> `pathfinder_callback`.
+_BARE_WORD = re.compile(r"[A-Za-z_]\w*")
 
 
-def name_engine_funcdefs(m: Module, api: Optional[Dict[str, Any]] = None) -> int:
-    """Give the `_builtin_function_` placeholder the name the engine documents.
+def _name_from_registrations(m: Module, exe: str,
+                             named: Dict[str, TypeInfo]) -> int:
+    """The same naming, read off a runtime instead of the help file.
+
+    The documentation is only available where BGT is *installed*, and
+    recovery does not need BGT: the one executable that is always present is
+    the game's own, and its registration strings are the whole interface of
+    the build that compiled this module.
+
+    The test for "this parameter names a funcdef" is direct rather than
+    shaped. A registered **funcdef** is declared the way a function is --
+    `int pathfinder_callback(int x, int y, int parent_x, int parent_y,
+    string data)` -- so it appears in `registered()` under its own name,
+    while a registered **type** never does: a type's constructors and
+    factories are all declared under the literal name `f`, with the owner as
+    a separate string. So a parameter whose type is itself a registered
+    declaration is a callback, and nothing else is.
+
+    An arity that matches more than one overload with *different* answers is
+    declined rather than guessed at.
+    """
+    declarations = bgt_api.registered(exe)
+    if not declarations:
+        return 0
+    count = 0
+    for f in m.used_functions:
+        if f is None or not f.param_types:
+            continue
+        holes = [i for i, dt in enumerate(f.param_types)
+                 if dt.obj_type is not None
+                 and dt.obj_type.name == BUILTIN_FUNCTION]
+        if not holes:
+            continue
+        answers: Dict[int, set] = {i: set() for i in holes}
+        for text in declarations.get(f.name, ()):
+            match = bgt_api.REGISTRATION.match(text)
+            if match is None:
+                continue
+            params = [p.strip() for p in match.group("params").split(",")
+                      if p.strip()]
+            if len(params) != len(f.param_types):
+                continue
+            for i in holes:
+                word = _BARE_WORD.search(params[i].replace("const", "", 1))
+                if word is not None and word.group() in declarations:
+                    answers[i].add(word.group())
+        for i in holes:
+            if len(answers[i]) != 1:
+                continue
+            word = answers[i].pop()
+            ti = named.get(word)
+            if ti is None:
+                ti = named[word] = TypeInfo(name=word, kind="app")
+            f.param_types[i].obj_type = ti
+            count += 1
+    return count
+
+
+def name_engine_funcdefs(m: Module, api: Optional[Dict[str, Any]] = None,
+                         exe: Optional[str] = None) -> int:
+    """Give the `_builtin_function_` placeholder the name the engine gives it.
 
     AngelScript records every funcdef-typed value under one placeholder with
     no signature, so a registered callback parameter arrives as
     `_builtin_function_@` and nothing in the module can say which funcdef it
-    is. The engine's own documentation can: `bgt api pathfinder` gives
-    `bool set_callback_function(pathfinder_callback@ callback)`.
+    is. Two sources outside the module can, and both are consulted: the
+    engine's documentation (`bgt api pathfinder` gives `bool
+    set_callback_function(pathfinder_callback@ callback)`) and, where that
+    cannot be read or does not reach, the registration strings in the game's
+    own runtime.
 
     Without it, `pf.set_callback_function(obj.method)` is emitted with the
     bare method and rejected twice over ("Can't pass class method as arg
     directly"), which was the last error left on Crazy Party. With it the
     delegate can be written `pathfinder_callback(obj.method)`.
 
-    This lives on the BGT side on purpose: the documentation is BGT's, and the
+    **How much surface this has is now measured rather than assumed, and it
+    is one name.** Every BGT binary available here -- 1.3, Paladin, Super Egg
+    Hunt and Crazy Party at 432 registrations, Psycho Strike's fork at 453,
+    Manamon 2's at 509, spanning 2010 to 2019 -- registers exactly one
+    funcdef, `pathfinder_callback`, taken by exactly one method,
+    `pathfinder::set_callback_function`. Not even the fork that added
+    Crypto++ and a newer AngelScript adds a second callback type. So this is
+    a complete answer to the question rather than a sample of it.
+
+    This lives on the BGT side on purpose: the sources are BGT's, and the
     decompiler stays an AngelScript decompiler. Returns how many parameters
-    were named, and does nothing at all when the help file cannot be read.
+    were named, and does nothing at all when neither source can be read.
     """
+    named: Dict[str, TypeInfo] = {}
+    count = 0
     if api is None:
         try:
             api = bgt_api.read()
         except (RuntimeError, OSError):
-            return 0
-    types: Dict[str, Any] = api.get("types") or {}
-    named: Dict[str, TypeInfo] = {}
-    count = 0
+            api = None
+    types: Dict[str, Any] = (api or {}).get("types") or {}
     for f in m.used_functions:
         owner = getattr(f, "object_type", None) if f is not None else None
         if owner is None or not f.param_types:
@@ -130,6 +204,11 @@ def name_engine_funcdefs(m: Module, api: Optional[Dict[str, Any]] = None) -> int
                 dt.obj_type = ti
                 count += 1
             break
+    # Whatever the documentation did not reach, the runtime may. It is asked
+    # second rather than first because a documented signature carries the
+    # parameter *name* as well, and only the help file has that.
+    if exe:
+        count += _name_from_registrations(m, exe, named)
     return count
 
 
@@ -866,9 +945,12 @@ def load(module_path: str, exe_path: Optional[str] = None,
         raise AdapterError("module tail did not land on EOF: %s"
                            % (info.get("tail_error") or "unknown"))
     m = Builder(data, info, opcodes).build()
-    # The engine's documentation names the funcdefs the module records
-    # only as `_builtin_function_`. Absent documentation changes nothing.
-    name_engine_funcdefs(m)
+    # The engine names the funcdefs the module records only as
+    # `_builtin_function_` -- from its documentation where BGT is installed,
+    # and otherwise from the registration strings in the game's own runtime,
+    # which is the one executable always on hand. Neither available changes
+    # nothing.
+    name_engine_funcdefs(m, exe=exe_path)
     return m
 
 

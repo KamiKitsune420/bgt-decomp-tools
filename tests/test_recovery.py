@@ -28,8 +28,8 @@ import sys
 import tempfile
 
 try:                                   # after `pip install -e .`
-    from bgtdecomp import (bgt_api, bgt_asir, bgt_compile, bgt_pack,
-                           bgt_project)
+    from bgtdecomp import (bgt_api, bgt_apicheck, bgt_asir, bgt_compile,
+                           bgt_pack, bgt_project)
     from bgtdecomp.nvgt import asreader, decompile
 except ImportError:                    # straight from a checkout
     TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
@@ -37,6 +37,7 @@ except ImportError:                    # straight from a checkout
     sys.path.insert(0, os.path.join(TOOLS, "nvgt"))
     import asreader
     import bgt_api
+    import bgt_apicheck
     import bgt_asir
     import decompile
     import bgt_compile
@@ -2102,3 +2103,171 @@ def test_build_mode_asks_for_a_flag_and_run_mode_does_not():
     # fall through to the default and quietly become a run.
     parser_source = inspect.getsource(bgt_compile.main)
     assert 'choices=("debug", "release")' in parser_source
+
+
+# -- reading a recovered project's calls back ------------------------------
+
+def test_a_line_comment_inside_a_string_literal_does_not_eat_the_quote():
+    """Comments and strings have to be scrubbed in ONE left-to-right pass.
+
+    Each construct can contain the other's opener, so two regexes applied in
+    sequence desynchronise. Manamon 2 calls
+
+        url_get("http://www.vgstorm.com/playmmn.txt");
+
+    and a comment pass run first eats `//www.vgstorm...` as a line comment,
+    taking the string's closing quote with it -- after which every quote in
+    the rest of the file pairs with the wrong partner. That reported a
+    one-argument call as taking ten, and then thirty-three.
+    """
+    text = 'f("http://a.com/b");\ng("x");  // a real comment\nh("i // j");\n'
+    scrubbed = bgt_apicheck.scrub(text)
+    assert len(scrubbed) == len(text), "byte positions must be preserved"
+    # Every call survives, and each one has exactly one argument.
+    for name in ("f", "g", "h"):
+        at = scrubbed.index(name + "(")
+        args, _ = bgt_apicheck.split_args(scrubbed, scrubbed.index("(", at))
+        assert len(args) == 1, (name, args)
+    assert "a real comment" not in scrubbed
+    assert "vgstorm" not in scrubbed
+
+
+def test_a_declaration_is_not_a_call():
+    """`string serialize(dictionary@ d)` in a class body is a definition.
+
+    Read as a call it is a two-argument call to the engine's registered
+    `serialize`, which takes one -- and every class in Manamon 2 that
+    declares one produced that false positive. What tells them apart is the
+    token before the name: a declaration has a *type* there, a call has an
+    operator, a bracket or a keyword.
+    """
+    assert bgt_apicheck.is_a_declaration("    string serialize(", 11)
+    assert bgt_apicheck.is_a_declaration("void act()", 5)
+    assert not bgt_apicheck.is_a_declaration("    return serialize(", 11)
+    assert not bgt_apicheck.is_a_declaration("    x = serialize(", 8)
+    assert not bgt_apicheck.is_a_declaration("    f(serialize(", 6)
+
+
+def test_a_dropped_or_added_argument_is_reported():
+    """The check that the compiler cannot run on Manamon 2.
+
+    The simulation pops a callee's declared arity by construction, so this
+    can only ever be a defect of the *rendering* -- which is exactly what
+    temporary folding has introduced before.
+    """
+    known = {"string_replace": {(4, 4)}, "random": {(2, 2)},
+             "garbage_collect": {(0, 1)}}
+    def arity(call):
+        args, _ = bgt_apicheck.split_args(call, call.index("("))
+        return len(args)
+    assert arity("string_replace(a, b, c, d)") == 4
+    assert arity("string_replace(a, b, c)") == 3
+    assert arity("garbage_collect()") == 0
+    # A nested call is one argument, not three.
+    assert arity("random(f(a, b), c)") == 2
+    fits = lambda n, name: any(low <= n <= high for low, high in known[name])
+    assert fits(4, "string_replace") and not fits(3, "string_replace")
+    # A default argument widens the range rather than fixing it: Manamon 2's
+    # own build declares `void garbage_collect(int number_of_cycles=0)`.
+    assert fits(0, "garbage_collect") and fits(1, "garbage_collect")
+
+
+def test_a_registered_types_constructor_is_declined_rather_than_guessed():
+    """AngelScript registers every constructor under the literal name `f`.
+
+    The owner type is a separate string argument, so `vector @f()` and `void
+    f(float, float y=0, float z=0)` sit in the binary with nothing to say
+    which type either belongs to. Taking the union of every `f` would accept
+    0 to 3 arguments for anything, which is not a check -- so a call of a
+    registered type's name is counted and not judged.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "game.exe")
+        with open(exe, "wb") as fh:
+            fh.write(b"\x00".join([b"vector @f()",
+                                   b"void f(float, float y = 0, float z = 0)",
+                                   b"int random(int, int)"]))
+        reg = bgt_api.registered(exe)
+        assert bgt_apicheck.declaration_arity(reg["random"][0]) == (2, 2)
+        # The factory's own arities are readable; whose they are is not.
+        assert sorted(map(bgt_apicheck.declaration_arity, reg["f"])) == [(0, 0),
+                                                                        (1, 3)]
+        assert "vector" in bgt_api.registered_types(decls=reg)
+
+
+def test_a_funcdef_parameter_is_named_from_the_runtime_with_no_help_file():
+    """Recovery does not need BGT installed; the game's own runtime is input.
+
+    A registered **funcdef** is declared the way a function is, so it appears
+    in `registered()` under its own name -- while a registered **type** never
+    does, because a type's constructors are all declared under `f`. That is
+    the direct test for "this parameter names a callback", and it is the
+    whole surface: every BGT binary measured, 2010 to 2019 and two forks,
+    registers exactly one funcdef.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "game.exe")
+        with open(exe, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"int pathfinder_callback(int x, int y, string data)",
+                b"bool set_callback_function(pathfinder_callback@)",
+                b"pathfinder @f()",
+            ]))
+        placeholder = asreader.TypeInfo(name=bgt_asir.BUILTIN_FUNCTION,
+                                        kind="app")
+        param = asreader.DataType(obj_type=placeholder, is_object_handle=True)
+        callee = asreader.Function(name="set_callback_function",
+                                   param_types=[param],
+                                   object_type=asreader.TypeInfo(name="pathfinder"))
+        module = asreader.Module(used_functions=[callee])
+        # No documentation at all, and it is still named.
+        assert bgt_asir.name_engine_funcdefs(module, api={}, exe=exe) == 1
+        assert param.obj_type.name == "pathfinder_callback"
+
+
+def test_a_funcdef_in_call_position_is_a_delegate_not_a_call():
+    """`pathfinder_callback(arg0.callbackPf)` binds one method.
+
+    It does not call the callback with the five arguments it declares, so a
+    funcdef's own arity is the wrong thing to check a *call* of its name
+    against -- which reported all thirteen of Crazy Party's delegates as
+    mismatches. A funcdef in call position always takes exactly one
+    argument, whatever its signature says.
+
+    The module names its own funcdefs. A registered one is told from a
+    registered function by the evidence that names it in the first place:
+    its name is used as a parameter type somewhere in the registrations,
+    which is true of a callback and of nothing else.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "game.exe")
+        with open(exe, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"int pathfinder_callback(int x, int y, string data)",
+                b"bool set_callback_function(pathfinder_callback@)",
+                b"int random(int, int)",
+            ]))
+        reg = bgt_api.registered(exe)
+        module = asreader.Module(
+            funcdefs=[asreader.Function(name="menu_callback",
+                                        param_types=[asreader.DataType(),
+                                                     asreader.DataType()])])
+        names = bgt_apicheck.funcdef_names(module, reg)
+        assert names == {"menu_callback", "pathfinder_callback"}
+        # `random` is registered and is nobody's parameter type, so it keeps
+        # the arity it declares.
+        known = bgt_apicheck.arities(module, reg)
+        assert known["pathfinder_callback"] == {(1, 1)}
+        assert known["menu_callback"] == {(1, 1)}
+        assert known["random"] == {(2, 2)}
+        # ...and a name that is BOTH keeps both readings. Manamon 2 declares
+        # a global funcdef `event` and the class `rhythm::event`, and
+        # *replacing* the entry rather than adding to it threw the class's
+        # constructor away and reported five good `event()` calls as taking
+        # too few arguments. A name-keyed oracle unions; it never replaces.
+        module.funcdefs.append(asreader.Function(name="event", func_type=4))
+        module.classes.append(asreader.TypeInfo(name="event", kind="class",
+                                                namespace_="rhythm"))
+        both = bgt_apicheck.arities(module, reg)
+        assert (0, 0) in both["event"], "the class constructor survives"
+        assert (1, 1) in both["event"], "and so does the delegate"

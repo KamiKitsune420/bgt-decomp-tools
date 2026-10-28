@@ -62,13 +62,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:                      # installed as a package
-    from . import (as_opcodes, bgt_api, bgt_asir, bgt_compile, bgt_crack,
-                   bgt_kdf, bgt_libcheck, bgt_pack, bgtlib, script_files)
+    from . import (as_opcodes, bgt_api, bgt_apicheck, bgt_asir,
+                   bgt_compile, bgt_crack, bgt_kdf, bgt_libcheck,
+                   bgt_pack, bgtlib, script_files)
     from .nvgt import decompile
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
     import as_opcodes
     import bgt_api
+    import bgt_apicheck
     import bgt_asir
     import bgt_compile
     import bgt_crack
@@ -137,6 +139,11 @@ class Project:
                  "%-22s %s" % ("unbalanced files", s.get("unbalanced", 0)),
                  "%-22s %s" % ("dangling else", s.get("dangling_else", 0)),
                  "%-22s %s" % ("split verified", "yes" if s.get("verified") else "NO")]
+        if s.get("calls_checked") is not None:
+            # The one check that needs no BGT at all, and the only one a
+            # title the compiler refuses to parse ever gets.
+            lines.append("%-22s %d against this build's own declarations"
+                         % ("calls read back", s["calls_checked"]))
         if self.plugins:
             lines.append("%-22s %s  (types a stock engine lacks)"
                          % ("plugin needed", ", ".join(self.plugins)))
@@ -1174,7 +1181,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
 
     progress("reading the opcode table and the module")
     opcodes = as_opcodes.extract(exe_path)["table"]
-    module = bgt_asir.load(module_path, opcodes=opcodes)
+    # The executable goes in as well as the opcode table. It is not needed to
+    # *read* the module, but `name_engine_funcdefs` asks it which funcdef the
+    # `_builtin_function_` placeholder stands for, and on a machine with no
+    # BGT installed the game's own runtime is the only source there is.
+    module = bgt_asir.load(module_path, exe_path, opcodes=opcodes)
 
     progress("decompiling")
     splitter = _Splitter(module)
@@ -1488,8 +1499,30 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         project.compile_report = bgt_compile.check_project(entry_path,
                                                            timeout=timeout)
 
+    # Read the calls in what was just written back against what this build
+    # declares. The simulation pops a callee's declared arity by
+    # construction, so this can only ever find a defect of the *rendering* --
+    # and that is the half the compiler cannot reach on a title it refuses to
+    # parse. It costs a second and needs no BGT at all.
+    progress("reading the calls back against the game's own build")
+    try:
+        calls = bgt_apicheck.check(out_dir, exe_path, module=module)
+    except Exception as exc:                 # never fail a recovery over it
+        calls = {"error": str(exc)}
+        project.problems.append("the call check could not run: %s" % exc)
+    else:
+        project.stats["calls_checked"] = calls["checked"]
+        for line in calls["problems"]:       # type: ignore[index]
+            project.problems.append("call arity: %s" % line)
+        for name, n in sorted(calls["undeclared"].items()):   # type: ignore
+            project.problems.append(
+                "nothing declares `%s`, called %d time%s: neither this build's "
+                "registrations nor the script itself"
+                % (name, n, "" if n == 1 else "s"))
+
     with open(os.path.join(out_dir, "recovery.json"), "w", encoding="utf-8") as fh:
         json.dump({"executable": exe_path, "entry": project.entry,
+                   "calls": calls,
                    "files": project.files,
                    # What the entry script really includes, and the one
                    # section it carries inline instead. Reporting `order` here

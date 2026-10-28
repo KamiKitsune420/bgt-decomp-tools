@@ -126,6 +126,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `as_write.py` | writes a module back out — byte-exact round-trip, and length-changing edits |
 | `bgt_asir.py` | presents a BGT module as the AngelScript IR the NVGT decompiler reads |
 | `bgt_api.py` | `bgt api`: the engine's API -- documented, from `bgt.chm`, and registered, from `bgt.exe`'s own declaration strings |
+| `bgt_apicheck.py` | `bgt apicheck`: every call in a recovered project's text, against every arity its own build declares -- the check for a title the compiler cannot parse |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
@@ -175,6 +176,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 bgt recover game.exe -o recovered/ --compile
 bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt compile recovered/game.bgt            # just the compiler, on any script
+bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 ```
 
@@ -1069,13 +1071,22 @@ Every title that parses recovers with **0 unmodelled opcodes and 0 bodies
 that failed to decompile**. What the compiler says, and what the project's own
 checks say:
 
-| title | lines | files | goto | unbalanced | split | compiler says |
-|---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,571 | 16 | 0 | 0 | yes | **compiled cleanly, and it runs** |
-| Paladin of the Sky | 27,482 | 61 | 0 | 0 | yes | **compiled cleanly, and it runs** |
-| Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
-| Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 195,242 | 558 | 0 | 0 | yes | **compiled cleanly, and it runs** |
+| title | lines | files | goto | unbalanced | split | calls read back | compiler says |
+|---|---|---|---|---|---|---|---|
+| Super Egg Hunt | 6,564 | 16 | 0 | 0 | yes | 1,607 | **compiled cleanly, and it runs** |
+| Paladin of the Sky | 28,223 | 61 | 0 | 0 | yes | 7,145 | **compiled cleanly, and it runs** |
+| Psycho Strike | 28,067 | 75 | 0 | 0 | yes | 6,462 | 33, every one the engine's |
+| Manamon 2 | 175,032 | 1,638 | 4 | 0 | yes | 51,249 | 33 parse errors, so **nothing** |
+| Crazy Party | 195,364 | 558 | 0 | 0 | yes | 90,606 | **compiled cleanly, and it runs** |
+
+The line and goto counts are a fresh run of all five, not the figures this
+table carried before: Manamon 2's gotos are 4 rather than 6, and the rest
+moved by a few hundred lines as the decompiler improved. **And Paladin has
+to be recovered from the game**, not from `paladin_fixed/game.exe`, which is
+the 1.27 MB executable `bgt compile --build release` *wrote* from an earlier
+recovery. Decompiling that is a round trip rather than a recovery, and it
+reads as one: 36,151 lines against the original's 28,223, because recovered
+source does not compile to the bytecode the original was built from.
 
 Paladin's window now reads `Paladin of the sky`, which supersedes the note
 below about it reporting `command`: that was the uncompiled-build path, and
@@ -2064,6 +2075,96 @@ same corroboration `engine_gap` uses.
 That closes Psycho Strike out: **all 33 of its remaining diagnostics are the
 installed engine's absences** -- 32 uses of the `elias` plugin type and this
 one method -- and none of them is the recovery's.
+
+## Reading the calls back, where the compiler cannot
+
+The section above is the problem: Manamon 2's 33 diagnostics are all *parse*
+errors, a parse error stops the compiler before it checks anything, and the
+largest recovery in the corpus has therefore never had a single call read
+back by anything. `bgt recover --compile` is the measure, and on the title
+that most needs measuring it measures nothing at all.
+
+`bgt apicheck` reads them back, and `bgt recover` now runs it on every
+project without being asked. **The simulation pops a callee's declared arity
+by construction**, so an arity mismatch cannot exist in the IR -- which is
+exactly why the check belongs on the *text*. The rendered source is a
+different artefact: it has been through temporary folding, slot promotion,
+scope qualification and stock-include substitution, and every one of those
+has dropped a real argument at least once in this file's history.
+
+The oracle is three sources, and none of them is a guess:
+
+| source | what it knows |
+|---|---|
+| the module's own `usedFunctions` | every callee's parameters and defaults **as the engine that compiled this module declared them** -- so a fork is checked against its fork |
+| the game's own runtime | the whole registered interface of that build (`bgt_api.registered`) |
+| the recovered text | the script's classes, methods, globals, locals and parameters |
+
+A name may legitimately carry several arities, from overloads and from
+methods of unrelated types sharing a name, so a call is judged against all
+of them and reported only when **nothing** fits. That is deliberately weaker
+than resolving the receiver's type, and it is what makes a false alarm
+impossible from an overload the check failed to consider.
+
+**What it will not judge, it counts rather than guessing at.** AngelScript
+registers every constructor and factory under the literal name `f`, with the
+owner type as a separate string argument, so `vector @f()` and `void
+f(float, float y=0, float z=0)` sit in the binary with nothing to say which
+type either belongs to. Taking the union of every `f` would accept nought to
+three arguments for anything, which is not a check. A call through a
+funcdef-typed local is declined for the same reason: the arity is the
+funcdef's, not the variable's.
+
+| title | calls read back | what the compiler can say |
+|---|---|---|
+| Super Egg Hunt | 1,607 | compiled cleanly |
+| Psycho Strike | 6,462 | 33, every one the engine's |
+| Paladin of the Sky | 7,145 | compiled cleanly |
+| Manamon 2 | 51,249 | **nothing** -- 33 parse errors stop it |
+| Crazy Party | 90,606 | compiled cleanly |
+
+**157,069 calls, and not one mismatch.** That is worth nothing on its own --
+a check that reports nothing may simply be blind -- so it is measured in
+both directions. Injecting a defect into the recovered text finds it every
+time: an argument dropped from `string_replace(a, b, c, d)`, an argument
+added to `key_pressed(x)`, and a callee renamed to one nothing declares are
+all reported, and four of its five guards move the measurement when broken
+(the fifth guards the *declared-name set*, which it moves by 2,198 names on
+Manamon 2 without any current call depending on it). And the four titles the
+compiler *can* judge come back clean from both, which is the cross-validation
+rather than the absence of evidence.
+
+Four things had to be right, and each was wrong first:
+
+- **Comments and strings are scrubbed in ONE left-to-right pass.** Each
+  construct can contain the other's opener, so two regexes in sequence
+  desynchronise. Manamon 2 calls
+  `url_get("http://www.vgstorm.com/playmmn.txt")`, and a comment pass run
+  first eats `//www.vgstorm...` as a line comment and takes the closing
+  quote with it -- after which every quote in the rest of the file pairs
+  with the wrong partner. That reported a one-argument call as taking ten,
+  and then thirty-three.
+- **A declaration is not a call.** `string serialize(dictionary@ d)` in a
+  class body is a definition; read as a call it is a two-argument call to
+  the engine's one-argument `serialize`, and every class in Manamon 2 that
+  declares one produced that. What tells them apart is the token before the
+  name -- a declaration has a *type* there.
+- **A funcdef in call position is a delegate, not a call.**
+  `pathfinder_callback(arg0.callbackPf)` binds one method; it does not call
+  the callback with the five arguments it declares. Read the other way it
+  reported all thirteen of Crazy Party's delegates.
+- **...and a name-keyed oracle unions, it never replaces.** `event` is a
+  global funcdef in Manamon 2 **and** the class `rhythm::event`. Replacing
+  its entry with the delegate's arity threw the class's constructor away and
+  reported five good `event()` calls as taking too few arguments -- the same
+  collision as `string::insert` hiding behind `array::insert_at`, one level
+  up.
+
+The honest summary is that this found no defect in the current recovery and
+closed the one thing that looked like one: a `tmp0(local_7, <?>, <?>, ...)`
+in a stale Manamon 2 project, which is the old `CallPtr`-operand bug and
+renders `local_6(local_7)` under current code. What it changes is that
+Manamon 2 is no longer unmeasured.
 
 ## Run as a script, a game takes its developer path
 
@@ -3095,7 +3196,7 @@ Paladin and Psycho Strike byte-identical, which is what a correctly scoped
 structurer change looks like.
 
 What is left is irreducible flow, switch tails and multi-entry loops in other
-titles — Manamon 2 still reports 6 — which stay labelled rather than forced
+titles — Manamon 2 still reports 4 — which stay labelled rather than forced
 into a shape they do not have.
 
 **No semantic checking on edits.** `bgt asm` proves the *encoding* round-trips,
@@ -3171,14 +3272,29 @@ build, so they still do not give the compiler's file list. They do mean a
 string search for `.bgt` in this title finds source rather than a sound —
 and they explain why one function is a million instructions long.
 
-**One site needs a name the module does not carry.** `pathfinder::set_callback_function`
-takes an *engine* funcdef, and `objVariableTypes` records every funcdef-typed
-value under the `_builtin_function_` placeholder with no signature, so neither
-the slot nor the module's own funcdefs can name it. The engine's documentation
-can — `bgt api pathfinder` gives
-`bool set_callback_function(pathfinder_callback@ callback)` — but wiring
-`bgt_api` into the decompiler is plumbing that has not been done. Two of
-Crazy Party's nineteen errors are that one line.
+**One site needs a name the module does not carry, and both sources have it.**
+`pathfinder::set_callback_function` takes an *engine* funcdef, and
+`objVariableTypes` records every funcdef-typed value under the
+`_builtin_function_` placeholder with no signature, so neither the slot nor
+the module's own funcdefs can name it. `bgt_asir.name_engine_funcdefs` asks
+outside the module: the documentation (`bgt api pathfinder` gives `bool
+set_callback_function(pathfinder_callback@ callback)`) and, where BGT is not
+installed or does not reach, the registration strings in the game's **own**
+runtime -- the one executable always on hand, since it is the input. Crazy
+Party's `JoueurTerrain::setPf` now recovers as
+`pf.set_callback_function(pathfinder_callback(arg0.callbackPf))`.
+
+**How much surface that has is measured, and it is one name.** A registered
+*funcdef* is declared the way a function is, so it appears in `registered()`
+under its own name, while a registered *type* never does -- every constructor
+and factory is declared under the literal name `f`, with the owner as a
+separate string. Asked of six binaries that way, the answer does not move:
+BGT 1.3, Paladin, Super Egg Hunt and Crazy Party at 432 registrations, Psycho
+Strike's fork at 453 and Manamon 2's at 509, spanning 2010 to 2019, register
+**exactly one funcdef** -- `pathfinder_callback`, taken by exactly one method.
+Not even the fork that added Crypto++ and a newer AngelScript adds a second
+callback type. So this is a complete answer rather than a sample, and the
+two sources agree on it.
 
 **What Ghidra contributed here was nothing, and that is worth recording.**
 The binary analysed fine (at a 5G heap; 2G runs out on this one), but the
@@ -3211,18 +3327,31 @@ defaults for it to matter there. A title that recovers well is not evidence.
 **What the recovered source still does not compile.** `bgt recover --compile`
 is the measure, and the groups it leaves are known rather than mysterious:
 
+**Three of the four groups this list used to name are gone, and the counts
+it quoted for them were stale** -- 50 residual gotos in Psycho Strike, 10
+`<?>` sites in Paladin and 1 in Psycho Strike, 7 funcdef-typed locals in
+Psycho Strike. Re-measured against a fresh run of every title: **0, 0 and
+0.** Only Manamon 2 still carries anything, and both of its groups are
+named below rather than counted. A number in this file is a measurement
+with a date on it, and these three had outlived theirs.
+
 - **Residual `goto`.** The structurer labels flow it cannot shape, and
-  AngelScript has no `goto`, so every one of those lines is an error -- 50 in
-  Psycho Strike, from 9 bodies of 1,102. Either the shape gets recognised or
-  those bodies need a dispatch rewrite; a label is not an option.
-- **A call the simulation could not supply arguments for** prints `<?>` rather
-  than inventing values: 10 sites in Paladin, 1 in Psycho Strike. Marked and
-  counted is the right behaviour, but it does not compile.
-- **A funcdef-typed local.** `objVariableTypes` names the placeholder type
-  `_builtin_function_` with no signature to identify which funcdef it is, so
-  the declaration has no name source can use. 7 sites in Psycho Strike.
+  AngelScript has no `goto`, so every one of those lines is an error. Four
+  remain, all in Manamon 2; Paladin, Psycho Strike, Super Egg Hunt and Crazy
+  Party are at zero. Either the shape gets recognised or those bodies need a
+  dispatch rewrite; a label is not an option.
+- **A body no switch matcher claims.** Three, all in Manamon 2, and they are
+  three separate diagnoses rather than one mystery -- see **The three tables
+  nothing claims**.
+- **A call the simulation could not supply arguments for** printed `<?>`
+  rather than inventing values. There is no longer one in any title.
+- **A funcdef-typed local** had no name source could use. There is no longer
+  a `_builtin_function_` anywhere in any recovered file, and the engine's
+  whole funcdef surface turns out to be one name -- see **One site needs a
+  name the module does not carry**.
 - **A type no stock engine registers** (Psycho Strike's `elias`): reported,
-  with the DLL it comes from, and not compilable here at all.
+  with the DLL it comes from, and not compilable here at all. This is the
+  one that stands.
 
 **The NVGT library corpus is checked for compiling, not meaning.** 40 of 52
 library builds recompile -- six modules fail, the same six at HEAD and after

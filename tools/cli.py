@@ -51,8 +51,9 @@ from typing import List, Optional
 
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
-                   bgt_api, bgt_compile, bgt_crack, bgt_ghidra, bgt_libcheck,
-                   bgt_pack, bgt_project, bgt_repack, bgt_unpack, bgt_validate,
+                   bgt_api, bgt_apicheck, bgt_compile, bgt_crack, bgt_ghidra,
+                   bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
+                   bgt_unpack, bgt_validate,
                    bgtlib, engine, script_files)
 except ImportError:       # run directly from a checkout
     import as_disasm
@@ -61,6 +62,7 @@ except ImportError:       # run directly from a checkout
     import as_opcodes
     import as_write
     import bgt_api
+    import bgt_apicheck
     import bgt_compile
     import bgt_crack
     import bgt_ghidra
@@ -283,6 +285,16 @@ def cmd_api(args: argparse.Namespace) -> int:
     if args.missing:
         argv.append("--missing")
     return _run(bgt_api.main, argv, prog="bgt api")
+
+
+def cmd_apicheck(args: argparse.Namespace) -> int:
+    """`bgt apicheck` reads a recovered project's calls back against the build."""
+    argv = [args.project, args.executable]
+    if args.module:
+        argv += ["--module", args.module]
+    if args.quiet:
+        argv.append("--quiet")
+    return _run(bgt_apicheck.main, argv, prog="bgt apicheck")
 
 
 def cmd_recover(args: argparse.Namespace) -> int:
@@ -675,6 +687,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--compiler", help="the bgt.exe to point them at")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_verbs)
+
+    p = sub.add_parser("apicheck",
+                       help="every call in a recovered project, against every "
+                            "arity its own build declares")
+    p.add_argument("project", help="a directory `bgt recover` wrote")
+    p.add_argument("executable", help="the game it was recovered from")
+    p.add_argument("--module", help="the module (default: <project>/*_bytecode.bin)")
+    p.add_argument("--quiet", action="store_true", help="only the problems")
+    p.set_defaults(func=cmd_apicheck)
 
     p = sub.add_parser("files",
                        help="which source files a module was built from (BGT or NVGT)")
