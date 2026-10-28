@@ -560,6 +560,17 @@ class Builder:
                 variables.append(asreader.ScriptVariable(
                     stack_offset=offset, type=DataType(token_type=token)))
         f.variables = variables
+        # **This list has no declaration order, and saying so matters.** The
+        # newer engine writes one declaration per local in the order the
+        # builder declared them, which is what tells a decompiler where the
+        # source's own locals stop and the compiler's scratch begins. Nothing
+        # here is in that order: object slots come from `objVariableTypes` in
+        # record order, and every scalar is appended the first time a typed
+        # opcode happens to mention it -- bytecode order, which says nothing
+        # about scope. A consumer that reads meaning into it is reading a
+        # field that exists and means nothing, so it is flagged rather than
+        # left to look like the real thing.
+        f.synthetic_variables = True
 
     @staticmethod
     def _slot_votes(offset: int, votes: List[int],

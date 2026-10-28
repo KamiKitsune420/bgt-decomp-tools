@@ -77,6 +77,19 @@ CONV_OPS = {
     "dTOi", "dTOi64", "dTOu", "dTOu64", "dTOf",
     "i64TOi", "i64TOf", "i64TOd", "i64TOu", "u64TOd", "u64TOf", "u64TOi64",
 }
+#: Opcodes that assign to the frame slot in their FIRST operand (`w_arg`).
+#: Used to tell the slots a short-circuit arm computes in -- which belong to
+#: the compiler -- from the ones it merely reads, which may be the source's
+#: own. Reading is not writing: an arm that calls a method on a local pushes
+#: that local's slot, and counting the push would unforce a real variable.
+_SLOT_WRITE_OPS = (
+    {"SetV1", "SetV2", "SetV4", "SetV8",
+     "CpyVtoV4", "CpyVtoV8", "CpyRtoV4", "CpyRtoV8",
+     "CpyGtoV4", "CpyGtoV8", "RDR1", "RDR2", "RDR4", "RDR8",
+     "NOT", "NEGi", "NEGf", "NEGd", "NEGi64", "IncVi", "DecVi"}
+    | set(BINARY) | set(IMM_BINARY) | CONV_OPS
+)
+
 # Jump name -> comparison operator of the taken path.  The T* instructions
 # are value-register tests, not branches (see as_context.cpp).
 JUMP_OPS = {"JS": "<", "JNS": ">=", "JP": ">", "JNP": "<=",
@@ -746,6 +759,7 @@ class FuncDecompiler:
         forced = set()
         prefix_types = {}
         highest = 0
+        prefix_forced: set[int] = set()
         for variable in fn.variables:
             off = variable.stack_offset
             if off <= 0:
@@ -755,10 +769,45 @@ class FuncDecompiler:
             # don't mark the start of compiler scratch variables.
             repeated_local = prefix_types.get(off) == variable.type.format()
             if off < highest and not repeated_local:
-                forced.update(prefix_types)
+                prefix_forced.update(prefix_types)
                 break
             prefix_types[off] = variable.type.format()
             highest = max(highest, off)
+        # **That rule reads declaration ORDER, and a short-circuit's scratch
+        # slot must not be caught by it.** The newer engine writes one
+        # declaration per local in the order the builder declared them, which
+        # is what makes "the prefix before the first backward step is the
+        # source's own locals" mean anything. BGT records no scalar local at
+        # all, so `bgt_asir` synthesises the list and appends each slot the
+        # first time a typed opcode mentions it -- bytecode order, with no
+        # scope in it -- and the rule then finds a backward step wherever the
+        # bytecode happens to touch a lower slot later.
+        #
+        # That is how `use_screen_reader` lost two thirds of its condition.
+        # `screen_reader && voice.reader > -2 && voice.sapi_only == false`
+        # compiles to two merges over three scratch slots, and the compiler
+        # reuses them: slot 3 carries `screen_reader` and then `sapi_only`,
+        # slot 1 carries `reader > -2` and then a literal. Forced to be
+        # variables, each arm's computation is emitted as an *unconditional*
+        # statement, so every term is overwritten before the `if` reads it and
+        # the whole condition collapses to `!sapi_only`. It returned true
+        # where the source returns false, so every `speak` went to
+        # `screen_reader_speak_interrupt(-1, ...)`, which fails:
+        # `run_extended` returns -1 when it cannot speak its intro,
+        # `file_menu` turns that into "", and Paladin's main loop reads that
+        # as "no TTS" and reopens the voice selector. Selecting a voice fixed
+        # nothing, because the selector's own `speak_sapi_only()` is what made
+        # speech work while it was open -- so it asked again, forever.
+        #
+        # **Dropping the rule outright is the wrong cure, and measuring says
+        # so: Crazy Party went from 0 residual gotos to 44**, which is 44
+        # compiler errors, because the rule is load-bearing for the mutable
+        # scalars it was written for. Only the slots a short-circuit carries
+        # its value through are excluded, and those are recognisable from the
+        # bytecode alone -- a slot that holds an `&&` is never one of the
+        # source's own locals.
+        self.short_circuit_slots = self._short_circuit_slots()
+        forced |= prefix_forced - self.short_circuit_slots
         self.sparse_switches = {index: pattern for index in range(len(self.instrs))
                                if (pattern := self._sparse_switch_pattern(index)) is not None}
         # The dense form -- a jump table -- yields the same tuple, so the rest
@@ -1795,14 +1844,26 @@ class FuncDecompiler:
             # selection, which is what that looks like from the inside.
             return True
         declarable = (value.data_type or self.var_types.get(off)) is not None
-        # **Only a constant.** Both bugs this catches are a constant bound on
-        # one path and read on another, which is what produces a condition the
-        # compiler then folds away -- `|| true`, `if (false)`. Promoting a
-        # computed value the same way is a different question (duplication,
-        # not a dead branch) and far too broad: on Paladin it emitted a hold
-        # for binds the source never held at all, `__nvgt_hold_7_116 =
-        # __nvgt_out_7_215;` among them, and took 0 compiler errors to 16.
-        if declarable and value.kind == "const" and self._conditionally_bound(bound[0]):
+        # **Only a REPEATABLE value**, which is a constant, a plain variable,
+        # `this` or a bare property read. Promoting a *computed* value the
+        # same way is a different question (duplication, not a dead branch)
+        # and far too broad: on Paladin it emitted a hold for binds the source
+        # never held at all, `__nvgt_hold_7_116 = __nvgt_out_7_215;` among
+        # them, and took 0 compiler errors to 16.
+        #
+        # This said "only a constant" until a parameter copy proved the line
+        # was in the wrong place. `dynamic_menu::run_extended` opens with
+        # `bool initial = auto_speak_first;` and clears it at five sites once
+        # the first item has been announced. A parameter is repeatable, so the
+        # fold took it before this test could run, every read became `arg3`
+        # -- which never changes -- and all five `initial = false;` stores
+        # went with it. The block then re-armed `speak_item` on every
+        # iteration: arrow to an item, stop, and the menu says its name again
+        # and again, forever. It is the same defect as `|| true` and
+        # `if (false)`, and what decides it is whether the slot is written
+        # again on another path, not what kind of value it happened to start
+        # with.
+        if declarable and _is_repeatable(value) and self._conditionally_bound(bound[0]):
             # Computed on one path and read past the join: the read is
             # reachable without that path, so folding is wrong whatever the
             # value is -- a constant most of all. This is how
@@ -3206,6 +3267,72 @@ class FuncDecompiler:
                                  "op": "&&" if expected == 0 else "||"})
         self.skip_indexes.update((self.k + 1, self.k + 2))
         return True
+
+    def _short_circuit_slots(self) -> set[int]:
+        """Slots the compiler carries a short-circuit `&&` / `||` value through.
+
+        Recognised from the bytecode alone, because this has to be known
+        *before* the simulation decides which slots are variables -- and a
+        slot that holds half of an `&&` is never one of the source's own
+        locals, whatever a declaration order suggests.
+
+        The shape is the one `_begin_bool_merge` consumes: a conditional jump
+        over `SetV<dest>, 0|1` and a `JMP` to the merge, where the merge
+        either loads `dest` into the value register or copies it onward. Two
+        kinds of slot are the compiler's and not the source's:
+
+        * `dest`, which the merge's value arrives in on both paths;
+        * every slot the *arm* writes, which holds a piece of the right-hand
+          operand and exists only while that operand is being computed.
+
+        **The slot the jump tested is deliberately NOT one of them**, and
+        that distinction is the whole difference between this working and
+        doing harm. The left-hand operand is usually a perfectly ordinary
+        local -- `int d = get_total_distance(a, b); if (d > limit && ...)` --
+        so excluding it unforces a real variable and the value folds into
+        each of its reads instead. Measured on Super Egg Hunt that cost three
+        duplicated calls: `sound_pool` ran `get_total_distance` twice, a menu
+        ran its item callback twice, and the "erase all data" confirmation
+        asked *twice* while the branch that chose the other wording of the
+        prompt vanished. Those read as ordinary code and are not ordinary
+        code, which is the failure mode this whole file is organised around.
+
+        Shape-only: no type test, no simulation state, since this has to be
+        known before the simulation starts. A false positive costs a slot its
+        forced name, which the fold rules and the duplicate-fold count still
+        guard; a false negative costs a condition its meaning, which nothing
+        downstream can see.
+        """
+        slots: set[int] = set()
+        for k, ins in enumerate(self.instrs):
+            if ins.name not in JUMP_OPS or k + 2 >= len(self.instrs):
+                continue
+            setv, jump = self.instrs[k + 1:k + 3]
+            if setv.name not in ("SetV1", "SetV2", "SetV4") or jump.name != "JMP":
+                continue
+            if _s32(setv.dw_arg) not in (0, 1) or _jump_target(ins) <= ins.pos:
+                continue
+            merge_idx = self.pos_of.get(_jump_target(jump))
+            if merge_idx is None:
+                continue
+            dest = _s16(setv.w_arg)
+            merge_ins = self.instrs[merge_idx]
+            loads_dest = (merge_ins.name in ("CpyVtoR4", "CpyVtoR8")
+                          and _s16(merge_ins.w_arg) == dest)
+            stores_dest = (merge_ins.name in ("CpyVtoV4", "CpyVtoV8")
+                           and _s16(merge_ins.w_arg2) == dest)
+            if not (loads_dest or stores_dest):
+                continue
+            slots.add(dest)
+            arm_idx = self.pos_of.get(_jump_target(ins))
+            if arm_idx is None:
+                continue
+            for op in self.instrs[arm_idx:merge_idx]:
+                if op.name in _SLOT_WRITE_OPS:
+                    off = _s16(op.w_arg)
+                    if off > 0:
+                        slots.add(off)
+        return slots
 
     def _tested_as_bool(self, slot: int, start: int, window: int = 4) -> bool:
         """Is this slot loaded and then tested as a boolean, right here?

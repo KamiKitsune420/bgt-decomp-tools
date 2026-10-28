@@ -124,6 +124,101 @@ class FoldSafetyTests(unittest.TestCase):
         sim = self._sim(instrs=[op("CpyVtoV4"), op("SUSPEND"),
                                 op("CpyVtoR4", 28), op("JLowNZ")])
         self.assertTrue(sim._tested_as_bool(28, 1))
+    def test_a_repeatable_value_bound_on_one_path_is_promoted_too(self):
+        """The rule is about the PATH, not about the kind of value.
+
+        `_stale_fold` tested `value.kind == "const"` before consulting
+        `_conditionally_bound`, so a parameter copy never reached it:
+        `dynamic_menu::run_extended` opens with
+        `bool initial = auto_speak_first;` and clears it at five sites once
+        the first item has been announced. A parameter is repeatable, so the
+        fold took it first, every read became `arg3` -- which never changes --
+        and all five `initial = false;` stores went with it. The block then
+        re-armed `speak_item` every iteration: arrow to an item, stop, and the
+        menu says its name again and again, forever.
+        """
+        from decompile import Atom, DataType
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+        param = Atom("var", "arg3", data_type=DataType(token_type=67))
+
+        def sim_for(value):
+            return self._sim(instrs=instrs, k=5,          # reading at pos 20
+                             cond_spans=[], back_edges=[(16, 32)],
+                             temps={7: value}, temp_bound={7: (8, 0)},
+                             duplicate_binds=set(), var_types={}, stmt_count=3,
+                             stmt_texts=["a;", "b;", "c;"])
+
+        # Bound before the loop head, read inside: promoted, parameter or not.
+        self.assertTrue(sim_for(param)._stale_fold(7))
+        self.assertTrue(sim_for(Atom("const", "0",
+                                     data_type=DataType(token_type=67)))._stale_fold(7))
+        # A computed value is still left alone here -- promoting those is a
+        # different question (duplication, not a dead branch) and took Paladin
+        # from 0 compiler errors to 16.
+        call = Atom("call", "menu.run_extended(x)",
+                    data_type=DataType(token_type=70))
+        self.assertFalse(sim_for(call)._stale_fold(7))
+        # ...and with no declared type there is nothing to declare, so the
+        # value still folds rather than becoming an undeclared name.
+        bare = self._sim(instrs=instrs, k=5, cond_spans=[], back_edges=[(16, 32)],
+                         temps={7: Atom("var", "arg3")}, temp_bound={7: (8, 0)},
+                         duplicate_binds=set(), var_types={}, stmt_count=3,
+                         stmt_texts=["a;"])
+        self.assertFalse(bare._stale_fold(7))
+
+    def test_a_short_circuits_scratch_slots_are_found_from_the_bytecode(self):
+        """They have to be known before the simulation starts, because what
+        reads them is the rule that decides which slots become variables.
+
+        BGT records no scalar local, so `bgt_asir` synthesises the
+        declaration list in bytecode order -- and the "real source locals are
+        the prefix before the first backward offset step" rule then reads
+        scope out of an order that has none. In `use_screen_reader` that
+        forced two short-circuit scratch slots to be variables, each arm's
+        computation became an *unconditional* statement, and since the
+        compiler reuses those slots the condition
+        `screen_reader && voice.reader > -2 && !voice.sapi_only` collapsed to
+        `!sapi_only` -- true where the source is false, so every `speak` went
+        to a screen reader that was not there.
+        """
+        from decompile import FuncDecompiler
+
+        def op(name, pos, w_arg=0, w_arg2=0, dw_arg=0, jump_target=None):
+            return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                         w_arg=w_arg, w_arg2=w_arg2, dw_arg=dw_arg,
+                         jump_target=jump_target)
+
+        #   CpyVtoR4 3        ; load the left operand
+        #   JLowNZ -> arm     ; if it is true, evaluate the right one
+        #   SetV4 2, 0        ; otherwise the whole thing is false
+        #   JMP -> merge
+        #   arm: RDR4 1 ; CpyVtoV4 2, 1
+        #   merge: CpyVtoR4 2
+        instrs = [
+            op("CpyVtoR4", 0, w_arg=3),
+            op("JLowNZ", 1, jump_target=4),
+            op("SetV4", 2, w_arg=2, dw_arg=0),
+            op("JMP", 3, jump_target=6),
+            op("RDR4", 4, w_arg=1),
+            op("CpyVtoV4", 5, w_arg=2, w_arg2=1),
+            op("CpyVtoR4", 6, w_arg=2),
+            op("RET", 7),
+        ]
+        sim = object.__new__(FuncDecompiler)
+        sim.instrs = instrs
+        sim.pos_of = {i.pos: k for k, i in enumerate(instrs)}
+        slots = sim._short_circuit_slots()
+
+        # the merge's destination, and the slot the arm computes in
+        self.assertIn(2, slots)
+        self.assertIn(1, slots)
+        # **But NOT the slot the jump tested.** The left-hand operand is
+        # usually an ordinary local -- `int d = get_total_distance(a, b);
+        # if (d > limit && ...)` -- and unforcing it folds the call into each
+        # of its reads instead. Taking it cost Super Egg Hunt three
+        # duplicated calls, one of them a confirmation prompt asked twice.
+        self.assertNotIn(3, slots)
 
 
 class LiteralRenderingTests(unittest.TestCase):

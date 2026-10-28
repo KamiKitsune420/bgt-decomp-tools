@@ -1966,6 +1966,43 @@ position rather than kept in append order, which is what lets a promotion
 insert its assignment where the value was computed instead of where it is
 read.
 
+**Two and a half: the rule is about the PATH, not the kind of value.**
+This test read `value.kind == "const"` before consulting the path, on the
+argument that both bugs it caught were constants. A parameter copy proved the
+line was in the wrong place. `dynamic_menu::run_extended` opens with
+
+```
+bool initial = auto_speak_first;        // the parameter, copied
+```
+
+and clears it at **five** sites once the first item has been announced. A
+parameter is *repeatable* -- reading it again costs nothing and yields the
+same thing -- so the fold took it before the path test could run: every read
+became `arg3`, which never changes, and all five `initial = false;` stores
+went with it. The block then re-armed `speak_item` on every iteration, so
+arrowing to an item and stopping made the menu say its name again, and again,
+forever. It is the same defect as `|| true` and `if (false)`, and what decides
+it is whether the slot is written again on another path.
+
+So the test is now *repeatable* rather than *constant*. A **computed** value is
+still left alone, and that boundary is still the measured one: promoting those
+emitted holds for binds the source never made (`__nvgt_hold_7_116 =
+__nvgt_out_7_215;`) and took Paladin from 0 compiler errors to 16.
+
+It is worth knowing what else came back with it, because it was never only a
+menu bug. `sound_pool`'s distance code is
+
+```
+int true_x = listener_x;                        // the parameter, copied
+if (listener_x < delta_left) true_x = delta_left;
+else if (listener_x > delta_right) true_x = delta_right;
+```
+
+-- a clamp, written exactly this way. Folded, `true_x` was `listener_x`
+everywhere and both assignments vanished, so every recovered title positioned
+its sounds from the **unclamped** coordinate. Nothing reports that: it
+compiles, it runs, and the audio is simply in the wrong place.
+
 **Three: the value was computed before a loop and read inside it.** The same
 problem through a back edge, and the one that mattered most. `dynamic_menu`
 declares `bool speak_item = false;` before its loop, and every arrow branch
@@ -2019,6 +2056,73 @@ The duplications worth catching are far worse than doubled anyway:
 `file_menu` reads one result 4 times and `play_extended_1d` read one
 `reserve_slot()` 45 times. A two-read duplication is left folded and
 `bgt libcheck` still counts it.
+
+### A declaration list with no declaration order
+
+The rule above decides whether a slot is *foldable*. A separate one decides
+whether it is a **variable at all**, and it reads something BGT does not have.
+
+The newer engine writes one declaration per local in the order the builder
+declared them, and that order is information: the source's own locals come
+first, and where the offset steps *backwards* the compiler's scratch begins.
+`FuncDecompiler` uses exactly that -- the prefix before the first backward
+step is forced to stay an lvalue.
+
+BGT records no scalar local at all (see **What the module does not record**),
+so `bgt_asir` synthesises the list: object slots from `objVariableTypes` in
+record order, then every scalar appended the first time a typed opcode happens
+to mention it. That is **bytecode order, with no scope in it** -- and read as
+declaration order it finds a backward step wherever the bytecode later touches
+a lower slot. `use_screen_reader` is four synthesised entries at offsets
+1, 3, 3, 2, and the 2 ends the prefix, so slots 1 and 3 were declared
+variables in a function whose source has no locals whatsoever.
+
+What that costs is a whole condition. `screen_reader && voice.reader > -2 &&
+voice.sapi_only == false` compiles to two short-circuit merges over three
+scratch slots, and the compiler **reuses** them -- slot 3 carries
+`screen_reader` and then `sapi_only`, slot 1 carries `reader > -2` and then a
+literal. Forced to be variables, each arm's computation is emitted as an
+*unconditional* statement, so every term is overwritten before the `if` reads
+it:
+
+```
+local_3 = (screen_reader ? 1 : 0);          // then clobbered by sapi_only
+local_1 = ((voice.reader > -2) ? 1 : 0);    // then clobbered by a literal
+...
+if (((local_3 != 0) && (local_1 != 0)) && (local_1 != 0))   // == !sapi_only
+```
+
+It returned **true where the source returns false**, so every `speak` went to
+`screen_reader_speak_interrupt(-1, ...)`, which fails. `run_extended` returns
+-1 when it cannot speak its intro, `file_menu` turns that into `""`, and
+Paladin's main loop reads that as "no TTS" and reopens the voice selector.
+Selecting a voice fixed nothing, because the selector's own
+`speak_sapi_only()` is what made speech work while it was open -- so it asked
+again, forever, which is how it was reported.
+
+`f.synthetic_variables` marks the list, so nothing mistakes it for the real
+thing. The fix is **not** to drop the order rule, and measuring says so
+loudly: without it Crazy Party went from 0 residual gotos to **44**, which is
+44 compiler errors, because the rule is load-bearing for the mutable scalars
+it was written for. Instead `_short_circuit_slots()` finds the slots a merge
+carries its value through, from the bytecode alone, and those are excluded:
+
+* `dest`, which the merge's value arrives in on both paths;
+* every slot the **arm** writes, which holds part of the right-hand operand.
+
+**The slot the jump tested is deliberately not one of them**, and that is the
+whole difference between this working and doing harm. The left-hand operand is
+usually an ordinary local -- `int d = get_total_distance(a, b); if (d > limit
+&& ...)` -- so excluding it unforces a real variable and the value folds into
+each of its reads instead. Taking it cost Super Egg Hunt three duplicated
+calls: `sound_pool` ran `get_total_distance` twice, a menu ran its item
+callback twice, and the "erase all data" confirmation asked **twice** while
+the branch choosing the other wording of the prompt vanished.
+
+With both, all three titles hold at 0 residual gotos and a verified split, and
+`bgt libcheck --decompiler` scores identically before and after on every one
+of them -- 39/47 call sequences on Paladin, 43/47 on Super Egg Hunt, 129/153
+on Crazy Party -- which is the check that says no call was duplicated.
 
 ### Typing the promoted local took three tries, and the declaration wins
 
