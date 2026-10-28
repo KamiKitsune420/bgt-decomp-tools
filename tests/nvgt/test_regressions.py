@@ -418,3 +418,74 @@ class RendererTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaseMethodCallTests(unittest.TestCase):
+    """A base class's method, called through `this`, recurses forever.
+
+    Paladin's `class person : interact` opens its override with
+    `interact::reset();`. Rendered as `this.reset();` that is unbounded
+    recursion -- starting a new game died with `Stack overflow` after 10,000
+    frames of `person::reset` -- and the project reported 0 residual gotos, a
+    verified split and `compiled cleanly` throughout. 62 sites in one title.
+    """
+
+    def _sim(self, here, fn_name="reset"):
+        from decompile import FuncDecompiler, Function
+        sim = object.__new__(FuncDecompiler)
+        sim.fn = Function(name=fn_name, object_type=here)
+        return sim
+
+    @staticmethod
+    def _cls(name, methods=(), base=None):
+        from decompile import Function, TypeInfo
+        return TypeInfo(name=name, derived_from=base,
+                        methods=[Function(name=m) for m in methods])
+
+    def test_an_ancestors_method_is_qualified_and_an_own_one_is_not(self):
+        base = self._cls("interact", ["reset", "act", "is_inside"])
+        here = self._cls("person", ["reset", "act"], base=base)
+        sim = self._sim(here)
+
+        # the base's `reset`, which this class overrides -> say the base
+        self.assertTrue(sim._calls_a_base_method("interact", "reset"))
+        # this class's own -> `this.reset()` is right, and qualifying it
+        # would be the recursion all over again
+        self.assertFalse(sim._calls_a_base_method("person", "reset"))
+        # a name this class does not declare: the unqualified call already
+        # reaches the base's one, so there is nothing to say
+        self.assertFalse(sim._calls_a_base_method("interact", "is_inside"))
+        # an unrelated class is not an ancestor
+        self.assertFalse(sim._calls_a_base_method("sound_pool", "reset"))
+        # no owner at all (a bare name) must not be qualified into `::reset`
+        self.assertFalse(sim._calls_a_base_method("", "reset"))
+
+    def test_only_derived_from_is_walked_so_an_interface_is_never_pinned(self):
+        """That is what makes this safe without reading the opcode.
+
+        An interface's methods are reached through `interfaces`, never the
+        `derived_from` chain, so an interface dispatch cannot match here and
+        cannot be pinned to a base by mistake. Gating on the opcode instead
+        was tried and is not equivalent: it kept `person::reset` qualified
+        while letting `clock::reset` fall back to `this.reset()`, because the
+        resolved callee is not reported the same way at every call site.
+        """
+        from decompile import Function, TypeInfo
+        iface = TypeInfo(name="speaker", is_interface=True,
+                         methods=[Function(name="speak")])
+        here = self._cls("person", ["speak"])
+        here.interfaces = [iface]
+        sim = self._sim(here, fn_name="speak")
+        self.assertFalse(sim._calls_a_base_method("speaker", "speak"))
+
+    def test_a_grandparent_counts(self):
+        """The chain is walked, not just the immediate base, and a cycle in it
+        terminates rather than hanging the decompiler."""
+        top = self._cls("thing", ["reset"])
+        mid = self._cls("interact", ["reset"], base=top)
+        here = self._cls("person", ["reset"], base=mid)
+        sim = self._sim(here)
+        self.assertTrue(sim._calls_a_base_method("thing", "reset"))
+        self.assertTrue(sim._calls_a_base_method("interact", "reset"))
+        top.derived_from = here          # a cycle must not loop forever
+        self.assertFalse(sim._calls_a_base_method("nowhere", "reset"))

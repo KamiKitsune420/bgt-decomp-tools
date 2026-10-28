@@ -2647,6 +2647,28 @@ class FuncDecompiler:
             if (obj.text == "this" and self.fn.flags_byte & 1
                     and fr is not None and not fr.flags_byte & 1):
                 calltxt = f"{meth}({', '.join(a.text for a in args)})"
+            # The owner is `fr.object_type`, not the `cls` parsed out of the
+            # name: a method's `Function.name` is the bare one (`reset`), so
+            # `cls` is empty here and reading the base off it finds nothing.
+            elif obj.text == "this" and self._calls_a_base_method(
+                    fr.object_type.name if fr is not None
+                    and fr.object_type is not None else cls, meth):
+                cls = (fr.object_type.name if fr is not None
+                       and fr.object_type is not None else cls)
+                # **A base class's method, through `this`, needs the base
+                # named.** The call's operand resolved to a body owned by an
+                # ancestor, and this class declares the name too -- so
+                # `this.m()` would resolve to *this* class's override
+                # instead, which for the same name is itself.
+                #
+                # Paladin's `person : interact` opens its override with
+                # `interact::reset();`, which came out as `this.reset();`.
+                # That is unbounded recursion: starting a new game died with
+                # `Stack overflow` after 10,000 frames of `person::reset`,
+                # from `create_room_passengers` building the first passenger.
+                # It compiles, and nothing short of running it can see it.
+                # `base::method()` was put to BGT before being emitted.
+                calltxt = f"{cls}::{meth}({', '.join(a.text for a in args)})"
         else:
             qualified = (fr.namespace_ + "::" if fr and fr.namespace_ else "") + base
             # A global function the enclosing class also has a method for
@@ -2704,6 +2726,42 @@ class FuncDecompiler:
             self._stmt(f"{dest.text} = {txt};")
         else:
             self.value_reg = Atom("call", txt)
+
+    def _calls_a_base_method(self, owner: str, name: str) -> bool:
+        """Is this `this.name()` really a call to a BASE class's `name`?
+
+        Two things have to hold, and the second is what keeps this narrow:
+        the function the operand resolved to must belong to an ancestor of the
+        class this body is in, and that class must declare the name as well.
+        Where it does not, the unqualified call already reaches the base's one
+        and saying so adds nothing.
+
+        **Only `derived_from` is walked, and that is what makes it safe
+        without inspecting the opcode.** An interface's methods are reached
+        through `interfaces`, never this chain, so an interface dispatch can
+        never match here and cannot be pinned to a base by mistake. Gating on
+        the opcode as well was tried and is not equivalent: it kept
+        `person::reset` qualified while letting `clock::reset` fall back to
+        `this.reset()` -- still unbounded recursion -- although both sites
+        disassemble to a plain `CALL` of `interact::reset`. Why the two
+        differed was not established; what the measurement settles is that
+        the opcode is the wrong thing to read, and this rule does not need
+        it.
+        """
+        here = self.fn.object_type
+        if here is None or not owner or owner == here.name:
+            return False
+        if not any(m is not None and m.name == name
+                   for m in (here.methods or ())):
+            return False
+        base = getattr(here, "derived_from", None)
+        seen = set()
+        while base is not None and id(base) not in seen:
+            seen.add(id(base))
+            if base.name == owner:
+                return True
+            base = getattr(base, "derived_from", None)
+        return False
 
     def _shadowed_by_enclosing_class(self, name: str) -> bool:
         """Does the class this body belongs to declare a method of this name?

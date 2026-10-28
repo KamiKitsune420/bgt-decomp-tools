@@ -1050,7 +1050,7 @@ checks say:
 | Paladin of the Sky | 27,482 | 61 | 0 | 0 | yes | **compiled cleanly, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 195,364 | 558 | 0 | 0 | yes | **0 errors, 2 warnings, and it runs** |
+| Crazy Party | 195,242 | 558 | 0 | 0 | yes | **compiled cleanly, and it runs** |
 
 Paladin's window now reads `Paladin of the sky`, which supersedes the note
 below about it reporting `command`: that was the uncompiled-build path, and
@@ -2081,6 +2081,95 @@ The duplications worth catching are far worse than doubled anyway:
 `file_menu` reads one result 4 times and `play_extended_1d` read one
 `reserve_slot()` 45 times. A two-read duplication is left folded and
 `bgt libcheck` still counts it.
+
+### A base class's method, called through `this`, recurses forever
+
+The worst one yet, because it is a *crash* and the project reports nothing:
+0 residual gotos, a verified split, `compiled cleanly`, an executable that
+starts -- and then
+
+```
+BGT Runtime Error: A runtime error occurred.
+In function: void person::reset()
+Description: Stack overflow
+```
+
+with 10,000 identical frames of `person::reset` under it. The stack's base
+names the path in: `main` -> `handle_file_menu` -> `init_game` ->
+`create_passengers` -> `create_room_passengers` -> `person()`, so it died
+building the first passenger of a new game.
+
+Paladin's `class person : interact` opens its override the way source has to:
+
+```
+void reset()
+{
+    interact::reset();          // the base's, then this class's own fields
+    type = 3;
+    sound_file = "person";
+}
+```
+
+and that came out as `this.reset();`. A method's `Function.name` in the IR is
+the **bare** one, so splitting it on `::` yields no class and the owner has to
+come from `fr.object_type` instead -- read off the name, this never found a
+base at all. With the owner in hand, `_calls_a_base_method` qualifies the call
+when that owner is a strict ancestor of the class the body belongs to and that
+class declares the name as well. Where it does not, the unqualified call
+already reaches the base's one and saying so adds nothing.
+
+**What makes it safe is the chain that is walked, not the opcode.** Only
+`derived_from` is followed, and an interface's methods are reached through
+`interfaces`, so an interface dispatch can never match and can never be
+pinned to a base by mistake. Gating on the opcode as well was tried and
+rejected on measurement: it kept `person::reset` qualified while letting
+`clock::reset` fall back to `this.reset()` -- still unbounded recursion --
+even though both sites disassemble to a plain `CALL` of `interact::reset`.
+Why the two differed was not established, and the honest conclusion is the
+narrow one: the opcode is the wrong field to read here, and the ancestor walk
+does not need it. `base::method()` was put to BGT 1.3 before being emitted,
+and it compiles.
+
+Paladin had **62** of these, in one base class's descendants: `reset`, `init`,
+`act`, `make_noise`, `pause`, `resume`, `is_inside`. Only the same-name ones
+recurse; the others quietly ran the derived override where the source asked
+for the base, which compiles and is simply a different program. Crazy Party,
+with 530 derived classes, had **167**.
+
+**The sweep that counts them has to compare arity, not just the name.** A
+method forwarding to its own overload -- `focus()` calling
+`focus(a, b, c)` -- is ordinary delegation, and Crazy Party has 18 of those;
+a name-only sweep reports 184 self-recursive calls there and means nothing by
+it. What cannot terminate is the same name with the same number of arguments.
+
+| title | same-arity self-calls | after |
+|---|---|---|
+| Paladin | 62 | **2** |
+| Crazy Party | 167 | **15** |
+| Super Egg Hunt | 0 | 0 -- it declares no base class |
+
+Fixing it also took Crazy Party's last two compiler warnings
+(`The operand is implicitly converted to handle in order to compare them`)
+away, so all three titles now report `compiled cleanly`.
+
+**And verifying that found the driver claiming a game had started when none
+had.** Compiling emits its own `Compilation Result` window on success, which
+carries no diagnostics and no "error" in its name -- and the rule for "the
+script itself drew a window" was *any* window that is not an error report. So
+`bgt compile` on Crazy Party answered `compiled cleanly, and ran: it opened a
+window of its own titled 'Compilation Result'`. Nothing ran; the engine had
+just said it wrote the executable. Only run mode may draw that conclusion
+now, and only from the driver's own `$ran`. Claiming a game started when it
+did not is the one thing this driver exists to get right, and it is exactly
+the shape of everything else in this section: a confident report of something
+that never happened.
+
+Every survivor reads as real recursion. Paladin's two are `interact::act()`
+calling itself, guarded, after `add_mode(1)` has advanced the state, in a
+class with no base to be confused with. Crazy Party's are flood fills and
+accumulators that change an argument (`brule(arg0 - 1, arg1)`,
+`att(5, arg1)`). One is worth another look and is recorded rather than
+claimed fixed: `Equipe::opCmp(x)` returns `this.opCmp(x)` unchanged.
 
 ### A declaration list with no declaration order
 

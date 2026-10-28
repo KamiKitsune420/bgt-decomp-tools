@@ -783,9 +783,25 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
     # Any window other than the report window means compilation finished and
     # the script itself started drawing. Warnings do not contradict that: the
     # engine reports them and then runs, so the diagnostics are kept.
-    if result.get("ran") or ("error" not in title.lower() and not diagnostics):
+    #
+    # **Only run mode may conclude that from a title**, and `$ran` is the
+    # driver saying it saw a window that was not the report. Compiling emits
+    # its own `Compilation Result` window on success, which carries no
+    # diagnostics and no "error" in its name -- so the inference below read a
+    # clean *compile* as a clean *run*, and `bgt compile` on Crazy Party
+    # answered `compiled cleanly, and ran: it opened a window of its own
+    # titled 'Compilation Result'`. Nothing ran; the engine had just said it
+    # wrote the executable. Claiming a game started when it did not is the
+    # one thing this driver exists to get right.
+    if result.get("ran") or (not build and "error" not in title.lower()
+                             and not diagnostics):
         return Report(outcome="started", raw=text, title=title,
                       diagnostics=diagnostics, exit_code=exit_code, said=said)
+    if not diagnostics and "error" not in title.lower():
+        # A report window with nothing in it, in compile mode: the compile
+        # finished and said so.
+        return Report(outcome="compiled", raw=text, title=title,
+                      exit_code=exit_code, said=said)
     return Report(outcome="errors", diagnostics=diagnostics, raw=text,
                   title=title, exit_code=exit_code, said=said)
 
