@@ -272,6 +272,69 @@ def find_compiler(explicit: Optional[str] = None) -> Optional[str]:
     return None
 
 
+#: the shell verbs BGT's installer registers for a `.bgt` file, and which of
+#: them a person actually reaches: `open` is double-clicking it.
+SHELL_VERBS = ("open", "run", "compile", "compile_debug", "compile_release")
+
+_VERB_EXE = re.compile(r'^"([^"]+)"')
+
+
+def shell_verbs() -> Dict[str, str]:
+    """{verb: bgt.exe} as the shell would run it for a `.bgt` file.
+
+    Worth reading, because **more than one BGT can be installed and the newest
+    one does not win**. Installing 1.0 after 1.3 leaves `open`, `run` and
+    `compile` pointing at 1.0 while only `compile_debug` and `compile_release`
+    still point at 1.3 -- so double-clicking a recovered script compiles it
+    with the engine that has no default arguments, and every `bool x = false`
+    in a signature comes back as `Expected ')' or ','`.
+
+    That is a hundred errors in a project that compiles cleanly one verb over,
+    and nothing in the report could see it, because the report only knew about
+    the compiler *this toolkit* chose.
+    """
+    try:
+        import winreg
+    except ImportError:                      # not Windows
+        return {}
+    found: Dict[str, str] = {}
+    for verb in SHELL_VERBS:
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            key = r"SOFTWARE\Classes\bgtscript\shell\%s\command" % verb
+            try:
+                with winreg.OpenKey(root, key) as handle:
+                    command, _ = winreg.QueryValueEx(handle, "")
+            except OSError:
+                continue
+            match = _VERB_EXE.match(str(command).strip())
+            if match and os.path.isfile(match.group(1)):
+                found[verb] = match.group(1)
+                break
+    return found
+
+
+def verb_warnings(needs_default_args: bool = True) -> List[str]:
+    """Shell verbs whose BGT cannot parse what a recovered project contains.
+
+    Only the verbs a person reaches by hand are worth reporting, and only when
+    the answer is actually different from the one the checked compiler gave --
+    `capabilities` caches per executable, so asking about a second install
+    costs one small compile.
+    """
+    if not needs_default_args:
+        return []
+    notes: List[str] = []
+    for verb, exe in sorted(shell_verbs().items()):
+        if not capabilities(exe).get("default_arguments", True):
+            notes.append(
+                "the shell's `%s` verb for a .bgt file runs %s, which cannot "
+                "parse default arguments -- opening this project that way "
+                "reports `Expected ')' or ','` on every signature that has "
+                "one. Use \"Compile Script (Debug)\" or pass --compiler."
+                % (verb, exe))
+    return notes
+
+
 #: a one-line script whose only unusual feature is a default argument, which
 #: is how the compiler is asked whether it has them.
 _DEFAULT_ARG_PROBE = chr(10).join([
@@ -281,6 +344,40 @@ _DEFAULT_ARG_PROBE = chr(10).join([
 ])
 
 _CAPABILITIES: Dict[str, Dict[str, bool]] = {}
+
+#: where the answer is remembered between runs. Probing means launching the
+#: compiler, and a compiler that rejects the probe shows a modal error dialog
+#: -- which lands on whoever is at the machine. Asking once per install is
+#: enough: the answer cannot change unless the executable does, so the key
+#: includes its size and mtime.
+_CAPS_CACHE = os.path.join(tempfile.gettempdir(), "bgt_capabilities.json")
+
+
+def _cache_key(exe: str) -> str:
+    try:
+        info = os.stat(exe)
+        return "%s|%d|%d" % (os.path.normcase(exe), info.st_size,
+                             int(info.st_mtime))
+    except OSError:
+        return os.path.normcase(exe)
+
+
+def _load_caps() -> Dict[str, Dict[str, bool]]:
+    try:
+        with open(_CAPS_CACHE, "r", encoding="utf-8") as fh:
+            stored = json.load(fh)
+        return stored if isinstance(stored, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_caps(cache: Dict[str, Dict[str, bool]]) -> None:
+    try:
+        with open(_CAPS_CACHE, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+    except OSError:
+        pass                              # a cache that cannot be written is
+                                          # a slower answer, not a wrong one
 
 
 def capabilities(compiler: Optional[str] = None) -> Dict[str, bool]:
@@ -302,18 +399,33 @@ def capabilities(compiler: Optional[str] = None) -> Dict[str, bool]:
         return {}
     if exe in _CAPABILITIES:
         return _CAPABILITIES[exe]
+    key = _cache_key(exe)
+    stored = _load_caps()
+    if key in stored:
+        _CAPABILITIES[exe] = stored[key]
+        return stored[key]
     folder = tempfile.mkdtemp(prefix="bgtcaps_")
     script = os.path.join(folder, "probe.bgt")
     try:
         with open(script, "w", encoding="utf-8") as fh:
             fh.write(_DEFAULT_ARG_PROBE)
         report = check(script, compiler=exe, timeout=60.0, build="debug")
+        # **"No errors" is only an answer when the check ran.** `nodriver`,
+        # `timeout` and `crashed` carry no diagnostics, so `not report.errors`
+        # reads as "this compiler is fine" -- and that is how BGT 1.0 came to
+        # be reported as supporting default arguments while a project
+        # compiled against it produced a hundred `Expected ')' or ','`. One
+        # busy lock was enough, because two checks cannot run at once.
+        if report.outcome not in ("compiled", "errors", "started"):
+            return {}                     # unknown, and not cached: ask again
         found = {"default_arguments": not report.errors}
     except Exception:
-        found = {}
+        return {}
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     _CAPABILITIES[exe] = found
+    stored[key] = found
+    _save_caps(stored)
     return found
 
 

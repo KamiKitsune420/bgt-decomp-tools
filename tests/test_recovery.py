@@ -427,6 +427,50 @@ def test_neutered_disarms_the_entry_point_and_keeps_the_module():
         assert text.count("void main()") == 1         # exactly one entry point
 
 
+def test_an_inconclusive_check_is_not_a_capability_answer():
+    """`nodriver`, `timeout` and `crashed` carry no diagnostics.
+
+    Reading "no errors reported" as "this compiler is fine" made BGT 1.0 come
+    back as *supporting* default arguments, so the warning that exists for
+    exactly that never fired -- and one busy lock is enough to cause it,
+    because two checks cannot run at once.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "bgt.exe")
+        with open(exe, "wb") as fh:
+            fh.write(b"MZ not really")
+        real_check = bgt_compile.check
+        bgt_compile._CAPABILITIES.clear()
+        try:
+            for outcome in ("nodriver", "timeout", "crashed"):
+                bgt_compile.check = lambda *a, **k: bgt_compile.Report(
+                    outcome=outcome, raw="the check could not run")
+                bgt_compile._CAPABILITIES.clear()
+                assert bgt_compile.capabilities(exe) == {}, outcome
+            # ...and a real verdict is still an answer.
+            bgt_compile.check = lambda *a, **k: bgt_compile.Report(
+                outcome="compiled", exit_code=0)
+            bgt_compile._CAPABILITIES.clear()
+            assert bgt_compile.capabilities(exe) == {"default_arguments": True}
+        finally:
+            bgt_compile.check = real_check
+            bgt_compile._CAPABILITIES.clear()
+
+
+def test_shell_verbs_are_read_so_the_wrong_bgt_can_be_named():
+    """BGT's installer registers five verbs and the newest install does not
+    win: 1.0 over 1.3 leaves `open`, `run` and `compile` on 1.0. A project
+    that compiles cleanly here then fails on a double-click."""
+    verbs = bgt_compile.shell_verbs()
+    assert isinstance(verbs, dict)
+    assert set(verbs) <= set(bgt_compile.SHELL_VERBS)
+    for exe in verbs.values():
+        assert os.path.isfile(exe)
+    # Nothing is claimed when the capability is unknown: a missing answer
+    # must not read as a warning, and must not read as an all-clear either.
+    assert bgt_compile.verb_warnings(needs_default_args=False) == []
+
+
 def test_staging_repoints_relative_includes_at_the_real_files():
     """A staged copy does not sit where the includes are written against.
 
@@ -1301,6 +1345,32 @@ def test_a_missing_screen_reader_client_is_said_out_loud_not_skipped():
             bgt_roots=[os.path.join(tmp, "no-bgt-here")])
         assert copied == []
         assert any("fall back to SAPI" in note for note in notes)
+
+
+def test_copying_and_extracting_can_both_happen_in_one_run():
+    """They answer different questions, so they are not alternatives.
+
+    Forcing a choice meant the obvious way to get the assets out left a
+    project the engine could not load a pack for -- `ERROR! could not load
+    pack data/bgm.dat.`, reported from a real run.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        key = b"k" * 32
+        blob = bgt_pack.encrypt_payload(b"OggS-real-audio", key)
+        exe = _game_folder(tmp, packs=[("data/bgm.dat", [("a.ogg", blob)])])
+        packs = bgt_project.data_packs(exe, _Mod(["data/bgm.dat"]))
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        notes = bgt_project.bring_data(
+            packs, out, extract=True, copy=True,
+            keys={bgt_pack.tag_for_key(key): key})
+        # the pack itself, where the script will look for it...
+        assert os.path.isfile(os.path.join(out, "data", "bgm.dat"))
+        # ...and its contents, decrypted, for reading.
+        with open(os.path.join(out, "assets", "bgm", "a.ogg"), "rb") as fh:
+            assert fh.read() == b"OggS-real-audio"
+        assert any("copied" in note for note in notes)
+        assert any("extracted" in note for note in notes)
 
 
 def test_survey_reports_the_tags_themselves_not_only_how_many():

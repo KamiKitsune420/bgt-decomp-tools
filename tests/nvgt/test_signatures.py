@@ -27,6 +27,19 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(function_signature(f), "void assign(int&out result, int value = 7)")
         self.assertEqual(f.signature(False), "void assign(int&out, int)")
 
+    def test_an_empty_stored_default_is_no_default(self):
+        """The list is written for every parameter, so one without a default
+        carries an empty string -- and `is not None` turned that into
+        `int arg4 = )`. BGT 1.3 accepts it and BGT 1.0 reports
+        `Expected ')' or ','`, so it read as a compiler-version problem.
+        """
+        g = Function(name="event_exists", return_type=DataType(token_type=TT_VOID),
+                     param_types=[DataType(token_type=TT_INT),
+                                  DataType(token_type=TT_INT)],
+                     in_out_flags=[0, 0], param_names=["a", "b"],
+                     default_args=["", "  "])
+        self.assertEqual(function_signature(g), "void event_exists(int a, int b)")
+
     def test_const_object_and_const_handle_are_distinct(self):
         obj = TypeInfo(name="Item", namespace_="game")
         pointer = DataType(token_type=TT_IDENTIFIER, obj_type=obj, is_object_handle=True)

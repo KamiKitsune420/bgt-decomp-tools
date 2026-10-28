@@ -25,7 +25,12 @@ def format_parameter(dtype: DataType, direction: int = 0, name: str = "",
         text += REFERENCE_DIRECTIONS.get(direction & 3, "")
     if name:
         text += " " + name
-    if default is not None:
+    # An empty stored default is *no* default. The list is written for every
+    # parameter, so a parameter without one carries an empty string, and
+    # `is not None` turned that into `int arg4 = )` -- which BGT 1.3 happens
+    # to accept and BGT 1.0 reports as `Expected ')' or ','`, so it sat in
+    # Paladin's `event_exists` looking like a version problem.
+    if default is not None and default.strip():
         text += " = " + default
     return text
 

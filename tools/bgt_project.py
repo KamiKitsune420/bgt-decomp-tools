@@ -465,7 +465,8 @@ def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
 
 def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
                extract: bool = False,
-               keys: Optional[Dict[bytes, bytes]] = None) -> List[str]:
+               keys: Optional[Dict[bytes, bytes]] = None,
+               copy: Optional[bool] = None) -> List[str]:
     """Copy each pack next to the entry script, or extract its entries.
 
     Copying is what makes the recovered project runnable, because the engine
@@ -477,18 +478,25 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
     verification tag to the key that satisfies it (`pack_keys`). An entry whose
     key is not known is **skipped and counted**, never written, because a file
     of ciphertext named `music.ogg` is worse than no file.
+
+    **The two are independent, not alternatives.** They answer different
+    questions -- "can this project run?" and "what is in the pack?" -- and
+    wanting both is the ordinary case. `copy` defaults to "whatever `extract`
+    is not", which keeps the old two-way behaviour for existing callers.
     """
     keys = keys or {}
+    copy = (not extract) if copy is None else copy
     notes: List[str] = []
     for pack in packs:
         if pack.get("error"):
             notes.append("%s could not be read: %s" % (pack["name"], pack["error"]))
             continue
-        if not extract:
+        if copy:
             target = os.path.join(out_dir, pack["name"].replace("/", os.sep))
             os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
             shutil.copy2(pack["path"], target)
             notes.append("%s copied (%.1f MB)" % (pack["name"], pack["size"] / 1e6))
+        if not extract:
             continue
         unopened = [tag for tag in (pack.get("tags") or ()) if tag not in keys]
         if unopened and pack["encrypted"]:
@@ -532,7 +540,7 @@ ASSET_APIS = ("set_sound_storage", "set_sound_decryption_key")
 
 def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]],
                keys: Optional[Dict[bytes, bytes]] = None,
-               extracted: bool = False) -> List[str]:
+               extracted: bool = False, copied: bool = False) -> List[str]:
     """What the script will look for at run time and may not find.
 
     Finding nothing is the case that matters. `data_packs` only reports a pack
@@ -578,16 +586,16 @@ def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]],
                 "module and tests each against one AES block"
                 % ("" if not packs else " and %s stayed shut"
                    % ", ".join(unopened[:4])))
-    if extracted and packs:
+    if extracted and packs and not copied:
         # Extracted assets are for reading. The script still calls
         # `set_sound_storage("data/bgm.dat")`, so the project does not have
-        # what it opens -- which the engine says out loud ("could not load
-        # pack data/bgm.dat.") and is worth saying before it does.
+        # what it opens -- which the engine says out loud ("ERROR! could not
+        # load pack data/bgm.dat.") and is worth saying before it does.
         notes.append(
             "the assets were extracted for reading, which is not what the "
-            "script opens: it still asks the engine for %s by name. Re-run "
-            "with --with-data to copy the pack(s) in and have the project run."
-            % packs[0]["name"])
+            "script opens: it still asks the engine for %s by name, and will "
+            "report `could not load pack %s`. Drop --no-data to copy the "
+            "pack(s) in as well." % (packs[0]["name"], packs[0]["name"]))
     return notes
 
 
@@ -749,10 +757,11 @@ def substitute_stock(sections: List[Section], out_dir: str, module,
     `_why_not_stock` holds the three reasons found so far, each from a title
     that broke when the check was weaker than it is now.
 
-    What this still cannot see is an edited method *body*, since a difference
-    there is either the game's edit or this decompiler's own imperfection and
-    the comparison cannot tell them apart. Those are reported rather than
-    acted on.
+    A differing method *body* blocks it too. That cannot distinguish the
+    game's edit from this decompiler's own rendering -- but it does not need
+    to, because the costs are not symmetric: keeping the decompiled copy loses
+    parameter names in a file nobody wanted recovered, while substituting over
+    a real edit replaces the game's code with the engine's and says nothing.
 
     Returns ({library name: source path}, notes).
     """
@@ -783,6 +792,29 @@ def substitute_stock(sections: List[Section], out_dir: str, module,
             notes.append("%s keeps its decompiled version: %s" % (name, why))
             continue
 
+        # **A differing body blocks the substitution.** This used to be
+        # reported and acted on anyway, on the argument that a body difference
+        # is either the game's edit or this decompiler's own rendering and the
+        # comparison cannot tell them apart. True -- but the costs are not
+        # symmetric. Keeping the decompiled copy costs parameter names and
+        # comments in a file nobody was trying to recover; substituting over a
+        # real edit silently replaces the game's code with the engine's.
+        #
+        # Paladin settled it. Its `sound_pool` -- the audio engine -- matched
+        # on every member and signature and differed in four bodies, so it was
+        # replaced; the recovered game then reached its menu and could not
+        # speak or play anything. With `--no-stock-includes` the same build
+        # compiles cleanly and opens a window titled 'Paladin of the sky'.
+        differing = _bodies_that_differ(text, group)
+        if differing:
+            notes.append(
+                "%s keeps its decompiled version: %s differ from the engine's "
+                "source, so the engine's copy would replace whatever the game "
+                "changed there. `bgt libcheck --decompiler` says which are the "
+                "game's edits and which are this decompiler's rendering."
+                % (name, ", ".join(differing[:4])))
+            continue
+
         target = os.path.join(out_dir, "includes", name)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         kept = [line for line in text.splitlines()
@@ -804,13 +836,8 @@ def substitute_stock(sections: List[Section], out_dir: str, module,
             fh.write("\n".join(kept).rstrip() + "\n")
         used[name] = source
         notes.append("%s taken from the engine, replacing %d decompiled "
-                     "declaration(s)" % (name, len(group)))
-        differing = _bodies_that_differ(text, group)
-        if differing:
-            notes.append("    ...but %s differ from the engine's source: either "
-                         "the game edited them or the decompiler renders them "
-                         "differently, and `bgt libcheck --decompiler` is what "
-                         "tells the two apart" % ", ".join(differing[:4]))
+                     "declaration(s) -- every member, signature and body "
+                     "matches" % (name, len(group)))
     return used, notes
 
 
@@ -1053,7 +1080,7 @@ def verify(sections: List[Section], order: List[str], source: str) -> bool:
 
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
-            timeout: float = 600.0, with_data: bool = False,
+            timeout: float = 600.0, with_data: bool = True,
             extract_data: bool = False, stock_includes: bool = True,
             progress=lambda message: None) -> Project:
     name = os.path.splitext(os.path.basename(exe_path))[0]
@@ -1096,7 +1123,8 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         data_notes += key_notes
     if packs and (with_data or extract_data):
         progress("bringing %d asset pack(s)" % len(packs))
-        data_notes += bring_data(packs, out_dir, extract=extract_data, keys=keys)
+        data_notes += bring_data(packs, out_dir, extract=extract_data,
+                                 keys=keys, copy=with_data)
     # ...and types the installed engine simply does not have, plugin or not.
     newer = [name for name, _ in engine_gap(exe_path, used)
              if not any(os.path.splitext(dll)[0].lower() == name.lower()
@@ -1249,15 +1277,18 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             project.problems.append(
                 "the asset pack %s could not be read: %s"
                 % (pack["name"], pack["error"]))
-        elif not (with_data or extract_data):
+        elif not with_data:
             project.problems.append(
                 "%s needs %s beside it (%d entries, %.1f MB%s): the script "
                 "asks the engine for it by that name, and without it the game "
-                "can die at startup. Re-run with --with-data to copy it."
+                "reports `could not load pack %s` and plays no audio. Drop "
+                "--no-data to copy it in."
                 % (project.entry, pack["name"], pack["entries"],
                    pack["size"] / 1e6,
-                   ", %d encrypted" % pack["encrypted"] if pack["encrypted"] else ""))
-    for note in asset_gaps(exe_path, module, packs, keys, extract_data):
+                   ", %d encrypted" % pack["encrypted"] if pack["encrypted"] else "",
+                   pack["name"]))
+    for note in asset_gaps(exe_path, module, packs, keys, extract_data,
+                           with_data and bool(packs)):
         project.problems.append(note)
     project.data = list(data_notes)
     project.stock = list(stock_notes)
@@ -1339,6 +1370,14 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                 "`= false` in a signature will be reported as \"Expected ')' "
                 "or ','\". That is the compiler's age, not the recovery -- "
                 "pass --compiler to use a newer BGT." % exe)
+        # ...and the compiler this toolkit chose is not the one a person
+        # reaches by double-clicking the script. Installing BGT 1.0 after 1.3
+        # leaves `open`, `run` and `compile` pointing at 1.0 while only
+        # `compile_debug` and `compile_release` still point at 1.3, so a
+        # project that compiles cleanly here reports a hundred
+        # `Expected ')' or ','` there -- which is exactly how it was reported.
+        for note in bgt_compile.verb_warnings():
+            project.problems.append(note)
         # `check_project` stages the entry script inside the project rather
         # than in a subfolder, because BGT resolves an `#include` and a data
         # path alike against the script's own location: a copy one level down
@@ -1389,17 +1428,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-stock-includes", action="store_true",
                     help="decompile BGT's own library files too, instead of "
                          "copying the engine's source for them")
+    # Copying the packs is the DEFAULT. A recovered project whose script calls
+    # `set_sound_storage("data/bgm.dat")` and has no pack beside it reports
+    # `ERROR! could not load pack data/bgm.dat.` and plays no audio -- which is
+    # not a recovered game, and it was reported twice before this stopped being
+    # opt-in. `--with-data` is kept so existing commands still work.
     ap.add_argument("--with-data", action="store_true",
-                    help="copy the asset packs the script needs into the project")
+                    help="copy the asset packs in (the default; kept for compatibility)")
+    ap.add_argument("--no-data", action="store_true",
+                    help="do not bring the asset packs, leaving a project that cannot play audio")
     ap.add_argument("--extract-data", action="store_true",
-                    help="extract the packs entries instead of copying them; unencrypted ones only, the rest need bgt crack")
+                    help="also extract the packs' entries, decrypting with the key recovered from the module")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
 
     project = recover(args.exe, args.output, args.include,
                       make_zip=not args.no_zip, compile_check=args.compile,
-                      timeout=args.timeout, with_data=args.with_data,
+                      timeout=args.timeout, with_data=not args.no_data,
                       extract_data=args.extract_data,
                       stock_includes=not args.no_stock_includes,
                       progress=(lambda m: None) if args.quiet

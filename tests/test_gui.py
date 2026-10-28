@@ -111,21 +111,23 @@ def test_progress_is_appended_not_replaced(frame):
     assert after.index("first thing") < after.index("second thing")
 
 
-def test_copying_and_extracting_are_exclusive(frame):
-    """They are alternatives, and checking one clears the other rather than
-    letting both be set and quietly preferring one at run time."""
+def test_the_packs_are_brought_in_by_default(frame):
+    """A recovered project with no pack beside it reports `could not load pack
+    data/bgm.dat.` and plays no audio, which is not a recovered game. So
+    copying is on unless it is turned off, and it was reported twice before
+    this stopped being opt-in."""
+    assert frame.with_data.GetValue()
+
+
+def test_copying_and_extracting_are_not_exclusive(frame):
+    """They answer different questions -- "can this run?" and "what is in the
+    pack?" -- so both can be set. Forcing a choice meant the obvious way to
+    get the assets out also produced a project with no audio."""
     frame.with_data.SetValue(True)
     frame.extract_data.SetValue(True)
-    event = wx.CommandEvent(wx.EVT_CHECKBOX.typeId, frame.extract_data.GetId())
-    event.SetEventObject(frame.extract_data)
-    frame._only_one_data_option(event)
-    assert frame.extract_data.GetValue() and not frame.with_data.GetValue()
-
-    frame.with_data.SetValue(True)
-    event = wx.CommandEvent(wx.EVT_CHECKBOX.typeId, frame.with_data.GetId())
-    event.SetEventObject(frame.with_data)
-    frame._only_one_data_option(event)
-    assert frame.with_data.GetValue() and not frame.extract_data.GetValue()
+    assert frame.with_data.GetValue() and frame.extract_data.GetValue()
+    # ...and nothing clears one when the other is checked.
+    assert not hasattr(frame, "_only_one_data_option")
 
 
 def test_there_is_no_button_that_claims_to_stop_a_job(frame):

@@ -173,7 +173,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 
 ```bash
 bgt recover game.exe -o recovered/ --compile
-bgt recover game.exe -o recovered/ --with-data   # ...and the packs it needs
+bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt compile recovered/game.bgt            # just the compiler, on any script
 ```
 
@@ -1045,14 +1045,18 @@ checks say:
 
 | title | lines | files | goto | unbalanced | split | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,577 | 14 | 0 | 0 | yes | **compiled cleanly, and it runs** |
-| Paladin of the Sky | 27,494 | 60 | 0 | 0 | yes | **0 errors, and it runs** |
+| Super Egg Hunt | 6,571 | 16 | 0 | 0 | yes | **compiled cleanly, and it runs** |
+| Paladin of the Sky | 27,482 | 61 | 0 | 0 | yes | **compiled cleanly, and it runs** |
 | Psycho Strike | 27,563 | 75 | 0 | 0 | yes | 33, every one the engine's |
 | Manamon 2 | 171,076 | 1,639 | 6 | 0 | yes | 33, every one the engine's |
-| Crazy Party | 196,341 | 558 | 0 | 0 | yes | **0 errors, 2 warnings, and it runs** |
+| Crazy Party | 195,364 | 558 | 0 | 0 | yes | **0 errors, 2 warnings, and it runs** |
+
+Paladin's window now reads `Paladin of the sky`, which supersedes the note
+below about it reporting `command`: that was the uncompiled-build path, and
+reaching the real title means the module got further than it used to.
 
 **Three titles compile clean and run**, including the largest. Crazy Party is
-196,341 lines across 558 files and reports `compiled with 2 warning(s)`;
+195,364 lines across 558 files and reports `compiled with 2 warning(s)`;
 `bgt compile --run` on it opens a window of its own titled `Crazy Party
 beta77`. Super Egg Hunt reports `compiled cleanly` and `--run` opens
 `Super Egg Hunt Version 1.53` — the title the original executable shows,
@@ -1065,15 +1069,15 @@ passed every line of this table while its menu could not be navigated. See
 counts above say the recovery is *structurally* complete, and three separate
 bugs that compiled cleanly and ran were found by pressing an arrow key.
 
-Paladin compiles with no errors and runs too, but **read its window title
-carefully rather than as a match**. Run as a *script*, `get_SCRIPT_COMPILED()`
-is false, so it takes its own uncompiled-build path and the first window it
-opens with a title is that path's `input_box("command", ...)`. The driver
-reports the first titled window, so it reports `command` — which is the
-game's behaviour for an uncompiled run, not the recovery's. A separate
-launch of it did show `Paladin of the sky`. The lesson is the usual one: a
-window title is evidence that the module reached the engine and ran, and it
-is not evidence that it ran the same path the shipped executable does.
+**A window title is still only evidence that the module reached the engine**,
+and Paladin is the title that taught it twice. It used to report `command`,
+because run as a *script* `get_SCRIPT_COMPILED()` is false, the game takes its
+own uncompiled-build path, and the first titled window that path opens is an
+`input_box("command", ...)`. Then it reported `Paladin of the sky` — the real
+one — while the game was unusable: no audio, and the menu looping back into
+`tts_selector` (see **Every body must match too**). So the title moves for
+reasons that have nothing to do with whether the recovery is right, in both
+directions. It is a liveness check and nothing more.
 
 **Psycho Strike's 33 are all the installed engine's.** 32 are uses of
 `elias`, a plugin type, and one is `tts_voice::speak_to_sound`, which this
@@ -1179,10 +1183,51 @@ compiles cleanly under 1.3.
 There is no version string in `bgt.exe` and no version metadata on the
 file, so the installs cannot be told apart by looking. They can be told
 apart by asking: `bgt_compile.capabilities()` compiles a two-line script
-whose only unusual feature is a default argument, and caches the answer
-per executable. `bgt recover --compile` now reports **which** `bgt.exe` it
-used, and says so plainly when that one cannot parse what the source
-contains. The missing fact was never the diagnostics; it was whose.
+whose only unusual feature is a default argument. `bgt recover --compile`
+reports **which** `bgt.exe` it used, and says so plainly when that one
+cannot parse what the source contains. The missing fact was never the
+diagnostics; it was whose.
+
+**And the compiler this toolkit picks is not the one a person reaches.**
+BGT's installer registers five shell verbs for a `.bgt` file, and
+installing 1.0 after 1.3 leaves three of them pointing at 1.0:
+
+| verb | after installing 1.0 over 1.3 |
+|---|---|
+| `open` (double-click) | **BGT 1.0** |
+| `run` ("Run Script") | **BGT 1.0** |
+| `compile` ("Compile Script") | **BGT 1.0** |
+| `compile_debug`, `compile_release` | BGT 1.3 |
+
+So a project that reports `compiled cleanly` here gives a hundred
+`Expected ')' or ','` on a double-click, which is how it was reported, and
+the fix is to use "Compile Script (Debug)". `bgt_compile.shell_verbs()`
+reads them out of the registry and `verb_warnings()` names any whose engine
+cannot parse what was just written.
+
+Both installs were put to each failing shape rather than assumed:
+
+| shape | BGT 1.3 | BGT 1.0 |
+|---|---|---|
+| `bool b = false` | accepts | `Expected ')' or ','` |
+| `int b = -2` | accepts | `Expected ')' or ','` |
+| `int b = )` | **accepts** | `Expected ')' or ','` |
+| `double[] d(256);` | accepts | `Expected ';'` |
+
+**`capabilities()` was answering from runs that never happened.** A check
+that comes back `nodriver`, `timeout` or `crashed` carries no diagnostics,
+and `not report.errors` read that as "this compiler is fine" -- so BGT 1.0
+was reported as *supporting* default arguments, and the whole warning this
+section exists for never fired. One busy lock is enough, because two checks
+cannot run at once. An inconclusive outcome is now not an answer.
+
+**And asking has a cost that lands on a person.** Probing launches the
+compiler, and a compiler that rejects the probe shows a modal error dialog
+on whoever is at the machine -- which happened repeatedly, once per run,
+while chasing this. The answer is cached to disk keyed by the executable's
+path, size and mtime, so it is asked once per install rather than once per
+process. A diagnostic that interrupts the user every time is a cost, not
+just a slow path.
 
 **"The script section is empty" was not cosmetic.** BGT reports warnings
 in a modal dialog and waits on it, so an unattended compile stops there;
@@ -1323,16 +1368,38 @@ title broke when the check was weaker:
   which is exactly why names were not enough: Paladin went from 0 errors
   to 2, at the call site rather than the definition.
 
-What this still cannot see is an edited method **body**. Psycho Strike's
-`dynamic_menu::run_extended` checks `alts_pressed` where stock 1.3 checks
-joystick buttons, and nothing about its interface says so. It cannot be
-used to block the substitution either, because a body difference is
-*either* the game's edit or this decompiler's own imperfection and the
-comparison cannot tell them apart — the decompiler path matches 140 of
-Psycho Strike's 149 library functions, so demanding all of them would
-block every title for reasons that are mine. So differing bodies are
-**named in the report** and `bgt libcheck --decompiler` is what tells the
-two apart. `--no-stock-includes` keeps everything decompiled.
+- **Every body must match too.** This was the one check that *reported*
+  rather than blocked, on the argument that a body difference is either
+  the game's edit or this decompiler's own rendering and the comparison
+  cannot tell them apart. That is true and it is not the point, because
+  **the costs are not symmetric**: keeping the decompiled copy loses
+  parameter names and comments in a file nobody was trying to recover,
+  while substituting over a real edit replaces the game's code with the
+  engine's and says nothing.
+
+  Paladin's `sound_pool` — the audio engine — matches on every member and
+  every signature and differs in four bodies, so it was being replaced
+  wholesale. `sound_positioning.bgt` still substitutes on all three
+  titles because it genuinely matches, which is the readability this was
+  for; `sound_pool` no longer does.
+
+  **This was adopted on the argument, not on a measured fix, and that
+  distinction was briefly lost.** It was first claimed as the cause of a
+  recovered Paladin playing no audio and looping through its TTS voice
+  selector, on the evidence that `--no-stock-includes` changed the window
+  title from `command` to `Paladin of the sky`. A window title is not
+  causation, the symptom survived the change, and the real explanation was
+  elsewhere (see **Run as a script, a game takes its developer path**).
+  The rule stands on the cost asymmetry alone; it fixed nothing known.
+
+`bgt libcheck --decompiler` is what says which differing bodies are the
+game's edits and which are this decompiler's rendering, and
+`--no-stock-includes` keeps everything decompiled.
+
+A note on reading that report: Super Egg Hunt's `number_speaker.bgt`
+differed on `speak_next` before the fold fixes below and matches now. A
+"differs" line is a statement about the decompiler as much as about the
+game, so it moves as the decompiler improves.
 
 `#include` and `funcdef` lines are stripped from the copied file: the
 entry script lists every file in order, and `types.bgt` already declares
@@ -1364,9 +1431,23 @@ it can die at startup. So `bgt recover` always reports what the project
 needs, and can bring it:
 
 ```bash
-bgt recover game.exe -o out/ --with-data      # copy the packs beside the entry script
-bgt recover game.exe -o out/ --extract-data   # unpack their entries instead
+bgt recover game.exe -o out/                  # copies the packs: the default
+bgt recover game.exe -o out/ --extract-data   # ...and unpack their entries too
+bgt recover game.exe -o out/ --no-data        # bring nothing, and cannot play audio
 ```
+
+**Copying is the default, and the two are not alternatives.** Both of those
+were wrong and both were reported from real runs. A project whose script calls
+`set_sound_storage("data/bgm.dat")` with no pack beside it reports
+
+```
+ERROR!  dialog  could not load pack data/bgm.dat.
+```
+
+and plays nothing, so opt-in was the wrong default for the one thing that
+makes a recovery runnable. And copying and extracting answer different
+questions — "can this run?" and "what is in the pack?" — so forcing a choice
+meant the obvious way to get the assets out also produced a silent game.
 
 Finding the packs takes two pieces of evidence, because neither alone is
 enough. The *names* come from the module's string constants, since the calls
@@ -1457,7 +1538,9 @@ not only how many, because that is all a search needs.
 **Extracted assets are not what the script opens.** It still calls
 `set_sound_storage("data/bgm.dat")`, so `--extract-data` gives a project that
 compiles, runs, and says `could not load pack data/bgm.dat.` — which the
-report now says first, pointing at `--with-data`.
+report says first -- though it no longer arises on its own, because
+copying is the default and `--extract-data` now adds to it rather than
+replacing it.
 
 ## Compiling without the GUI
 
@@ -1633,6 +1716,34 @@ That closes Psycho Strike out: **all 33 of its remaining diagnostics are the
 installed engine's absences** -- 32 uses of the `elias` plugin type and this
 one method -- and none of them is the recovery's.
 
+## Run as a script, a game takes its developer path
+
+`bgt compile --run` and double-clicking a recovered entry script both *run*
+it, and `get_SCRIPT_COMPILED()` is false for a script. A game that branches on
+that does not take the path its players see.
+
+Paladin is the clearest case and it cost a wrong diagnosis. Its recovered
+build played no audio and looped through the TTS voice selector -- arrows
+cycling voices, enter saying "success", nothing else -- which reads exactly
+like a decompiler bug in `dynamic_menu`. It is not. An instrumented build,
+with an `alert` before every `return -1` in `run_extended` and one printing
+what `file_menu` received, fired **none of them** and reported
+
+```
+Please enter command line code
+```
+
+which is Paladin's own uncompiled-build prompt. `file_menu` was never
+failing. Four of the ten `get_SCRIPT_COMPILED()` sites in that title gate
+sound loading, so a script run has no pack open and no voice configured, and
+the selector is where it sends you.
+
+So **run mode proves the module reaches the engine and nothing about
+behaviour**, and the way to exercise a recovered game is the executable:
+`bgt compile --build release`. The lesson for diagnosing the next one is the
+cheap part: an `alert` before each suspect return answers in one run what
+reading the source argues about for an afternoon.
+
 ## A recovered game keeps its own licensing, and reads the same store
 
 Worth knowing before concluding that a port behaves differently from the
@@ -1702,26 +1813,24 @@ that compiles.
 That check found the duplication the compiler cannot see:
 `sound_pool::play_extended_1d` called `reserve_slot()` forty-five times where
 the source calls it once and keeps the result in a local. **That is fixed**
--- by the fold rules in the next section, not by promoting every slot -- and
-`play_extended_1d`, `play_extended_2d` and `play_stationary_extended` now
-have the source's exact call sequence on Crazy Party where all three
-differed. Super Egg Hunt's decompiled `sound_pool` and `dynamic_menu` score
-43 of 47 library functions identical and 46 of 47 on literals.
+-- see the fold rules below, cases one and four -- and `play_extended_1d`,
+`play_extended_2d` and `play_stationary_extended` now have the source's exact
+call sequence on Crazy Party where all three differed.
 
-The one left, `sound_pool::reserve_slot` at 0.86, **is not a defect**, and it
-is worth saying why rather than leaving a number looking like debt. Stock
-writes
+**It was never only a readability problem, which is why it is worth stating
+plainly.** Running a call once per read runs it once per read: `reserve_slot`
+reserves a different slot each time, and Paladin's `file_menu` re-opened its
+menu for every comparison it made against the result. A duplication count is
+a correctness number.
 
-```
-if(current.handle.playing==false) { slot=i; break; }     // last in the loop
-sound temp;  @current.handle=temp;
-```
-
-and the recovery writes `if (local_4.handle.get_playing()) { continue; }`
-followed by the assignment, plus `sound()` where the source declared
-`sound temp;`. Same program, different shape -- which is exactly the
-ambiguity this comparison cannot resolve on its own, and why a difference is
-a lead and not a verdict.
+Where a difference survives, read it as a lead rather than a verdict, and
+re-read it after a decompiler change: Super Egg Hunt's `number_speaker.bgt`
+differed on `speak_next` before the fold fixes and matches now. Shape
+differences that are not defects do occur -- stock ends a loop with
+`if(current.handle.playing==false) { slot=i; break; }` where the recovery
+writes `if (local_4.handle.get_playing()) { continue; }` and the assignment
+after it, which is the same program -- and the way to tell is to read both,
+which is what the report is for.
 
 ## When a folded temporary stops being the value the bytecode computed
 
@@ -1731,11 +1840,11 @@ Super Egg Hunt from **0 residual gotos to 182** and, since AngelScript has no
 `goto`, from **0 compiler errors to 187**: a loop condition promoted to a
 statement before a jump stops being a loop condition. So "fold less" is not
 the fix, and the diagnostic count is not the metric. The question is *when* a
-fold stops being faithful, and there are three answers so far. Every one of
+fold stops being faithful, and there are four answers so far. Every one of
 them produced a program that recovered with 0 errors, compiled cleanly, ran,
-and did the wrong thing -- and all three were in **one function**,
-`dynamic_menu::run_extended`, which is the menu loop every BGT game that
-edits the library ships its own copy of.
+and did the wrong thing -- and every one surfaced in a **menu**, because a
+menu is the first thing a player touches and the only part of an audio game
+whose misbehaviour is unmistakable from the outside.
 
 **One: the receiver was mutated in between.** `dynamic_menu::add_item` keeps
 the length *before* resizing, and BGT ships the source to prove it:
@@ -1824,6 +1933,66 @@ Nothing about this is visible to the compiler, to a window title, or even to
 `bgt libcheck`'s call-sequence score: `if (false) { speak(...) }` *contains*
 the call, in the right order, with the right literals. It took someone
 pressing an arrow key.
+
+**Four: the value is read three or more times, and it is a call.** The duplication
+`bgt libcheck` had been measuring all along, and it is not a readability
+problem. `file_menu` keeps one menu result and compares it three ways:
+
+```
+int result = menu.run_extended("Select an Option.", true, 1, true);
+if (result == -1) return "";
+if (result == 0 || result == -200) return "cancel";
+return menu.get_item_name(result);
+```
+
+Folded into all four reads, Paladin's recovered `file_menu` **ran its menu
+four times**. Every comparison re-opened it, so a selection was consumed by a
+comparison and the menu came back — which is what "it keeps putting me in the
+tts selection menu" looks like from the player's side.
+
+This one cannot be fixed at the read: by the time a second read proves the
+value is used twice, the first has already folded the call inline. So it takes
+a second simulation that knows in advance — and `_body` already re-simulates a
+function while each pass discovers more, for lvalues, so the fold counts ride
+along: pass one records `(slot, bind position) -> folds`, and the next
+promotes every pair folded more than once. Counting only *new* pairs each
+round is what makes it terminate, since a promoted bind is no longer folded
+and would otherwise be rediscovered forever.
+
+**The threshold is three, and it is measured rather than principled.** At two
+it cost Crazy Party **36 residual gotos and 36 compiler errors** against 0 --
+the same structuring damage every over-broad promotion in this section causes.
+The duplications worth catching are far worse than doubled anyway:
+`file_menu` reads one result 4 times and `play_extended_1d` read one
+`reserve_slot()` 45 times. A two-read duplication is left folded and
+`bgt libcheck` still counts it.
+
+### Typing the promoted local took three tries, and the declaration wins
+
+Promotion gives a slot a name, and then the name has to have a type. Measured,
+on Paladin:
+
+- **The value's type, overriding the slot's: 377 errors.** A scratch slot
+  carries a bool here and an int there, so declaring it from one value's type
+  makes every other use of it an error. `Can't implicitly convert from 'int'
+  to 'bool'`, hundreds of times.
+- **A fresh local per promotion: the flag comes apart.** Egg Hunt's joystick
+  edge flag became `__nvgt_hold_20_403 = 0` with the up arm reading it and
+  *writing* `__nvgt_hold_20_1152 = 1`, which only the down arm read — so
+  pressing up disarmed down. **One slot carries one source variable, so it
+  gets one name.**
+- **The slot's own type, value's as fallback: right.** Plus two coercions,
+  because a promoted name outlives the atom that described it:
+  - dropping a comparison against a bool literal leaves the operand *as* the
+    condition, so a numeric one needs `(x != 0)`. `x == false` became `!x` on
+    an `int`, which is "Illegal operation on this datatype" — and the same
+    operand reached through the value register converted correctly, which is
+    what made the gap findable.
+  - the bool→numeric wrap must not fire on a bare name that is *declared*
+    numeric: `local_24 = (local_3 ? 1 : 0);` with `int local_3` is "Expression
+    must be of boolean type". The atom claimed bool because that was the last
+    value the slot held. **A declaration outranks an atom that outlived its
+    value.**
 
 ### And a condition dropped on the floor
 

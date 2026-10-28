@@ -123,16 +123,20 @@ class Frame(wx.Frame):
             box, label="Check the result with BGT's own compiler (slower)")
         self.with_data = wx.CheckBox(
             box, label="Copy the asset packs the script needs into the project")
+        # On by default: without the packs the recovered game reports
+        # `ERROR! could not load pack data/bgm.dat.` and plays no audio.
+        self.with_data.SetValue(True)
         self.extract_data = wx.CheckBox(
-            box, label="Extract the packs' entries instead of copying them")
+            box, label="Also extract the packs' entries, decrypted, for reading")
         self.make_zip = wx.CheckBox(box, label="Also write a .zip of the project")
         self.make_zip.SetValue(True)
         for control in (self.compile_check, self.with_data,
                         self.extract_data, self.make_zip):
             options.Add(control, 0, wx.ALL, 4)
-        # The two data options are alternatives: extracting is not copying.
-        self.with_data.Bind(wx.EVT_CHECKBOX, self._only_one_data_option)
-        self.extract_data.Bind(wx.EVT_CHECKBOX, self._only_one_data_option)
+        # Copying and extracting are **not** alternatives, and forcing a
+        # choice was a mistake: they answer different questions -- "can this
+        # run?" and "what is in the pack?" -- so the obvious way to get the
+        # assets out also produced a project with no audio.
         body.Add(options, 0, wx.EXPAND | wx.TOP, 10)
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
@@ -169,14 +173,6 @@ class Frame(wx.Frame):
                  "line, so any result can be reproduced with one command.")
 
     # -- plumbing ----------------------------------------------------------
-
-    def _only_one_data_option(self, event):
-        """Copying and extracting are alternatives, so checking one clears
-        the other -- rather than silently preferring one at run time."""
-        if event.GetEventObject() is self.with_data and self.with_data.GetValue():
-            self.extract_data.SetValue(False)
-        elif self.extract_data.GetValue():
-            self.with_data.SetValue(False)
 
     def say(self, message: str) -> None:
         """Append a line to the log, from any thread.

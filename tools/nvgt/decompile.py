@@ -395,7 +395,17 @@ DECL_RE = re.compile(r"^\s*(?!(?:return|break|continue|case|default|else|goto|"
 SLOT_NAME_RE = re.compile(r"\b((?:local|tmp)_?\d+)\b")
 # Locals this decompiler generates. They belong to the function, never to the
 # block they were written in.
-GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list)_")
+GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list|hold)_")
+
+#: how many folds of one non-repeatable value make it worth promoting to a
+#: variable. Promoting is not free -- a value the structurer needed as an
+#: expression becomes a statement before a jump, and the loop stops being a
+#: loop -- so this is a measured threshold, not a principle. At 2 it cost
+#: Crazy Party **36 residual gotos and 36 compiler errors** against 0, while
+#: the duplications worth catching are far worse than doubled:
+#: `file_menu` reads one menu result 4 times and `play_extended_1d` read one
+#: `reserve_slot()` 45 times.
+DUPLICATE_FOLDS = 3
 
 
 def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
@@ -822,6 +832,14 @@ class FuncDecompiler:
         #: promotion insert its assignment where it belongs rather than here.
         self.stmt_count = 0
         self.stmt_texts: list[str] = []
+        #: {(slot, bind position): folds} for a value that is not repeatable.
+        #: Counted so the *next* simulation of this function can promote the
+        #: ones folded more than once -- see `_body`.
+        self.fold_reads: dict[tuple[int, int], int] = {}
+        #: (slot, bind position) pairs a previous pass found folded more than
+        #: once. Promoted on sight here, which is the only way to get the
+        #: assignment in before the first read rather than after it.
+        self.duplicate_binds: set[tuple[int, int]] = set()
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -1727,6 +1745,13 @@ class FuncDecompiler:
         if off in self.temps:
             if self._stale_fold(off):
                 return self._promote_temp(off)
+            bound = self.temp_bound.get(off)
+            if bound is not None and not _is_repeatable(self.temps[off]):
+                # Counted, not acted on: a call folded into two reads runs
+                # twice, and the only place to fix that is before the first
+                # read. `_body` re-simulates with these marked.
+                key = (off, bound[0])
+                self.fold_reads[key] = self.fold_reads.get(key, 0) + 1
             self.consumed_temps.add(off)
             return self.temps[off]
         return self.var_atom(off)
@@ -1760,8 +1785,24 @@ class FuncDecompiler:
         bound = self.temp_bound.get(off)
         if bound is None:
             return False
-        declarable = (self.var_types.get(off) or value.data_type) is not None
-        if declarable and self._conditionally_bound(bound[0]):
+        if (off, bound[0]) in self.duplicate_binds:
+            # A previous pass folded this exact value into more than one read.
+            # It is a call, so each fold *runs* it again: Paladin's `file_menu`
+            # came out running its menu four times --
+            # `if (menu.run_extended(...) == -1)`, then twice more in the next
+            # condition, then once in the return -- where the source ran it
+            # once and kept the result. The menu reappeared after every
+            # selection, which is what that looks like from the inside.
+            return True
+        declarable = (value.data_type or self.var_types.get(off)) is not None
+        # **Only a constant.** Both bugs this catches are a constant bound on
+        # one path and read on another, which is what produces a condition the
+        # compiler then folds away -- `|| true`, `if (false)`. Promoting a
+        # computed value the same way is a different question (duplication,
+        # not a dead branch) and far too broad: on Paladin it emitted a hold
+        # for binds the source never held at all, `__nvgt_hold_7_116 =
+        # __nvgt_out_7_215;` among them, and took 0 compiler errors to 16.
+        if declarable and value.kind == "const" and self._conditionally_bound(bound[0]):
             # Computed on one path and read past the join: the read is
             # reachable without that path, so folding is wrong whatever the
             # value is -- a constant most of all. This is how
@@ -1814,22 +1855,52 @@ class FuncDecompiler:
                    for head, back in self.back_edges)
 
     def _promote_temp(self, off: int) -> Atom:
-        """Give this temp a variable, and put its assignment back where the
-        value was computed.
+        """Hold this value in a local of its own, declared where it was computed.
+
+        **The slot gets one name, not a name per promotion.** A fresh local per
+        promotion was tried and is wrong in the opposite direction: a slot
+        carrying one source variable then gets two names, and its writes and
+        reads come apart. `dynamic_menu`'s joystick edge flag split into
+        `__nvgt_hold_20_403 = 0` with the UP arm reading it and the UP arm
+        *writing* `__nvgt_hold_20_1152 = 1`, which only the DOWN arm read -- so
+        pressing up disarmed down. One slot, one name.
+
+        What keeps that safe is `_stale_fold` promoting **only a constant**: a
+        slot carrying several unrelated values in turn, like Paladin's
+        `gift::get_gift` slot 7 holding both operands of a short-circuit, is
+        never promoted at all and goes on folding each value into its one read.
 
         The assignment cannot be emitted here -- here is the read, and the
-        call has to run where the bytecode ran it. It does not have to be,
-        either: events are sorted by bytecode position at the end of the
+        value has to be computed where the bytecode computed it. It does not
+        have to be: events are sorted by bytecode position at the end of the
         simulation rather than kept in append order, so an event carrying the
         bind position lands exactly where that store was.
         """
         value = self.temps[off]
         pos, _ = self.temp_bound[off]
         name = self.var_names.setdefault(off, f"local_{off}")
-        known = self.var_types.get(off) or value.data_type
-        self.var_types.setdefault(off, known)
-        # Hoisted, because the store may be inside a branch while a later read
-        # is not, and a declaration inside the branch is out of scope there.
+        # **The slot's own type wins; the value's is only the fallback.**
+        # Overriding with the value's type was tried and is badly wrong: a
+        # scratch slot that carries a bool here and an int there then gets
+        # declared `bool`, and every numeric use of it becomes an error.
+        # Paladin went from compiling cleanly to **377 errors** that way, all
+        # of them `Can't implicitly convert from 'int' to 'bool'` on slots the
+        # source uses as both.
+        self.var_types.setdefault(off, value.data_type)
+        known = self.var_types.get(off)
+        if (known is not None and known.obj_type is None
+                and known.token_type in NUMERIC_TOKENS
+                and value.data_type is not None
+                and value.data_type.obj_type is None
+                and value.data_type.token_type == 67):
+            # A bool value promoted into a numerically-typed slot is the mixed
+            # bool/int slot this file already models: the slot keeps the
+            # numeric type, the store writes 1/0, and reads convert back with
+            # `!= 0`. Without the mark the store compiled and the *conditions*
+            # did not -- `if (!local_3)`, `local_3 || ...`.
+            self.mixed_boolean_slots.add(off)
+        # Hoisted: the store may be inside a branch or a loop while a later
+        # read is not, and a declaration inside that block is out of scope.
         self.forced_slots.add(off)
         self.stmt_count += 1
         self.stmt_texts.append("")
@@ -2023,7 +2094,16 @@ class FuncDecompiler:
         if (dt.token_type in NUMERIC_TOKENS and atom.kind != "const"
                 and source is not None and source.obj_type is None
                 and source.token_type == 67):
-            return Atom("call", f"({atom.text} ? 1 : 0)", data_type=dt)
+            # ...unless the atom is a bare slot name that is *declared*
+            # numeric. Then the bool on the atom is stale -- it came from the
+            # value the slot was last given, not from the slot -- and wrapping
+            # gives `local_24 = (local_3 ? 1 : 0);` with `int local_3`, which
+            # is "Expression must be of boolean type". The declaration is the
+            # better witness about a name than an atom that outlived its
+            # value.
+            if not self._declared_numeric(atom.text):
+                return Atom("call", f"({atom.text} ? 1 : 0)", data_type=dt)
+            return Atom(atom.kind, atom.text, atom.stack_size, data_type=dt)
         if atom.kind != "const":
             return atom
         if atom.constant_bits is not None:
@@ -2933,6 +3013,31 @@ class FuncDecompiler:
             cond = _negate_cond(cond)
         self.events.append(Event("branch", self._pos(), (cond, target)))
 
+    def _declared_numeric(self, text: str) -> bool:
+        """Is this text a bare slot name whose declaration is a number?"""
+        if not re.fullmatch(r"[A-Za-z_]\w*", text):
+            return False
+        off = next((o for o, n in self.var_names.items() if n == text), None)
+        dt = self.var_types.get(off) if off is not None else None
+        return (dt is not None and dt.obj_type is None
+                and dt.token_type in NUMERIC_TOKENS)
+
+    def _as_bool_text(self, text: str, atom: Optional[Atom] = None) -> str:
+        """Make this condition text something the engine accepts as a bool.
+
+        Two ways in, because the text does not always still belong to its atom.
+        When it does, `_normalize_arg` types it. When `_unwrap_bool` has peeled
+        a `(x ? 1 : 0)` wrapper off, what is left is the bare inner expression
+        with no atom to ask -- and if that is a numerically-typed slot, peeling
+        turned a valid condition into an `int` one. So a bare name is looked up
+        among the slots and converted by its declared type.
+        """
+        if atom is not None and text == atom.text:
+            return self._normalize_arg(atom, DataType(token_type=67)).text
+        if self._declared_numeric(text):
+            return f"({text} != 0)"
+        return text
+
     def _taken_condition(self, ins: Instr) -> str:
         """Condition under which a jump instruction transfers control."""
         op = JUMP_OPS[ins.name]
@@ -2948,10 +3053,20 @@ class FuncDecompiler:
             # `!(getf()) == false` collapses to `getf()`.
             if op in ("==", "!="):
                 left, right = _unwrap_bool(a.text), _unwrap_bool(b.text)
-                for lit, other in ((right, left), (left, right)):
-                    if lit in ("true", "false"):
-                        keep = (op == "==") == (lit == "true")
-                        return other if keep else _negate_cond(other)
+                for lit, other, atom in ((right, left, a), (left, right, b)):
+                    if lit not in ("true", "false"):
+                        continue
+                    keep = (op == "==") == (lit == "true")
+                    # Dropping the comparison leaves the operand *as the
+                    # condition*, so a numerically-typed one still has to be
+                    # read as a bool. `x == false` became `!x` and `x == true`
+                    # became `x`, which is an error on an int slot -- and the
+                    # same operand two lines earlier, reached through the
+                    # value register, converted correctly. All 7 of Paladin's
+                    # came through here: `if (!local_3)`, `if (local_26)`,
+                    # `(local_3 ? 1 : 0)` and the `||` that held one.
+                    other = self._as_bool_text(other, atom)
+                    return other if keep else _negate_cond(other)
             cond = f"({a.text} {op} {b.text})"
             # drop the wrapping parens the binop simulation added
             if a.text.startswith("(") and a.text.endswith(")"):
@@ -4020,17 +4135,32 @@ class ModuleDecompiler:
             # Repeat while each pass finds more: a slot folded into another
             # slot's expression only becomes visible once that one is a
             # variable, so one pass is not a fixed point.
+            # A value folded into more than one read is a call run more than
+            # once, and the fix has to land *before* the first read -- so it
+            # takes a second simulation that already knows. Paladin's
+            # `file_menu` ran its menu four times where the source ran it once
+            # and compared the result three ways; the menu came back after
+            # every selection.
+            duplicates = {key for key, n in fd.fold_reads.items()
+                          if n >= DUPLICATE_FOLDS}
             rounds = 0
-            while fd.var_names != initial_names and rounds < 4:
+            while rounds < 4 and (fd.var_names != initial_names or duplicates):
                 rounds += 1
                 discovered, types = dict(fd.var_names), dict(fd.var_types)
                 forced = set(fd.forced_slots)
+                carried = set(fd.duplicate_binds) | duplicates
                 fd = FuncDecompiler(self.m, f, self.comments)
                 initial_names = dict(fd.var_names)
                 fd.var_names.update(discovered)
                 fd.var_types.update(types)
                 fd.forced_slots.update(forced)
+                fd.duplicate_binds = carried
                 ev = fd.run()
+                # Only genuinely new ones, or this never reaches a fixed point:
+                # a promoted bind is no longer folded, so it stops being
+                # counted, and re-adding it would loop.
+                duplicates = {key for key, n in fd.fold_reads.items()
+                              if n >= DUPLICATE_FOLDS and key not in carried}
             # Stripped metadata reuses scalar slots across sibling blocks.
             # Keep one declaration in the function and initialization at its
             # original position, rather than declaring in just the first arm.
