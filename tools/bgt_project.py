@@ -117,6 +117,8 @@ class Project:
     stock: List[str] = field(default_factory=list)
     #: the screen-reader client DLLs brought in, and why
     speech: List[str] = field(default_factory=list)
+    #: DLLs the script loads itself with `library::load`, and why
+    loaded: List[str] = field(default_factory=list)
     compile_report: Optional[bgt_compile.Report] = None
 
     def summary(self) -> str:
@@ -152,6 +154,10 @@ class Project:
         if self.speech:
             lines.append("%-22s %s" % ("screen reader", self.speech[0]))
             for note in self.speech[1:]:
+                lines.append("%-22s %s" % ("", note))
+        if self.loaded:
+            lines.append("%-22s %s" % ("script loads", self.loaded[0]))
+            for note in self.loaded[1:]:
                 lines.append("%-22s %s" % ("", note))
         if self.compile_report is not None:
             used = s.get("compiler_used")
@@ -235,6 +241,57 @@ def plugin_dlls(exe_path: str, type_names: Sequence[str]) -> List[str]:
             continue
         if os.path.splitext(dll)[0].lower() in wanted:
             found.append(dll)
+    return found
+
+
+def script_loaded_dlls(exe_path: str, module) -> List[str]:
+    """DLLs the *script* loads itself, through the engine's `library` type.
+
+    This is a second way a BGT game depends on a DLL, and it leaves none of
+    the evidence `plugin_dlls` looks for. `library` is a stock, documented
+    engine type -- `bool load(const string& in)`, `bool unload()`,
+    `dictionary@ call(const string& in, ?&in param1=null, ... param10=null)`
+    -- so a game using it registers no new type and the DLL is named after
+    nothing. It arrives as an ordinary **string literal** passed to
+    `library::load`.
+
+    Manamon 2 is the case: a `sqlite3_legacy` class whose `load_library`
+    calls `library::load("sqlite3.dll")`, with `Unable to locate
+    sqlite3.dll.` as its own error text. Recovered without it, the project
+    compiles, runs, and loses whatever that database held -- the same shape
+    as a missing asset pack, one layer over.
+
+    The evidence is the same pair the pack search uses, and neither half is
+    enough alone: the **name** comes from the module's string constants,
+    because the call site passes a local; the **filter** is a PE file of
+    that name sitting beside the executable. A system DLL is never brought,
+    and the module must really call `library::load`, or any `.dll` mentioned
+    anywhere would qualify.
+    """
+    calls_load = any(
+        f is not None and f.name.split("::")[-1] in ("load", "call")
+        and getattr(f, "object_type", None) is not None
+        and f.object_type.name == "library"
+        for f in module.used_functions)
+    if not calls_load:
+        return []
+    folder = os.path.dirname(os.path.abspath(exe_path))
+    found: List[str] = []
+    for raw in module.used_strings:
+        text = raw.decode("latin1") if isinstance(raw, bytes) else raw
+        if not text.lower().endswith(".dll") or text in found:
+            continue
+        if text.lower() in SYSTEM_DLLS or not DLL_RE.fullmatch(
+                text.encode("latin1", "replace")):
+            continue
+        beside = os.path.join(folder, text)
+        try:
+            with open(beside, "rb") as fh:
+                if fh.read(2) != b"MZ":
+                    continue
+        except OSError:
+            continue
+        found.append(text)
     return found
 
 
@@ -1133,6 +1190,10 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     declared = {ti.name for ti in module.classes} | {ti.name for ti in module.enums}
     used = [ti.name for ti in module.used_types if ti and ti.name not in declared]
     plugins = plugin_dlls(exe_path, used)
+    # ...and the other way a game depends on a DLL: the script loading one
+    # itself through the stock `library` type, which registers no new type
+    # and so leaves none of a plugin's evidence.
+    loaded = script_loaded_dlls(exe_path, module)
     # The asset packs the script will look for at run time. Discovery is
     # always done, because a project that cannot find its sounds can die
     # at startup and the report is the only warning you get.
@@ -1355,6 +1416,24 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                 "%s is included but not beside the executable: copy it in, or "
                 "the types it registers have no declaration" % dll)
 
+    # ...and a DLL the *script* loads itself through the engine's `library`
+    # type, which leaves none of a plugin's evidence: `library` is stock, so
+    # no new type is registered and the DLL arrives as a string literal.
+    # Manamon 2 loads `sqlite3.dll` that way. Nothing needs it to *compile*,
+    # which is why it is copied without being named a plugin and a missing
+    # one is a note rather than a problem.
+    for dll in loaded:
+        source_dll = os.path.join(os.path.dirname(os.path.abspath(exe_path)), dll)
+        if dll not in project.files and os.path.isfile(source_dll):
+            with open(source_dll, "rb") as src, \
+                    open(os.path.join(out_dir, dll), "wb") as dst:
+                dst.write(src.read())
+            project.files.append(dll)
+            project.loaded.append(
+                "%s copied in: the script loads it itself with "
+                "library::load, so nothing in the source names it and "
+                "without it that code path simply fails at run time" % dll)
+
     # ...and the screen-reader client, which is the difference between the
     # game speaking through NVDA and the engine quietly falling back to SAPI.
     spoken, speech_notes = speech_clients(module, out_dir)
@@ -1421,6 +1500,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                    "inlined": [first_path] if inlined else [],
                    "order": order,
                    "plugins": plugins, "newer_engine": newer,
+                   "script_loaded_dlls": loaded,
                    "stats": project.stats,
                    "problems": project.problems,
                    "origins": {s.name: s.origin for s in sections if s.origin},

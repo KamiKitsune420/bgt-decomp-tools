@@ -2125,6 +2125,69 @@ afterwards, so they were listed in `recovery.json` and absent from
 before the append, so it passed. Everything a project needs beside its script
 is now copied before the ZIP.
 
+## The other way a game needs a DLL: the script loads it itself
+
+`elias` is a type a *plugin* registers, and `plugin_dlls` finds its DLL by
+matching the file's stem against a type the module uses but does not
+declare. That is good evidence and it is the wrong shape for the second
+case, which leaves no trace of that kind at all.
+
+**BGT ships a `library` type**, and it is stock, documented and ordinary.
+Read out of `bgt.exe` -- the registration block is one function, so the
+whole interface comes out together:
+
+```c
+RegisterObjectType      ("library", 0, asOBJ_REF)   // size 0, flags 1
+RegisterObjectBehaviour ("library", FACTORY, "library @f()", ...)
+RegisterObjectMethod    ("library", "bool load(const string& in)", ...)
+RegisterObjectMethod    ("library", "bool unload()", ...)
+RegisterObjectMethod    ("library", "dictionary@ call(const string& in, "
+                         "?&in param1=null, ... ?&in param10=null)", ...)
+RegisterObjectMethod    ("library", "bool get_active()", ...)
+```
+
+Three things there that the help file does not say. `call` takes **exactly
+ten** optional parameters, where the documentation writes the whole tail as
+`? list_of_parameters`. There is an undocumented **`active` property**. And
+the signature is a `const string& in`, so a script names its DLL with an
+ordinary **string literal** -- no type, nothing for `plugin_dlls` to match.
+
+### What `library::call` does, read rather than inferred
+
+`library_structure` -- the registered-but-undocumented type -- is one
+resolved export: the decompiled `GetProcAddress` site reads the symbol name
+out of a `std::string` at `+0x64`, stores the `FARPROC` at `+0xA4`, and on
+failure formats `GetProcAddress failed for '%s' : Error code %d` and
+**throws a C++ exception**. So a missing *export* is a runtime error
+(`library exception (%s)`), not a `false` from `load`. The signature string
+is parsed first, with `Signature parse error "..."` when it will not go; the
+token tables beside it (`CDECL STDCALL FASTCALL PASCAL cdecl ...` and
+`FAR EXPORT const volatile struct class enum WINUSERAPI WINAPI __in_opt
+__in`) say it accepts a C declaration with a calling convention and skips
+the Win32 and SAL decoration. I did not reverse the grammar past that, and
+nothing here depends on it.
+
+### Manamon 2 is the live case, and it would have been left behind
+
+`sqlite3_legacy::load_library` calls `library::load("sqlite3.dll")`, and the
+game ships `sqlite3.dll` beside `rpg.exe` with `Unable to locate
+sqlite3.dll.` as its own error text. Recovered without it the project
+compiles, runs, and loses whatever that database held -- the same shape as a
+missing asset pack, one layer over, and `bgt recover` had no way to see it.
+
+`script_loaded_dlls` brings it, on the same pair of evidence the pack search
+uses, because neither half is enough alone: the **name** comes from the
+module's string constants, since the call site passes a local; the
+**filter** is a PE file of that name sitting beside the executable. The
+module must really call `library::load` or `library::call`, or any `.dll`
+mentioned anywhere would qualify -- and a system DLL is never brought, which
+matters because a game folder may well hold one. On the four titles it finds
+`sqlite3.dll` for Manamon 2 and nothing at all for the other three.
+
+It is copied without being called a plugin, and a missing one is a note
+rather than a problem: nothing needs it to **compile**. That is exactly why
+it was invisible.
+
 ## Plugins: a type no stock engine has
 
 Psycho Strike uses `elias`, and the installed BGT 1.3 has no such type, no
@@ -3017,6 +3080,16 @@ cracked it was the self-verifying criteria the rest of this document is
 built on: a declared count that walks to exactly a `RET`, and a tail that
 lands exactly on EOF. Read the reader when the format is in question; when
 your *own* reader is in question, the checks are what tell you.
+
+**`--string` finds nobody more often than it should, and the fix is four
+bytes.** That `LoadByteCode failed` dead end repeated exactly on
+`GetProcAddress failed for '%s'`, which *is* referenced -- once, from
+`0x0048107a`. This is a 32-bit build, so a literal's address is pushed as an
+immediate: compute the string's VA from the section table and search the
+file for those four bytes little-endian, then hand the hit to `--at`. That
+turned three "no referencing function" answers into the `library`
+registration block, the `GetProcAddress` site and the signature parser. Use
+`--string` first and this when it comes back empty.
 
 **A fifth title may differ again.** Three builds produced two answers for the
 template-namespace field and two for the script-object flag. The fourth (SBYW)

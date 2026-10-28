@@ -772,6 +772,61 @@ def test_bgt_api_can_be_pointed_at_a_games_own_engine():
         assert "type weakref" in printed
 
 
+def test_a_dll_the_script_loads_itself_is_brought_along():
+    """`library` is stock, so a DLL loaded through it leaves no plugin trace.
+
+    `plugin_dlls` finds a DLL by matching its stem against a *type* the
+    module uses but does not declare, which is what makes `elias.dll`
+    evidence. The engine's own `library` type is the other way a game
+    depends on a DLL and it registers nothing: `bool load(const string& in)`
+    takes the name as an ordinary string literal, so there is no type to
+    match and nothing in the recovered source names the file.
+
+    Manamon 2 is the live case -- a `sqlite3_legacy` class whose
+    `load_library` calls `library::load("sqlite3.dll")`, with `Unable to
+    locate sqlite3.dll.` as its own error text. Recovered without it the
+    project compiles, runs, and loses whatever that database held.
+
+    Both halves of the evidence are required, for the reason the pack search
+    needs both: a name from the string constants, and a PE file of that name
+    sitting beside the executable.
+    """
+    class _Type:
+        def __init__(self, name):
+            self.name = name
+
+    class _Func:
+        def __init__(self, owner, name):
+            self.object_type, self.name = _Type(owner), name
+
+    class _Module:
+        def __init__(self, calls, strings):
+            self.used_functions, self.used_strings = calls, strings
+
+    with tempfile.TemporaryDirectory() as tmp:
+        game = os.path.join(tmp, "game.exe")
+        with open(game, "wb") as fh:
+            fh.write(b"MZ a game")
+        with open(os.path.join(tmp, "sqlite3.dll"), "wb") as fh:
+            fh.write(b"MZ a library")
+        # a game folder really can hold these, and neither is the answer:
+        # one is the system's, and one only has the name.
+        with open(os.path.join(tmp, "kernel32.dll"), "wb") as fh:
+            fh.write(b"MZ the system's")
+        with open(os.path.join(tmp, "notes.dll"), "wb") as fh:
+            fh.write(b"this is not a PE file at all")
+
+        strings = ["sqlite3.dll", "kernel32.dll", "notes.dll", "absent.dll",
+                   "data.dat"]
+        loads = _Module([_Func("library", "load")], strings)
+        assert bgt_project.script_loaded_dlls(game, loads) == ["sqlite3.dll"]
+
+        # a module that never calls `library` is not making a claim about
+        # any `.dll` string it happens to hold
+        quiet = _Module([_Func("sound", "load")], strings)
+        assert bgt_project.script_loaded_dlls(game, quiet) == []
+
+
 def test_a_method_name_inside_a_longer_one_is_still_an_absence():
     """`string::insert` was hidden by `array::insert_at`.
 
