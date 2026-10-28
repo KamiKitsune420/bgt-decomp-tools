@@ -22,6 +22,7 @@ As in `test_toolkit.py`, they target what fails *quietly*:
 Run:  python tests/test_recovery.py      (or: python -m pytest tests/ -q)
 """
 
+import inspect
 import os
 import sys
 import tempfile
@@ -1743,3 +1744,51 @@ def test_the_undo_is_structural_rather_than_a_saved_copy():
     assert result["removed"] == ["open", "run"]
     assert result["written"] == {}, "an undo writes nothing, it only removes"
     assert all("command" in path for path in result["deleted"])
+
+
+def test_the_driver_never_declares_a_parameter_named_switch():
+    """A PowerShell parameter named `$Switch` breaks every `switch` statement
+    in that script, silently.
+
+    The driver picked its mode with
+    `$flag = switch ($Switch) { "debug" {"-c"} "release" {"-C"} ... }`, and
+    with `$Switch` declared in the `param()` block that statement matched
+    nothing. `$flag` was always empty, so the driver passed no switch and the
+    engine *ran* the script instead of compiling it -- and a disarmed entry
+    point exiting 0 is exactly the compile-only success case, so
+    `bgt compile --build` reported `compiled cleanly` and produced **no
+    executable**, in either mode, while `bgt.exe -C"<path>"` by hand built one
+    fine. Run mode passes no flag at all, so it was right by accident and hid
+    the whole thing.
+
+    This is the shape the repository keeps meeting: not a wrong answer, a
+    confident one from a run that never happened.
+    """
+    driver = bgt_compile.DRIVER
+    param_block = driver[driver.index("param("):driver.index(")", driver.index("param("))]
+    assert "$Switch" not in param_block, (
+        "a parameter named $Switch makes every `switch` statement in the "
+        "driver evaluate to nothing")
+    # The mode really is chosen by a `switch`, so the hazard is live rather
+    # than hypothetical -- and the name Python passes has to be the name the
+    # driver declares, or the default silently wins again.
+    assert "switch ($Mode)" in driver
+    assert "[string]$Mode" in param_block
+    source = inspect.getsource(bgt_compile._check)
+    assert '"-Mode"' in source, "the call site must pass the parameter the driver declares"
+    assert '"-Switch"' not in source
+
+
+def test_build_mode_asks_for_a_flag_and_run_mode_does_not():
+    """`-c` / `-C` compile to an executable; no switch runs the script. The
+    two are opposite outcomes, so the mapping is worth pinning: every value
+    the Python side can send must reach a flag the engine documents."""
+    driver = bgt_compile.DRIVER
+    mapping = driver[driver.index("$flag = switch"):]
+    mapping = mapping[:mapping.index(chr(10))]
+    assert '"debug" { "-c" }' in mapping
+    assert '"release" { "-C" }' in mapping
+    # ...and those are exactly the choices the CLI offers, so none of them can
+    # fall through to the default and quietly become a run.
+    parser_source = inspect.getsource(bgt_compile.main)
+    assert 'choices=("debug", "release")' in parser_source

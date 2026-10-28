@@ -72,8 +72,16 @@ DEFAULT_COMPILERS = (
 # compiler, polls for either outcome, prints a JSON record and always kills the
 # process it started -- a GUI left running would hold the next check's window.
 DRIVER = r"""
+# **Never name a parameter `$Switch`.** Declaring one silently breaks every
+# `switch` statement in the script: the statement below matched nothing, so
+# `$flag` was always empty, the driver *ran* the script instead of compiling
+# it, and a disarmed entry point exiting 0 was read as `compiled cleanly`. So
+# `bgt compile --build` reported success and produced no executable, in either
+# mode, for as long as it existed -- while `bgt.exe -C"<path>"` by hand built
+# one fine. Run mode never passed a flag, so it was correct by accident and
+# hid this completely. `-Mode` is the same string by another name.
 param([string]$Compiler, [string]$Script, [string]$WorkDir, [int]$TimeoutMs,
-      [string]$Switch = "run")
+      [string]$Mode = "run")
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices;
@@ -87,7 +95,7 @@ public class BgtKeys {
 # for that. Without a switch the engine runs the script instead.
 # The mode is passed by name, never as "-c": PowerShell would read a value
 # that starts with a dash as the next parameter's name.
-$flag = switch ($Switch) { "debug" { "-c" } "release" { "-C" } default { "" } }
+$flag = switch ($Mode) { "debug" { "-c" } "release" { "-C" } default { "" } }
 $arguments = if ($flag -eq "") { "`"$Script`"" } else { "$flag`"$Script`"" }
 $proc = Start-Process -FilePath $Compiler -ArgumentList $arguments `
                       -WorkingDirectory $WorkDir -PassThru
@@ -142,7 +150,7 @@ while ((Get-Date) -lt $deadline) {
                 }
             }
             $outcome = "window"
-            if (($Switch -eq "run") -and (-not $isReport)) {
+            if (($Mode -eq "run") -and (-not $isReport)) {
                 # The script's own window: it compiled and started.
                 $ran = $true
                 break
@@ -716,7 +724,7 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
              "-ExecutionPolicy", "Bypass", "-File", driver,
              "-Compiler", exe, "-Script", script, "-WorkDir", workdir,
              "-TimeoutMs", str(int(timeout * 1000)),
-             "-Switch", build or "run"],
+             "-Mode", build or "run"],
             capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout + 60,
             # The report echoes source lines, which carry whatever bytes the
             # game's string literals do; decoded with the console's own

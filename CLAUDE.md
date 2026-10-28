@@ -1624,12 +1624,36 @@ Two things about that to keep in mind:
   keeps waiting, and reports the script's own window title when it appears.
   That is what `bgt compile --run` answers: `compiled with 1 warning(s), and
   ran: it opened a window of its own titled 'Super Egg Hunt Version 1.53'`.
-- **It hangs on a module this size.** Asked to build Psycho Strike's or
-  Paladin's recovered source into an executable, BGT 1.3's compiler dismisses
-  its dialog, holds the output file open and never completes; the partial file
-  has no `xproc10` trailer, so it starts and exits without running anything.
-  A small script builds fine, so the mechanism works -- the limit is the
-  module. Running the script is the route that works today.
+- **`--build` built nothing at all, and said it had.** This section used to
+  report that building a module this size hangs, with a small script building
+  fine "so the mechanism works". Both halves were wrong, and from the same
+  cause: **a PowerShell parameter named `$Switch` silently breaks every
+  `switch` statement in that script.** The driver chose its mode with
+
+  ```powershell
+  param(..., [string]$Switch = "run")
+  $flag = switch ($Switch) { "debug" { "-c" } "release" { "-C" } default { "" } }
+  ```
+
+  and that statement matched nothing, so `$flag` was always empty, no switch
+  reached the engine, and BGT **ran** the script instead of compiling it. A
+  disarmed entry point exiting 0 is exactly the compile-only success case, so
+  the report read `compiled cleanly` while no executable existed -- in either
+  mode, for as long as the option existed. Run mode passes no flag at all, so
+  it was correct by accident and hid the whole thing, and the "hang" was run
+  mode sitting in a game that had opened a window.
+
+  Renaming it to `-Mode` is the entire fix. `bgt compile --build release`
+  now builds Paladin's 28,028-line recovery to a 1.27 MB executable that
+  `bgt identify` reads as `BGT (overlay 0xDDC00, key seed 0x11)` -- the same
+  overlay offset and seed as the original -- and a two-line script builds in
+  both modes. There is no module-size limit here; there was a parameter name.
+
+  The lesson is the one this file keeps relearning from the other direction:
+  the earlier note was not a guess, it was a *measurement* of a run that
+  never happened. `tests/test_recovery.py` now asserts the driver declares no
+  `$Switch`, that its mode really is chosen by a `switch`, and that the name
+  Python passes is the name the driver declares.
 
 Each of these was found by the compiler, and the quiet bugs *behind* them were
 found by reading what it said rather than by inspection:
@@ -1793,7 +1817,8 @@ the selector is where it sends you.
 
 So **run mode proves the module reaches the engine and nothing about
 behaviour**, and the way to exercise a recovered game is the executable:
-`bgt compile --build release`. The lesson for diagnosing the next one is the
+`bgt compile --build release`, which works now (see **`--build` built nothing
+at all** above -- for a long time it did not, and quietly). The lesson for diagnosing the next one is the
 cheap part: an `alert` before each suspect return answers in one run what
 reading the source argues about for an afternoon.
 
