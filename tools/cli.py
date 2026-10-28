@@ -276,7 +276,7 @@ def cmd_ghidra(args: argparse.Namespace) -> int:
 def cmd_api(args: argparse.Namespace) -> int:
     """`bgt api` takes real options, so they are declared and forwarded."""
     argv = list(args.name)
-    for flag in ("chm", "cache", "list", "json"):
+    for flag in ("chm", "cache", "list", "json", "exe"):
         value = getattr(args, flag)
         if value:
             argv += ["--" + flag, value]
@@ -653,10 +653,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_compile)
 
     p = sub.add_parser("api",
-                       help="the engine's documented API, from the installed bgt.chm")
+                       help="the engine's API: documented (bgt.chm) and "
+                            "registered (any bgt.exe, or a game's own)")
     p.add_argument("name", nargs="*", help="names to look up")
     p.add_argument("--chm")
     p.add_argument("--cache")
+    p.add_argument("--exe", help="read registrations from this executable -- a "
+                                 "game's own runtime answers for the build that "
+                                 "produced it, not the one installed here")
     p.add_argument("--list", metavar="SUBSTRING")
     p.add_argument("--missing", action="store_true")
     p.add_argument("--json", metavar="FILE")

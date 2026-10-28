@@ -707,6 +707,118 @@ def test_engine_gap_names_a_type_the_installed_compiler_lacks():
         assert bgt_project.engine_gap(game, ["nowhere"], compiler) == []
 
 
+def test_a_games_own_runtime_says_what_the_build_that_made_it_offered():
+    """A BGT game is the runtime with the module appended, so the runtime's
+    registration strings are right there, uncompressed.
+
+    That is better evidence than the name appearing somewhere in the file,
+    which cannot be told from a coincidence. Manamon 2's `rpg.exe`
+    registers 509 names and 52 types where stock 1.3 registers 432 and 32,
+    so its `weakref` and `ecdh` are provably the build's rather than
+    inferred from a substring.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        compiler = os.path.join(tmp, "bgt.exe")
+        with open(compiler, "wb") as fh:
+            fh.write(b"\x00".join([b"void timer_restart(string& in)"]))
+        game = os.path.join(tmp, "game.exe")
+        with open(game, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"void timer_restart(string& in)",
+                b"weakref @f()",                       # a registration
+                b"a changelog mentioning ecdh here",   # merely a mention
+            ]))
+        assert bgt_project.engine_gap(
+            game, ["weakref", "ecdh"], compiler) == [("weakref", "game.exe")]
+
+
+def test_bgt_api_can_be_pointed_at_a_games_own_engine():
+    """`--exe` is what makes "the engine's age, not the recovery's" checkable.
+
+    Manamon 2's `rpg.exe` registers `void garbage_collect(int
+    number_of_cycles=0)` where the installed 1.3 documents `void
+    garbage_collect()`, so a recovered `garbage_collect(int(1000))` is the
+    build's signature rather than a decompilation error -- and printing only
+    the documented one would answer about the wrong engine. A registered
+    *type* has no declaration of its own to print, so it needs saying too:
+    `weakref` and `ecdh` are types, and they are the whole question.
+    """
+    import contextlib
+    import io as _io
+
+    with tempfile.TemporaryDirectory() as tmp:
+        game = os.path.join(tmp, "rpg.exe")
+        with open(game, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"void garbage_collect(int number_of_cycles=0)",
+                b"weakref @f()"]))
+        chm = os.path.join(tmp, "bgt.chm")
+        open(chm, "w").close()
+        root = os.path.join(tmp, "references", "foundation_layer",
+                            "function_reference", "miscellaneous")
+        os.makedirs(root)
+        with open(os.path.join(root, "garbage_collect.htm"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("<html><body><p>void garbage_collect()</p></body></html>")
+        open(os.path.join(tmp, "bgt.hhc"), "w").close()
+
+        out = _io.StringIO()
+        with contextlib.redirect_stdout(out):
+            bgt_api.main(["--chm", chm, "--cache", tmp, "--exe", game,
+                          "garbage_collect", "weakref"])
+        printed = out.getvalue()
+        assert "void garbage_collect()" in printed              # documented
+        assert "int number_of_cycles=0" in printed              # and the build's
+        assert "type weakref" in printed
+
+
+def test_a_method_name_inside_a_longer_one_is_still_an_absence():
+    """`string::insert` was hidden by `array::insert_at`.
+
+    `method_gap` corroborated an absence by searching the installed
+    engine's **raw bytes** for the method name, and `insert` is a substring
+    of `insert_at` and `insert_last`, which the array type registers. So
+    Manamon 2's `string::insert` and the newer AngelScript `string` it
+    comes from went unreported, while `string::erase` -- a name nothing
+    else contains -- was reported. A list of registrations has no such
+    accidents: 1.3 registers `insert_at` and `insert_last` and no `insert`.
+    """
+    class _Type:
+        def __init__(self, name):
+            self.name = name
+
+    class _Func:
+        def __init__(self, owner, name):
+            self.object_type, self.name = _Type(owner), name
+
+    class _Module:
+        classes = ()
+
+        def __init__(self, calls):
+            self.used_functions = calls
+
+    with tempfile.TemporaryDirectory() as tmp:
+        compiler = os.path.join(tmp, "bgt.exe")
+        with open(compiler, "wb") as fh:
+            fh.write(b"\x00".join([b"void insert_at(uint, const T&in)",
+                                   b"void insert_last(const T&in)"]))
+        game = os.path.join(tmp, "game.exe")
+        with open(game, "wb") as fh:
+            fh.write(b"\x00".join([
+                b"void insert_at(uint, const T&in)",
+                b"void insert(uint pos, const string &in other)"]))
+        module = _Module([_Func("string", "insert"), _Func("string", "insert_at")])
+        chm = {"functions": {}, "types": {"string": {"methods": [],
+                                                     "properties": []}}}
+        real_read = bgt_api.read
+        try:
+            bgt_api.read = lambda *a, **k: chm
+            gap = bgt_project.method_gap(game, module, compiler)
+        finally:
+            bgt_api.read = real_read
+        assert gap == [("string::insert", "game.exe")]
+
+
 def test_plugin_dlls_are_only_those_matching_a_used_type():
     """A plugin include is evidence, not a list of every DLL in the file."""
     with tempfile.NamedTemporaryFile("wb", suffix=".exe", delete=False) as fh:

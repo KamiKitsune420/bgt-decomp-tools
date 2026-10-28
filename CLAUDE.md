@@ -1281,6 +1281,94 @@ false positive first:
   declaration (`All Files (*.*)`), which is told apart by the fact that a
   declaration's parameters are *types*.
 
+### A game's own executable is an engine, and it will tell you which one
+
+This is the one that pays for everything above. **A BGT game is the runtime
+with the module appended**, and the runtime is not compressed in the game --
+only in `exec.bin`, which is how `bgt.exe` carries it. So the same
+registration strings are in `strike.exe` and `rpg.exe`, and reading them
+gives the whole interface of the build that produced that module:
+
+```bash
+bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
+```
+
+| engine | registered names | types | built |
+|---|---|---|---|
+| BGT 1.0 | 240 | 23 | 2010-12-30 |
+| BGT 1.3 | 432 | 32 | 2014-06-01 00:41 |
+| Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
+| Paladin of the Sky | 432 | 32 | stock |
+| Psycho Strike | 453 | 40 | 2015-04-19 |
+| Manamon 2 | 509 | 52 | 2019-11-15 |
+
+Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
+embeds it, which is one compile session: that title is stock 1.3 and the
+timestamps say so without being asked.
+
+**Psycho Strike and Manamon 2 are the same custom engine, four years
+apart.** Twenty of Psycho Strike's twenty-one additions over 1.3 are in
+Manamon 2 as well; the twenty-first is its own `string substring(uint
+offset, uint count)`, which Manamon 2 drops for AngelScript's stock
+`string substr(uint start = 0, int count = -1)`. Both are VGStorm titles,
+so this is one developer's BGT fork and not two.
+
+What Manamon 2's fork adds, read off its own runtime:
+
+- **Crypto++.** `ecdh` (`generate_keys`, `get_public_key`, `get_private_key`,
+  `agree(decryption_key@)`), `encryption`/`decryption` with
+  `process(string&in, string&out)` and `set_input_format(data_formats)`, and
+  `Crypto++ RNG` as a literal in the file. That is the whole of what
+  `engine_gap` had been reporting as four mysterious absent types.
+- **A much newer AngelScript**, from its stock add-ons: `opImplCast`
+  (2.28.1+), `findByRef(const T&in if_handle_then_const value)` (2.30+),
+  `get_extended_exception_info(bool showStack=false)`, `formatInt`,
+  `parseFloat`, `sortAsc`, `weakref`/`const_weakref`, `dictionaryValue`.
+- **`void garbage_collect(int number_of_cycles=0)`**, with the parameter
+  named. So a recovered `garbage_collect(int(1000))` is that build's
+  signature used correctly, and dropping the argument to match stock 1.3
+  would have changed the program.
+- `string_regular_expression`, `create_pack_file_index`,
+  `set_garbage_collector_panic_threshhold`, and the sized integer types.
+
+#### `elias` is a binding compiled into the engine, not a plugin
+
+BGT has no plugin mechanism -- its `#include` takes a script or a pack file,
+and handed a DLL it says "Expected identifier". So the question is how
+`elias` becomes a *type*, and the binaries answer it from three directions:
+
+- The `elias` type and its seventeen methods (`start`, `silence`,
+  `request_change`, `play_stinger`, `set_level`, `set_key`, `set_urgency`,
+  `get_transitioning` ...) are **registration strings inside the runtime**,
+  in both `strike.exe` and `rpg.exe`. A DLL cannot put them there.
+- `elias.dll` is **not in either executable's import table**, and both
+  runtimes carry its C export names verbatim -- so it is loaded with
+  `LoadLibrary` at run time.
+- The DLL exports 92 functions (`elias_theme_create_from_xml`,
+  `elias_theme_read_samples`, `elias_track_set_crossfade_minimum` ...), and
+  the seventeen script methods are a thin binding over about twenty of
+  them: the theme-level half. The track-authoring half is not exposed,
+  because a theme arrives as XML.
+
+So it is a **BGT built to use that DLL**, which is the second of the two
+possibilities and not the first. Manamon 2 has it too, so it came with the
+fork rather than with Psycho Strike.
+
+#### What that is worth to the gap checks
+
+`engine_gap` and `method_gap` corroborated an absence by searching the
+game's raw bytes for the name. A registration is proof where a substring
+match cannot be told from a coincidence, so both now ask the game's own
+runtime and keep the raw search only as the fallback for a runtime whose
+strings cannot be read.
+
+It found a false negative immediately. **`string::insert` was hidden by
+`array::insert_at`**: `insert` is a substring of `insert_at` and
+`insert_last`, which BGT 1.3 registers, so Manamon 2's use of the newer
+AngelScript `string::insert` went unreported while `string::erase` -- a
+name nothing else contains -- was reported. Manamon 2's method gap is 3,
+not 2. Nothing else moves on any of the four titles.
+
 ### What else the two binaries differ on
 
 The compiler's diagnostic table is a per-version artifact -- a message
@@ -1953,7 +2041,7 @@ module.
 `bgt recover` reports this from the one piece of evidence available: a type the
 module uses, does not declare, appears in the game's own executable, and does
 not appear in the installed compiler or its `exec.bin`. For Manamon 2 that
-names five: `weakref`, and a whole crypto family -- `ecdh`, `encryption`,
+names five: `weakref`, and a Crypto++ family -- `ecdh`, `encryption`,
 `decryption` and `decryption_key`. (`protected` is a keyword rather than a type, so it
 is found the same way by hand and not by that check.) Saying so is the
 difference between a report and a mystery -- and it is why a diagnostic count
@@ -2042,7 +2130,13 @@ is now copied before the ZIP.
 Psycho Strike uses `elias`, and the installed BGT 1.3 has no such type, no
 plugin directive, and no mention of either. The game's own executable has both
 `elias.dll` and the registered `elias @f()`, so the build that produced it had
-that plugin compiled in. `bgt recover` reports it — a DLL named after a type
+that plugin compiled in. **Compiled in is exactly right, and the binaries
+prove it** -- see **`elias` is a binding compiled into the engine, not a
+plugin** above: the type's seventeen methods are registration strings inside
+the runtime, `elias.dll` is absent from the import table and loaded with
+`LoadLibrary`, and the script methods are a thin binding over about twenty of
+the DLL's ninety-two exports. Manamon 2's fork has it too.
+`bgt recover` reports it — a DLL named after a type
 the module uses but does not declare is evidence, where a list of every DLL in
 the file would not be — copies the DLL into the project, and says in the entry
 script that compiling needs that engine build. It deliberately does **not**

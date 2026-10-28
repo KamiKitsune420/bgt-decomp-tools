@@ -243,15 +243,21 @@ def engine_gap(exe_path: str, used: Sequence[str],
     """Types the module uses that the *installed* engine does not have.
 
     A recovered module is faithful to the build that produced it, and that
-    build is not necessarily the one installed here. Psycho Strike's `elias`
-    comes from a plugin DLL; Manamon 2 uses `weakref` and `protected`, and
-    both appear in its own `rpg.exe` and in neither BGT 1.0 nor 1.3. Those are
-    the engine's age, not the recovery's, and saying so is the difference
-    between a report and a mystery.
+    build is not necessarily the one installed here. Psycho Strike uses
+    `elias`; Manamon 2 uses `weakref`, `ecdh` and `protected`, and none of
+    them is in BGT 1.0 or 1.3. Those are the engine's age, not the
+    recovery's, and saying so is the difference between a report and a
+    mystery.
 
-    The test is the one piece of evidence available: the name appears in the
-    game's own executable -- so its runtime registered it -- and not in the
-    installed compiler.
+    **The game's own executable is an engine too**, and that is better
+    evidence than it was being asked for. A BGT game is the runtime with the
+    module appended, so the runtime's registration strings are right there
+    uncompressed -- the whole interface the build that produced this module
+    offered. Manamon 2's `rpg.exe` registers 509 names and 52 types against
+    stock 1.3's 432 and 32. So the corroboration is now a *registration*
+    rather than the name appearing somewhere in the file, which a substring
+    match cannot distinguish from a coincidence, and the report can carry
+    the signature the build actually had.
     """
     exe = bgt_compile.find_compiler(compiler)
     if exe is None:
@@ -282,10 +288,15 @@ def engine_gap(exe_path: str, used: Sequence[str],
         absent = {name for name in names
                   if name.encode("latin1") not in engine}
 
-    # Either way, it only counts when the game's own executable has it: that
-    # is what says the build it came from provided it.
+    # Either way, it only counts when the build that produced this module
+    # provided it. Its own runtime's registrations say so outright; the
+    # name merely appearing in the file is the fallback for a runtime whose
+    # strings cannot be read.
+    offered = bgt_api.registered_types(exe_path)
     return [(name, os.path.basename(exe_path)) for name in names
-            if name in absent and name.encode("latin1") in game]
+            if name in absent
+            and (name in offered if offered
+                 else name.encode("latin1") in game)]
 
 
 def method_gap(exe_path: str, module, compiler: Optional[str] = None
@@ -302,8 +313,13 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
     build had it and this one does not, which is the same finding as
     `weakref`, one level down.
 
-    Needs the documentation, because a *list* of a type's methods is what
-    makes an absence provable; a binary search for a short name is not.
+    Needs a *list* on both sides, because a binary search for a short name
+    is not an absence: the installed engine's registrations and its
+    documentation on one, and the **game's own runtime's registrations** on
+    the other. Strike's `rpg`-era engine declares
+    `sound@ speak_to_sound(string)` and Manamon 2's
+    `sound@ speak_to_sound(string text, bool normalize=false)`, which is the
+    same method two builds apart; stock 1.3 declares neither.
     """
     exe = bgt_compile.find_compiler(compiler)
     if exe is None:
@@ -315,6 +331,8 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
     types = api["types"]                      # type: ignore[index]
 
     declared = {ti.name for ti in module.classes if ti}
+    offered = bgt_api.registered(exe_path)
+    installed = bgt_api.registered(exe)
     with open(exe_path, "rb") as fh:
         game = fh.read()
     with open(exe, "rb") as fh:
@@ -335,13 +353,18 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
         documented = types[owner.name]["methods"] + types[owner.name]["properties"]
         if any(re.search(r"%s" % re.escape(method), line) for line in documented):
             continue
+        if method in installed:               # registered, merely undocumented
+            continue
         name = "%s::%s" % (owner.name, method)
         if name in [existing for existing, _ in gap]:
             continue
-        # The same corroboration as for a type: the build that produced this
-        # module registered it, and the installed one does not.
-        if (method.encode("latin1") in game
-                and method.encode("latin1") not in engine):
+        # The same corroboration as for a type, and from the same place: the
+        # build that produced this module registered it, and the installed
+        # one does not. The raw search stays as the fallback for a runtime
+        # whose strings cannot be read.
+        if (method in offered if offered
+                else (method.encode("latin1") in game
+                      and method.encode("latin1") not in engine)):
             gap.append((name, os.path.basename(exe_path)))
     return gap
 

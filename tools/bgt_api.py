@@ -377,10 +377,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                       % (name, len(types[name]["methods"]), len(types[name]["properties"])))
         return 0
 
+    reg_types = registered_types(decls=reg)
     for name in args.name:
+        shown = False
         if name in functions:
             for signature in functions[name]:
                 print("  %s" % signature)
+            shown = True
         elif name in types:
             entry = types[name]
             print("  type %s" % name)
@@ -388,10 +391,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("      %s" % signature)
             for signature in entry["properties"]:
                 print("      %s" % signature)
-        elif name in reg:
-            for signature in reg[name]:
-                print("  %s        [registered, not documented]" % signature)
-        else:
+            shown = True
+        # **A registration is shown even when the name is documented**, as
+        # long as it says something different. With `--exe` pointed at a
+        # game's own runtime that is the whole point: Manamon 2 registers
+        # `void garbage_collect(int number_of_cycles=0)` where the installed
+        # 1.3 documents `void garbage_collect()`, and printing only the
+        # documented one answers about the wrong engine.
+        for signature in reg.get(name, []):
+            if not shown or signature not in [s.replace(name + "::", "")
+                                              for s in functions.get(name, [])]:
+                print("  %s%s" % (signature,
+                                  "" if shown else
+                                  "        [registered, not documented]"))
+                shown = True
+        if not shown and name in reg_types:
+            print("  type %s        [registered, not documented]" % name)
+            shown = True
+        if not shown:
             print("  %s: this engine neither documents nor registers it" % name)
     return 0
 
