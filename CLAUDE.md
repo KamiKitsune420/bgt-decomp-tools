@@ -494,6 +494,72 @@ Manamon 2 all still pass every stage, Manamon 2 with its 9,700 bodies.
 
 Do not assume a third title matches either of these two. Run `bgt validate`.
 
+### Manamon 1 is a third reader generation, and where to pick it up
+
+Manamon 1 (`VGStorm.com\Manamon\rpg.exe`, 2017-07-30) is BGT, overlay
+0xF9C00, stock seed 0x11, `len2`, 55 enums, **784 classes** -- the figure the
+benchmark this project was started against reported. It unpacks cleanly and
+its enums, class declarations and funcdefs all parse. **Its class blocks do
+not**, and it is not a variant of either model: it is `len2` strings with
+some of the older reader's record shapes and at least one difference that is
+neither.
+
+Two differences are found and trialled (above): the zero-parameter list
+guard, and three fields per object variable instead of two. With both, the
+walk reaches 0x65A2 instead of stopping at 0x655C -- the constructor and
+factory of `elemental_node` parse and it dies in that class's methods:
+
+```
+elemental_node method 0   bad function tag 0x01 at 0x656B
+elemental_node method 2   bad function tag 0x01 at 0x6591
+then                      implausible count -50 at 0x65A2
+```
+
+That `-50` is the sign-flag guard doing its job: a negative count means the
+field being read is not the field it was taken for, and it says so instead of
+walking off quietly.
+
+**Do not add a third trial dimension by guessing.** The three-field finding
+earned its place because it had a *known target* -- `elemental_node`'s
+factory record begins at 0x6559, so the constructor's body must consume
+exactly up to there, and of the sixteen combinations of the four fields the
+two readers differ on, only the four with three-field object variables land
+on it. Two fields stops a byte short or three bytes over. Without a target
+like that, each flag that happens to clear one record is the
+confident-plausible-wrong answer this file keeps paying for.
+
+What the binary has already given, so none of it needs redoing:
+
+- **`asCReader` is at 0x0041F210 - 0x00425C5A.** Nineteen sites reference the
+  `LoadByteCode` literal (file 0xD1C18, VA 0x004D2818), one per error path
+  inside the reader: 0x41F22C, 0x41F745, 0x41F9FF, 0x41FB64, 0x41FC77,
+  0x41FD06, 0x41FE26, 0x4200F2, 0x420172, 0x420213, 0x4202A6, 0x42040A,
+  0x420494, 0x420785, 0x422E91, 0x4230E5, 0x424F89, 0x425ADD, 0x425C5A.
+  Of those, `FUN_0041F290` (977 lines) is a type reader -- it calls
+  `FUN_004216D0`, this build's `ReadTypeInfo`. `FUN_00421F10` (817) and
+  `FUN_004250C0` (566) are the unread candidates for the function reader.
+- **`asBCInfo[]` is at file 0xC80DC, VA 0x004C8CDC**, and exactly one `.text`
+  site references it, at 0x00412C3A inside `FUN_00412C00` -- so instruction
+  sizes during the body read come from somewhere else in this build.
+- **There is no `_builtin_function_` literal at all.** BGT 1.3 carries it at
+  0x108138; Manamon 1 carries neither it nor `builtin_function`. That is why
+  `--string _builtin_function_` returns no functions here, and it is also the
+  cleanest evidence that this is a different AngelScript generation rather
+  than a build with one field moved.
+
+Two things about the Ghidra run itself, both of which cost time:
+
+- **Import the PE stub, not the executable.** The full 2 MB file dies with
+  `OutOfMemoryError: Java heap space` at the 4G heap this file records as
+  sufficient for `bgt.exe`, because half of it is the encrypted overlay and
+  the string and switch analyzers grind through it for nothing.
+  `bgtlib.read_trailer` gives the split; 1,022,976 bytes imports and
+  analyses.
+- **`--string` finding nobody is the normal case here**, and the four-byte
+  immediate trick is what works: compute the literal's VA from the section
+  table and search the file for those bytes little-endian, then `--at` the
+  hits. That is how all nineteen sites above were found.
+
 **Read the reader; do not infer the format.** `asCReader` is statically linked into
 every BGT executable, so the exact record layout for the build you are looking at is
 *in the binary in front of you*. Transcribe the branch from Ghidra.
