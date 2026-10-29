@@ -1343,12 +1343,22 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 | BGT 1.3 | 432 | 32 | 2014-06-01 00:41 |
 | Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
 | Paladin of the Sky | 432 | 32 | stock |
-| Psycho Strike | 453 | 40 | 2015-04-19 |
-| Manamon 2 | 509 | 52 | 2019-11-15 |
+| Psycho Strike | 453 | 40 | 2015-04-19 21:02 |
+| Manamon 1 | 469 | 44 | 2017-03-15 21:21 |
+| Manamon 2 | 509 | 52 | 2019-11-15 02:14 |
 
 Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
+
+**The fork has three points now, and Manamon 1 is the middle one.** 453
+registrations in 2015, 469 in 2017, 509 in 2019 -- and **37 of Manamon 1's
+38 additions over stock 1.3 are also in Manamon 2**, so it is one
+developer's engine growing rather than three unrelated builds. Manamon 1
+also drops 1.3's `find_by_reference` for the newer AngelScript add-on
+spelling `findByRef`, which is the same substitution this fork keeps making
+-- compare Psycho Strike's own `substring` giving way to stock `substr`. Its
+`elias` binding is already present in 2017.
 
 **Psycho Strike and Manamon 2 are the same custom engine, four years
 apart.** Twenty of Psycho Strike's twenty-one additions over 1.3 are in

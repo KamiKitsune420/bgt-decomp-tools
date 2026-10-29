@@ -101,7 +101,8 @@ class Reader:
     def __init__(self, data: bytes, dialect: str, pos: int = 0,
                  opcodes: Optional[Dict[int, Dict[str, Any]]] = None,
                  template_namespace: bool = True,
-                 unguarded_lists: bool = False) -> None:
+                 unguarded_lists: bool = False,
+                 objvar_three: bool = False) -> None:
         self.d = data
         self.dialect = dialect
         self.p = pos
@@ -138,6 +139,21 @@ class Reader:
         # Nothing in the corpus had exercised a zero-parameter funcdef:
         # Manamon 2's twenty-seven all take at least one.
         self.unguarded_lists = unguarded_lists
+        # Whether a funcType-1 body records THREE fields per object variable
+        # (`{typeinfo, eu, eu}`) or two. The dialect table has this as the
+        # older reader's shape against the newer one's, and Manamon 1 breaks
+        # that too: `len2` strings with three-field object variables.
+        #
+        # `elemental_node`'s constructor is what pins it. Its record starts
+        # at 0x652A and the factory that follows -- same back-referenced
+        # name -- begins at 0x6559, so the body has to consume exactly up to
+        # there. Of the sixteen combinations of the four fields the two
+        # readers differ on, the only ones that land on 0x6559 are the four
+        # with three-field object variables; two fields stops a byte short
+        # or three bytes over. That is a known target rather than a guess,
+        # and the module-wide trial then has 784 class blocks and an exact
+        # EOF landing to confirm it against.
+        self.objvar_three = objvar_three
         self.saved: List[bytes] = []          # savedStrings
         self.types: List[Any] = []            # savedDataTypes
         self.functions: List[Any] = []        # savedFunctions
@@ -550,7 +566,10 @@ class Reader:
                     nobj = self.eu()
                     rec["objVars"] = []
                     for _ in range(nobj):
-                        rec["objVars"].append((self.type_info(), self.eu()))
+                        ti = self.type_info()
+                        rec["objVars"].append(
+                            (ti, self.eu(), self.eu()) if self.objvar_three
+                            else (ti, self.eu()))
                     if nobj > 0:
                         self.eu()                # objVariablesOnHeap
                     ninfo = self.eu()            # NOTE: inside the 0x08 block
@@ -1099,11 +1118,13 @@ def module_strings(data: bytes, dialect: Optional[str] = None,
 def _walk(data: bytes, dialect: str, start: int, n_enums: int,
           opcodes: Optional[Dict[int, Dict[str, Any]]],
           template_namespace: bool,
-          unguarded_lists: bool = False) -> Dict[str, Any]:
+          unguarded_lists: bool = False,
+          objvar_three: bool = False) -> Dict[str, Any]:
     """One full pass over a module under one set of build assumptions."""
     r = Reader(data, dialect, start, opcodes=opcodes,
                template_namespace=template_namespace,
-               unguarded_lists=unguarded_lists)
+               unguarded_lists=unguarded_lists,
+               objvar_three=objvar_three)
     classes, declared = [], None
     funcdefs, funcdefs_declared = [], None
     enums: List[Dict[str, Any]] = []
@@ -1140,7 +1161,8 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
             "parse_errors": r.parse_errors, "end": r.p,
             "template_namespace": template_namespace,
-            "unguarded_lists": unguarded_lists}
+            "unguarded_lists": unguarded_lists,
+            "objvar_three": objvar_three}
 
 
 def _score(w: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1210,10 +1232,13 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
     walk = None
     for namespaced in (True, False):
         for unguarded in (False, True):
-            trial = _walk(data, dialect, start, len(enums), opcodes,
-                          namespaced, unguarded)
-            if walk is None or _score(trial) > _score(walk):
-                walk = trial
+            for three in (False, True):
+                trial = _walk(data, dialect, start, len(enums), opcodes,
+                              namespaced, unguarded, three)
+                if walk is None or _score(trial) > _score(walk):
+                    walk = trial
+                if walk["tail"]:
+                    break
             if walk["tail"]:
                 break
         if walk["tail"]:
@@ -1229,6 +1254,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "tail": walk["tail"], "tail_error": walk["tail_error"],
             "template_namespace": walk["template_namespace"],
             "unguarded_lists": walk["unguarded_lists"],
+            "objvar_three": walk["objvar_three"],
             "parse_errors": walk["parse_errors"],
             "end": walk["end"]}
 
