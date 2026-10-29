@@ -2270,8 +2270,35 @@ class FuncDecompiler:
                 if (nxt.name.startswith(("J", "CALL", "SUSPEND"))
                         or _s16(nxt.w_arg) == off or _s16(nxt.w_arg2) == off):
                     break
-            if (destination is not None and destination.obj_type is None
-                    and destination.token_type == widths[ins.name.replace("SetV", "WRTV")]):
+            if destination is None or destination.obj_type is not None:
+                continue
+            want = widths[ins.name.replace("SetV", "WRTV")]
+            if destination.token_type == want:
+                typed[index] = destination
+            elif (known is not None and known.obj_type is None
+                  and known.token_type == 67            # the slot reads as bool
+                  and destination.token_type != 67):    # the member is not
+                # **A bool slot destroys an integer constant, not just a
+                # float one.** This rule was written for `pool.pan_step =
+                # 1.5` and so only accepted a float or double destination,
+                # which left the far worse case alone: `_typed_constant`
+                # renders any non-zero constant in a bool slot as `true`, and
+                # `true` assigned to an `int` member is **1**.
+                #
+                # Paladin's `drunken_bert` introduces Gabriel with
+                #
+                #     SetV4 v1, 20 ; LoadRObjR v7 ; WRTV4 v1
+                #     SetV4 v2, 12 ; LoadRObjR v7 ; WRTV4 v2
+                #     SetV4 v2, 80 ; LoadRObjR v7 ; WRTV4 v2
+                #
+                # over two slots the compiler reuses, both of which
+                # `slot_types` has no typed opcode for and which therefore
+                # read as bool. All seven stats came out as `1`:
+                # `strength = 1`, `av_damage = 1`, **`max_health = 1`**. The
+                # recovered game reached its tutorial battle, dealt one
+                # damage and died to one hit, and every number in it was
+                # wrong the same way. It compiles, it runs, and it is
+                # unplayable.
                 typed[index] = destination
         return typed
 

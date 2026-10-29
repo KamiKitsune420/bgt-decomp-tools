@@ -1025,3 +1025,82 @@ class MergeOnAFreeTests(unittest.TestCase):
         arm = source[source.index("other_start ="):source.index("finish_pos =")]
         self.assertIn("self.instrs[other_start:merge_idx]", arm)
         self.assertNotIn("shape_idx", arm)
+
+
+class BoolSlotIntegerConstantTests(unittest.TestCase):
+    """A bool-typed slot destroys an integer constant, not just a float one.
+
+    BGT records no scalar local, so `slot_types` infers one from the opcodes
+    that *compute* with a slot -- and a slot the program only ever stores
+    into has none, so it reads as bool. `_typed_constant` then renders any
+    non-zero constant in it as `true`, and `true` assigned to an `int`
+    member is **1**.
+
+    `_stored_constant_types` exists for exactly this and was written for
+    `pool.pan_step = 1.5`, so it only accepted a *float or double*
+    destination. The integer case is far worse and went uncorrected.
+    Paladin's `drunken_bert` introduces a party member with
+
+        SetV4 v1, 20 ; LoadRObjR v7 ; WRTV4 v1
+        SetV4 v2, 12 ; LoadRObjR v7 ; WRTV4 v2
+        SetV4 v2, 80 ; LoadRObjR v7 ; WRTV4 v2
+
+    over two slots the compiler reuses, and all seven of that character's
+    stats came out as `1`: `strength = 1`, `av_damage = 1`,
+    **`max_health = 1`**. The recovered game reached its tutorial battle,
+    dealt one damage and died to one hit. It compiled, it ran, and every
+    number in it was wrong the same way -- which is this file's worst
+    failure shape, and it took a player to find it.
+
+    Correcting it changes 92 constants across 6 of Paladin's files and
+    nothing else: the line count is identical, `libcheck` is unchanged at
+    144/149 and 148/149, and Super Egg Hunt and Psycho Strike render as
+    before.
+    """
+
+    @staticmethod
+    def _op(name, pos, w_arg=0, dw_arg=0, prop_name=None):
+        return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                     w_arg=w_arg, dw_arg=dw_arg, prop_name=prop_name)
+
+    def _sim(self, member_type, slot_type):
+        from decompile import FuncDecompiler, DataType
+        sim = object.__new__(FuncDecompiler)
+        sim.instrs = [self._op("SetV4", 0, w_arg=2, dw_arg=80),
+                      self._op("LoadRObjR", 2, w_arg=7, prop_name="max_health"),
+                      self._op("WRTV4", 5, w_arg=2)]
+        sim.var_types = {2: slot_type}
+        sim.property_types = {"max_health": member_type}
+        sim.global_types = {}
+        return sim
+
+    def test_an_int_member_settles_a_constant_in_a_bool_slot(self):
+        from decompile import DataType
+        sim = self._sim(DataType(token_type=70),      # int
+                        DataType(token_type=67))      # the slot reads as bool
+        typed = sim._stored_constant_types()
+        self.assertIn(0, typed, "the store should be typed from the member")
+        self.assertEqual(typed[0].token_type, 70)
+        # ...and the constant then renders as itself rather than `true`.
+        self.assertEqual(sim._typed_constant(80, typed[0]).text, "80")
+        self.assertEqual(sim._typed_constant(80, DataType(token_type=67)).text,
+                         "true")
+
+    def test_the_float_case_it_was_written_for_still_works(self):
+        from decompile import DataType
+        sim = self._sim(DataType(token_type=81),      # float
+                        DataType(token_type=67))
+        self.assertIn(0, sim._stored_constant_types())
+
+    def test_a_slot_already_typed_numeric_is_left_alone(self):
+        """The slot's own type wins when the bytecode actually computed with
+        it; this rule only speaks for a slot that has no evidence of its own."""
+        from decompile import DataType
+        sim = self._sim(DataType(token_type=70), DataType(token_type=70))
+        self.assertEqual(sim._stored_constant_types(), {})
+
+    def test_a_bool_member_is_not_overridden(self):
+        """A genuinely boolean member keeps `true`/`false`."""
+        from decompile import DataType
+        sim = self._sim(DataType(token_type=67), DataType(token_type=67))
+        self.assertEqual(sim._stored_constant_types(), {})
