@@ -903,3 +903,77 @@ class VirtualVersusBaseCallTests(unittest.TestCase):
         source = inspect.getsource(FuncDecompiler._calls_a_base_method)
         self.assertIn('"derived_from"', source)
         self.assertNotIn("interfaces", source.split('"""')[2])
+
+
+class BorrowedHandleTests(unittest.TestCase):
+    """A handle kept alive for one expression is not a statement.
+
+    `RefCpyV` peeks the stack rather than popping, so the instruction after
+    it reads the *stack* copy and never looks at the slot. The slot exists
+    only to keep the object alive across that instruction, and `FREE`
+    releases it immediately:
+
+        RefCpyV 11 ; CALLSYS opIndex ; RDR4 ; FREE 11
+
+    `objVariableTypes` names every object slot, so that copy was emitted as
+    a statement -- and an event sorts by its own bytecode position while a
+    branch sorts by the end of its condition, so it landed *ahead* of the
+    `if` it belonged inside. `find_walls`
+
+        while (true) { i += 1;
+            if (arg2.length() <= i || arg2[i].length() <= j
+                || arg2[i][j] == 0 || play_wall_tone(i, j)) ... }
+
+    then indexed before the bounds check guarding it, and *entering* any map
+    threw `Index out of bounds` -- `find_walls` always scans out to a wall
+    or the edge, and the westward loop reaches `-1` before testing `< 0`.
+
+    **Classifying the slot instead was tried twice and is much worse.**
+    Adding every handle written inside a short-circuit arm cost Paladin 477
+    lines and scrambled `load_event_flags` (call duplicated, wrong
+    dictionary key, `bool` into an `int`); requiring the `FREE` to be in the
+    same arm moved that to 447 and nothing else. The measurements are in
+    CLAUDE.md. What works is local to the instruction stream.
+    """
+
+    @staticmethod
+    def _op(name, pos, w_arg=0):
+        return Instr(pos=pos, op=0, name=name, bc_type="", size=1, w_arg=w_arg)
+
+    def _sim(self, ops, k=0, window=None):
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        sim.instrs = ops
+        sim.k = k
+        if window is not None:
+            sim.BORROW_WINDOW = window
+        return sim
+
+    def test_a_handle_freed_a_few_instructions_later_is_borrowed(self):
+        ops = [self._op("RefCpyV", 0, 11), self._op("CALLSYS", 1),
+               self._op("RDR4", 2, 4), self._op("FREE", 3, 11)]
+        self.assertTrue(self._sim(ops)._borrowed_handle(11))
+
+    def test_a_slot_read_before_its_free_is_a_real_assignment(self):
+        """If something names the slot, it is being used, not borrowed."""
+        ops = [self._op("RefCpyV", 0, 11), self._op("PshVPtr", 1, 11),
+               self._op("CALLSYS", 2), self._op("FREE", 3, 11)]
+        self.assertFalse(self._sim(ops)._borrowed_handle(11))
+
+    def test_a_borrow_may_not_straddle_a_branch(self):
+        """Otherwise it could reach a `FREE` belonging to another path."""
+        ops = [self._op("RefCpyV", 0, 11), self._op("JZ", 1),
+               self._op("FREE", 2, 11)]
+        self.assertFalse(self._sim(ops)._borrowed_handle(11))
+
+    def test_a_slot_never_freed_nearby_is_a_real_assignment(self):
+        ops = [self._op("RefCpyV", 0, 11)] + [
+            self._op("SUSPEND", i) for i in range(1, 12)]
+        self.assertFalse(self._sim(ops)._borrowed_handle(11))
+
+    def test_the_window_is_small_on_purpose(self):
+        """The pair brackets ONE subexpression. `find_walls` frees three
+        instructions later; a wider window reaches past the expression and
+        removed a further thousand lines of Paladin for no extra fix."""
+        from decompile import FuncDecompiler
+        self.assertLessEqual(FuncDecompiler.BORROW_WINDOW, 4)

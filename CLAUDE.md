@@ -2742,7 +2742,7 @@ the call receives `delta_forward` instead). Promoting computed values the
 same way took Paladin from 0 compiler errors to 16, so it stays open rather
 than guessed at, and the signature to grep for is an `if` with two empty arms.
 
-#### A handle materialised inside a `||` -- open, diagnosed, three attempts rejected
+#### A handle borrowed for one expression is not a statement
 
 `find_walls` walks outward from the player looking for walls, and its loops
 are
@@ -2768,13 +2768,32 @@ local_10 += 1;
 if (((arg2.get_length() <= int(local_10)) || ...
 ```
 
-The index therefore runs before the test that protects it, and walking into
-a map's last row throws `Index out of bounds` from
+The index therefore runs before the test that protects it, so **entering**
+any map throws `Index out of bounds` -- `find_walls` always scans out to a
+wall or the edge, and the westward and southward loops reach `-1` before
+testing `< 0`. The stack reports
 `map::map_setup` -> `find_walls()` -> `find_walls(int16, int16, int[][]@)`.
 A statement cannot be conditional on the operand before it, so the only
 correct rendering folds the handle into the expression.
 
-**Three changes were tried together and all three are reverted.** Measured
+**What works is local to the instruction stream.** `RefCpyV` *peeks* the
+stack rather than popping, so the next instruction reads that copy and the
+slot is never looked at: `_borrowed_handle` asks whether a `FREE` of the
+same slot follows within four instructions with nothing naming the slot
+and no jump in between, and such a bind goes to `temps` instead of being
+emitted. Paladin 28,264 -> 27,199 lines, **0 residual gotos, split
+verified, `compiled cleanly`**; Super Egg Hunt `compiled cleanly`;
+`libcheck` unchanged at 144/149 and 148/149. The 1,065 lines are the
+compiler's own handle aliases -- `@local_4 = interacts;` -- which the
+source never wrote, and what is left reads better for it: `if (arg0 is
+local_3)` becomes `if (arg0 is global_interacts[analytics_battle_1])`,
+and one `while` with a trailing `local_4++` comes back as the `for` it
+was. **It costs Psycho Strike 2 residual gotos** in
+`home::reset_rebels`, which no window size avoids; that title already
+cannot compile here for 33 engine absences, and the trade was taken
+because the alternative is every map entry throwing.
+
+**Classifying the slot instead was tried twice and is much worse.** Measured
 over all 926 of Paladin's bodies, by line count and by how many bare
 `expr[i];` statements the output carries:
 

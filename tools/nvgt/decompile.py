@@ -2428,12 +2428,69 @@ class FuncDecompiler:
                 return
             acc += size
 
+    #: How far a borrowed handle's `FREE` may sit from its `RefCpyV`. The
+    #: whole point is that the pair brackets *one* subexpression, so the
+    #: window is small on purpose: `find_walls` frees three instructions
+    #: later. Classifying the slot instead -- "any handle written inside a
+    #: short-circuit arm" -- was tried and catches real variables, costing
+    #: Paladin 477 lines and scrambling `load_event_flags`; see the
+    #: measurements in CLAUDE.md.
+    BORROW_WINDOW = 4
+
+    def _borrowed_handle(self, off: int) -> bool:
+        """Is this `RefCpyV` only keeping an object alive for one expression?
+
+        Three things, all local to the instruction stream: the slot is
+        released by `FREE` within a few instructions, nothing in between
+        names the slot -- the following instruction reads the stack copy --
+        and nothing in between is a jump, so the borrow cannot straddle a
+        branch and reach a `FREE` that belongs to another path.
+        """
+        for ins in self.instrs[self.k + 1:self.k + 1 + self.BORROW_WINDOW]:
+            if ins.name == "FREE" and _s16(ins.w_arg) == off:
+                return True
+            if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
+                return False
+            if _s16(getattr(ins, "w_arg", 0)) == off and ins.name != "RefCpyV":
+                return False
+        return False
+
     def _refcpy(self, ins: Instr) -> None:
         if ins.name == "RefCpyV":
             # RefCpyV == PSF dest + REFCPY: source address stays on the
             # stack (the following ALLOC consumes it); peek, don't pop.
             src = self.stack[-1] if self.stack else Atom("raw", "<?>")
-            self._bind(_s16(ins.w_arg), self._deref(src))
+            off = _s16(ins.w_arg)
+            if self._borrowed_handle(off):
+                # **A handle borrowed for one expression is not a statement.**
+                # The source stays on the stack, so the instruction that
+                # follows reads *that* copy and never looks at the slot: the
+                # slot exists only to keep the object alive across it, and
+                # `FREE` releases it a few instructions later without
+                # anything having read it.
+                #
+                # `find_walls` is what emitting it costs. Its loops are
+                #
+                #     while (true) { i += 1;
+                #         if (arg2.length() <= i || arg2[i].length() <= j
+                #             || arg2[i][j] == 0 || play_wall_tone(i, j)) ... }
+                #
+                # and the third operand borrows `arg2[i]` exactly this way.
+                # `objVariableTypes` names every object slot, so the copy was
+                # emitted as `@local_11 = arg2[int(local_10)];` -- and an
+                # event sorts by its own bytecode position while the branch
+                # sorts by the end of the chain, so it landed ahead of the
+                # whole `if`. The index then ran before the bounds check
+                # guarding it, and *entering* any map threw `Index out of
+                # bounds`, because `find_walls` always scans out to a wall or
+                # the edge. The westward and southward loops index `-1`
+                # before testing `< 0`, so the edge is reached at once.
+                self.consumed_temps.discard(off)
+                self.temps[off] = self._deref(src)
+                self.temp_bound[off] = (self._pos(), self.stmt_count)
+                self.consumed_temps.add(off)
+                return
+            self._bind(off, self._deref(src))
         else:  # REFCPY
             dest = self.stack.pop() if self.stack else Atom("raw", "<?>")
             src = self.stack[-1] if self.stack else Atom("raw", "<?>")
