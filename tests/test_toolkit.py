@@ -2372,3 +2372,46 @@ if __name__ == "__main__":
                 print("  FAIL  %s: %s: %s" % (_name, type(exc).__name__, exc))
     print("\n%s" % ("all passed" if not failures else "%d FAILED" % failures))
     sys.exit(1 if failures else 0)
+
+
+def test_a_zero_parameter_funcdef_may_still_write_both_lists():
+    """The guard on `paramCount != 0` is per BUILD, not per dialect.
+
+    `as_module` tied it to the dialect: tagged writes the in/out and
+    default-argument lists unconditionally, len2 guards them. Manamon 1 is
+    len2 and writes them unconditionally; Manamon 2 is len2 and does not
+    (27 of 27 funcdefs parse guarded, 0 of 27 without). Two builds, two
+    answers -- the same shape as `ReadTypeInfo`'s template namespace, which
+    this reader already settles by trial parse.
+
+    `phone_callback` is the record that shows it, and nothing in the corpus
+    had exercised a zero-parameter funcdef before: Manamon 2's twenty-seven
+    all take at least one parameter. Its nine bytes only add up unguarded.
+    """
+    #      f   len2 "phone_callback"            ret  n   inout fT  dflt own n  ns traits
+    record = (b"f" + b"phone_callback"
+              + bytes([0x04, 0x00, 0x00, 0x04, 0x00, 0x00, 0x6E, 0x00, 0x01]))
+
+    r = as_module.Reader(record, as_module.LEN2, 0, unguarded_lists=True)
+    f = r.function()
+    assert f["name"] == "phone_callback"
+    assert f["funcType"] == 4, f["funcType"]
+    assert f["params"] == []
+    assert f["namespace"] == ""
+    # `traits` is the OWNER's byte, which a funcdef has none of; the
+    # record's own trailing traits byte is read separately, and the
+    # cursor landing exactly on the end is what accounts for it.
+    assert f["traits"] == 0
+    # ...and it consumed the record exactly, which is what says the reading
+    # is right rather than merely survivable.
+    assert r.p == len(record), (r.p, len(record))
+
+    # Guarded, the `00` inOutFlags count is skipped, `04` is taken for the
+    # funcType position and the real funcType is read as a type-info.
+    guarded = as_module.Reader(record, as_module.LEN2, 0)
+    try:
+        guarded.function()
+    except as_module.ParseError as exc:
+        assert "type-info" in str(exc), exc
+    else:
+        raise AssertionError("the guarded reading should not reach the end")

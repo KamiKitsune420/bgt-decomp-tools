@@ -100,7 +100,8 @@ def read_encoded_uint(buf: bytes, p: int) -> Tuple[int, int]:
 class Reader:
     def __init__(self, data: bytes, dialect: str, pos: int = 0,
                  opcodes: Optional[Dict[int, Dict[str, Any]]] = None,
-                 template_namespace: bool = True) -> None:
+                 template_namespace: bool = True,
+                 unguarded_lists: bool = False) -> None:
         self.d = data
         self.dialect = dialect
         self.p = pos
@@ -112,6 +113,31 @@ class Reader:
         # ReadTypeInfo: strike 0x00420970 calls ReadString twice under 'a',
         # paladin 0x0041F560 calls it once.
         self.template_namespace = template_namespace
+        # Whether the in/out and default-argument lists are written even for
+        # a function with NO parameters. The newer reader guards both on
+        # `paramCount != 0` and the older one writes them unconditionally,
+        # which is why this used to hang off the dialect -- but Manamon 1 is
+        # `len2` and writes them unconditionally, while Manamon 2 is `len2`
+        # and does not (27/27 funcdefs guarded, 0/27 without). Two builds,
+        # two answers, so like `template_namespace` this is per-build and is
+        # settled by trial parse against the exact-EOF landing.
+        #
+        # Manamon 1's `phone_callback` is the record that shows it. It takes
+        # no parameters, and its nine bytes only add up unguarded:
+        #
+        #     04        return type (void)
+        #     00        parameter count = 0
+        #     00        inOutFlags count   <- skipped when guarded
+        #     04        funcType = 4
+        #     00        default-argument count
+        #     00 6E 00  owner (none), 'n', empty namespace
+        #     01        funcdef traits
+        #
+        # Guarded, the reader takes `04` for the funcType position, reads the
+        # real funcType as a type-info and raises `bad type-info tag 0x04`.
+        # Nothing in the corpus had exercised a zero-parameter funcdef:
+        # Manamon 2's twenty-seven all take at least one.
+        self.unguarded_lists = unguarded_lists
         self.saved: List[bytes] = []          # savedStrings
         self.types: List[Any] = []            # savedDataTypes
         self.functions: List[Any] = []        # savedFunctions
@@ -408,7 +434,7 @@ class Reader:
         # function is therefore two bytes shorter under the newer model, and
         # reading it the wrong way takes the *next* field as funcType -- which is
         # how the tagged titles used to die on their very first funcdef.
-        guarded = self.dialect != TAGGED
+        guarded = self.dialect != TAGGED and not self.unguarded_lists
 
         inout: List[int] = []
         if nparams or not guarded:               # inOutFlags
@@ -1072,10 +1098,12 @@ def module_strings(data: bytes, dialect: Optional[str] = None,
 
 def _walk(data: bytes, dialect: str, start: int, n_enums: int,
           opcodes: Optional[Dict[int, Dict[str, Any]]],
-          template_namespace: bool) -> Dict[str, Any]:
+          template_namespace: bool,
+          unguarded_lists: bool = False) -> Dict[str, Any]:
     """One full pass over a module under one set of build assumptions."""
     r = Reader(data, dialect, start, opcodes=opcodes,
-               template_namespace=template_namespace)
+               template_namespace=template_namespace,
+               unguarded_lists=unguarded_lists)
     classes, declared = [], None
     funcdefs, funcdefs_declared = [], None
     enums: List[Dict[str, Any]] = []
@@ -1111,7 +1139,8 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
             "parse_errors": r.parse_errors, "end": r.p,
-            "template_namespace": template_namespace}
+            "template_namespace": template_namespace,
+            "unguarded_lists": unguarded_lists}
 
 
 def _score(w: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1167,15 +1196,28 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
     dialect, start, enums = detect(data)
     members = sum(len(e["members"]) for e in enums)
 
-    # The template-namespace field varies between builds of the same dialect, so
-    # try both and keep whichever gets further. The tie-break is not "looks
-    # plausible" -- it is whether the tail lands exactly on EOF, which only the
-    # right answer can do.
-    walk = _walk(data, dialect, start, len(enums), opcodes, True)
-    if not walk["tail"]:
-        other = _walk(data, dialect, start, len(enums), opcodes, False)
-        if _score(other) > _score(walk):
-            walk = other
+    # Two fields vary between builds of the same dialect: whether
+    # `ReadTypeInfo`'s template form carries a namespace, and whether a
+    # zero-parameter function still writes its in/out and default-argument
+    # lists. Try every combination and keep whichever gets furthest. The
+    # tie-break is not "looks plausible" -- it is whether the tail lands
+    # exactly on EOF, which only the right answer can do.
+    #
+    # The default is tried first and kept on a tie, so a module that parses
+    # under the assumptions this reader already held keeps them: adding the
+    # second field must not silently re-describe the four titles that were
+    # already landing on EOF.
+    walk = None
+    for namespaced in (True, False):
+        for unguarded in (False, True):
+            trial = _walk(data, dialect, start, len(enums), opcodes,
+                          namespaced, unguarded)
+            if walk is None or _score(trial) > _score(walk):
+                walk = trial
+            if walk["tail"]:
+                break
+        if walk["tail"]:
+            break
 
     return {"path": path, "size": len(data), "dialect": dialect,
             "start": start, "no_debug_info": data[0],
@@ -1186,6 +1228,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "blocks": walk["blocks"],
             "tail": walk["tail"], "tail_error": walk["tail_error"],
             "template_namespace": walk["template_namespace"],
+            "unguarded_lists": walk["unguarded_lists"],
             "parse_errors": walk["parse_errors"],
             "end": walk["end"]}
 
