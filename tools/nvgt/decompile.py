@@ -2849,7 +2849,7 @@ class FuncDecompiler:
             # `cls` is empty here and reading the base off it finds nothing.
             elif obj.text == "this" and self._calls_a_base_method(
                     fr.object_type.name if fr is not None
-                    and fr.object_type is not None else cls, meth):
+                    and fr.object_type is not None else cls, meth, ins.name):
                 cls = (fr.object_type.name if fr is not None
                        and fr.object_type is not None else cls)
                 # **A base class's method, through `this`, needs the base
@@ -2924,27 +2924,50 @@ class FuncDecompiler:
         else:
             self.value_reg = Atom("call", txt)
 
-    def _calls_a_base_method(self, owner: str, name: str) -> bool:
+    def _calls_a_base_method(self, owner: str, name: str,
+                             opcode: str = "CALL") -> bool:
         """Is this `this.name()` really a call to a BASE class's `name`?
 
-        Two things have to hold, and the second is what keeps this narrow:
-        the function the operand resolved to must belong to an ancestor of the
-        class this body is in, and that class must declare the name as well.
-        Where it does not, the unqualified call already reaches the base's one
-        and saying so adds nothing.
+        Three things have to hold. The function the operand resolved to must
+        belong to an ancestor of the class this body is in; that class must
+        declare the name as well, because where it does not the unqualified
+        call already reaches the base's one and saying so adds nothing; and
+        **the call must not be a virtual dispatch.**
 
-        **Only `derived_from` is walked, and that is what makes it safe
-        without inspecting the opcode.** An interface's methods are reached
-        through `interfaces`, never this chain, so an interface dispatch can
-        never match here and cannot be pinned to a base by mistake. Gating on
-        the opcode as well was tried and is not equivalent: it kept
-        `person::reset` qualified while letting `clock::reset` fall back to
-        `this.reset()` -- still unbounded recursion -- although both sites
-        disassemble to a plain `CALL` of `interact::reset`. Why the two
-        differed was not established; what the measurement settles is that
-        the opcode is the wrong thing to read, and this rule does not need
-        it.
+        Only `derived_from` is walked, so an interface's methods -- reached
+        through `interfaces` -- can never match here and cannot be pinned to
+        a base by mistake.
+
+        **The opcode is load-bearing, and this file used to say it was not.**
+        It recorded that gating on it "kept `person::reset` qualified while
+        letting `clock::reset` fall back to `this.reset()` ... although both
+        sites disassemble to a plain `CALL`", and concluded the opcode was
+        the wrong field. `clock::reset` really is a plain `CALL` of
+        `interact::reset`, so a gate on the opcode keeps it qualified; that
+        conclusion came from an experiment that was measuring something
+        else, and taking it on trust left the bug below in place.
+
+        What the opcode separates is a base call from an *override reached
+        virtually*. `CALL` names one implementation; `CALLINTF` goes through
+        the vftable, and the owner the module records for it is the class
+        that first **declared** the method, not the one that will run:
+
+            door::door    PshVPtr this ; CALL connection::connection
+                          PshVPtr this ; CALLINTF interact::reset
+            door::reset   PshVPtr this ; CALL connection::reset
+
+        So `door()` is `super(); reset();` -- a virtual call that runs
+        `door::reset` -- while `door::reset` is `connection::reset();`.
+        Qualified alike, every derived constructor in Paladin came out as
+        `super(); interact::reset();`, which runs the *base's* reset and
+        nothing else. `door::reset` is what sets `connection_type = 1`, and
+        `get_floor_of_residence` looks for exactly that, so no cabin could
+        be matched to its floor and starting a new game died with `Index out
+        of bounds` on `world[-1]`. Of 93 such sites in Paladin, 60 are
+        `CALL` and 33 are `CALLINTF`.
         """
+        if opcode == "CALLINTF":
+            return False
         here = self.fn.object_type
         if here is None or not owner or owner == here.name:
             return False

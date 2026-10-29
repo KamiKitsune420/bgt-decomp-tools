@@ -836,3 +836,70 @@ class DiamondBindTests(unittest.TestCase):
         # ...and a conditional jump that does not enter this arm is no help.
         self.assertFalse(self._sim(cond_spans=[(2, 99)])
                          ._conditionally_bound(6, 11))
+
+
+class VirtualVersusBaseCallTests(unittest.TestCase):
+    """`CALL` names one implementation; `CALLINTF` goes through the vftable.
+
+    For a virtual call the module records the class that first *declared* the
+    method, not the one that will run, so both kinds arrive looking like a
+    call to an ancestor's method:
+
+        door::door    PshVPtr this ; CALL connection::connection
+                      PshVPtr this ; CALLINTF interact::reset
+        door::reset   PshVPtr this ; CALL connection::reset
+
+    `door()` is `super(); reset();` -- a virtual call that runs
+    `door::reset` -- while `door::reset` really is `connection::reset();`.
+    Qualified alike, every derived constructor in Paladin came out as
+    `super(); interact::reset();`, which runs the base's reset and nothing
+    else. `door::reset` is what sets `connection_type = 1`;
+    `get_floor_of_residence` looks for exactly that, so no cabin could be
+    matched to its floor and starting a new game died with `Index out of
+    bounds` on `world[-1]`.
+
+    Of 93 such sites in Paladin, 60 are `CALL` and 33 `CALLINTF`.
+
+    **This file recorded that the opcode was the wrong field to read**, on
+    the evidence that gating on it let `clock::reset` fall back to
+    `this.reset()` "although both sites disassemble to a plain `CALL`".
+    `clock::reset` is a plain `CALL`, so a gate on the opcode keeps it
+    qualified -- that conclusion came from an experiment measuring something
+    else, and taking it on trust left the bug in place.
+    """
+
+    def _sim(self, here_name, base_name, declares):
+        from decompile import FuncDecompiler, Function, TypeInfo
+        base = TypeInfo(name=base_name, kind="class")
+        here = TypeInfo(name=here_name, kind="class", derived_from=base,
+                        methods=[Function(name=n) for n in declares])
+        sim = object.__new__(FuncDecompiler)
+        sim.fn = Function(name="reset", object_type=here)
+        return sim
+
+    def test_a_virtual_dispatch_is_not_a_base_call(self):
+        sim = self._sim("door", "interact", ["reset"])
+        self.assertTrue(sim._calls_a_base_method("interact", "reset", "CALL"))
+        self.assertFalse(
+            sim._calls_a_base_method("interact", "reset", "CALLINTF"))
+
+    def test_the_other_two_conditions_still_hold(self):
+        """The opcode is a third requirement, not a replacement."""
+        # The owner must be an ancestor...
+        sim = self._sim("door", "interact", ["reset"])
+        self.assertFalse(sim._calls_a_base_method("unrelated", "reset", "CALL"))
+        # ...and this class must declare the name, or the unqualified call
+        # already reaches the base's one and saying so adds nothing.
+        bare = self._sim("door", "interact", ["make_noise"])
+        self.assertFalse(bare._calls_a_base_method("interact", "reset", "CALL"))
+        # ...and a call to this class's own method is never a base call.
+        self.assertFalse(sim._calls_a_base_method("door", "reset", "CALL"))
+
+    def test_only_derived_from_is_walked(self):
+        """An interface's methods hang off `interfaces`, never this chain, so
+        an interface dispatch can never be pinned to a base by mistake."""
+        import inspect
+        from decompile import FuncDecompiler
+        source = inspect.getsource(FuncDecompiler._calls_a_base_method)
+        self.assertIn('"derived_from"', source)
+        self.assertNotIn("interfaces", source.split('"""')[2])
