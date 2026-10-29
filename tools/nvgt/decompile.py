@@ -717,6 +717,37 @@ class FuncDecompiler:
         #: read -- see `_conditionally_bound`.
         self.cond_spans = [(i.pos, _jump_target(i)) for i in self.instrs
                            if i.name in JUMP_OPS and _jump_target(i) > i.pos]
+        #: ...and the same for a forward **unconditional** jump, which is how
+        #: the *second* arm of a diamond gets skipped. `if (c) { x = 0; }
+        #: else { x = 26; } f(x);` compiles to
+        #:
+        #:     JNZ else ; SetV4 x,0 ; JMP join ; else: SetV4 x,26 ; join: f(x)
+        #:
+        #: The conditional jump lands *at* the first store, not after it, so
+        #: only the `JMP` says the second store is skipped on the other path.
+        #: To a linear walk a diamond looks like an ordinary reassignment, and
+        #: the read then folds whichever arm came last in the bytecode:
+        #: Paladin's `create_room` emitted `if (arg6 == 14) { } else { }` and
+        #: `add_clock(26, 6, -2, -2)`, the else arm's constants, so every
+        #: layout_2 cabin put its clock where the other layout's goes.
+        #: `back_edges` has always counted `JMP` for the loop case; this is
+        #: the same instruction mattering for the same reason.
+        #:
+        #: **Treating every forward `JMP` as a conditional span is too
+        #: broad** -- every `break`, `continue` and guard tail is one, and
+        #: measured against BGT's shipped library it promoted enough extra
+        #: slots to cost 8 of 149 functions their exact call sequence and 3
+        #: their literals. So this list stays separate, and the diamond test
+        #: that uses it also demands the same slot be written on the path
+        #: that skips the bind -- which is what makes it a diamond rather
+        #: than an ordinary jump over an assignment.
+        self.jmp_spans = [(i.pos, _jump_target(i)) for i in self.instrs
+                          if i.name == "JMP" and _jump_target(i) > i.pos]
+        #: Where each frame slot is written, by bytecode position.
+        self.slot_writes: dict[int, list[int]] = {}
+        for op in self.instrs:
+            if op.name in _SLOT_WRITE_OPS:
+                self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
         #: (loop head, back edge) for every backward jump. A read inside the
         #: loop runs once per iteration, so a value computed before the loop
         #: cannot be folded into it -- the loop body may assign the slot, and
@@ -1947,7 +1978,7 @@ class FuncDecompiler:
         # `if (false)`, and what decides it is whether the slot is written
         # again on another path, not what kind of value it happened to start
         # with.
-        if declarable and self._conditionally_bound(bound[0]):
+        if declarable and self._conditionally_bound(bound[0], off):
             # Computed on one path and read past the join: the read is
             # reachable without that path, so folding is wrong whatever the
             # value is -- a constant most of all. This is how
@@ -1974,7 +2005,47 @@ class FuncDecompiler:
             return False
         return declarable
 
-    def _conditionally_bound(self, bind_pos: int) -> bool:
+    def _diamond_bind(self, bind_pos: int, off: int, now: int) -> bool:
+        """Is the value at `bind_pos` one arm of an if/else over slot `off`?
+
+        Both arms assign, so the read after the join has two possible
+        sources and neither may be folded into it. The arm that comes second
+        in the bytecode is the one a linear walk keeps, which is why
+        Paladin's `create_room` rendered `add_clock(26, 6, -2, -2)` -- the
+        else arm's coordinates -- with both arms of the `if` left empty.
+
+        **A short-circuit merge slot is never one of these**, however much
+        it looks like one: `(a && b)` is two assignments to one slot on
+        mutually exclusive paths and a read after the join, which is the
+        diamond shape exactly. Promoting it makes each operand's
+        computation an unconditional statement, so every term is overwritten
+        before the `if` reads it -- `(local_13.x < 4) && (local_13.y >= 6)`
+        came out as `(local_6 < 4) && (local_6 != 0)`, reading one slot
+        twice. That is the `use_screen_reader` defect this file already
+        records, reached from a new direction.
+        """
+        if off in self.short_circuit_slots:
+            return False
+        for jump, join in self.jmp_spans:
+            if not (bind_pos < join <= now):
+                continue
+            index = self.pos_of.get(jump)
+            if index is None or index + 1 >= len(self.instrs):
+                continue
+            arm = self.instrs[index + 1].pos          # start of the second arm
+            if not (arm <= bind_pos):
+                continue
+            # Some conditional jump has to enter that second arm, and the
+            # first arm -- between it and the `JMP` -- has to write this slot.
+            for branch, target in self.cond_spans:
+                if target != arm or branch >= jump:
+                    continue
+                if any(branch < write < jump
+                       for write in self.slot_writes.get(off, ())):
+                    return True
+        return False
+
+    def _conditionally_bound(self, bind_pos: int, off: int | None = None) -> bool:
         """Was a value computed at `bind_pos` computed on only one path,
         relative to where the simulation is reading it now?
 
@@ -1987,6 +2058,37 @@ class FuncDecompiler:
         now = self._pos()
         if any(branch < bind_pos < join <= now
                for branch, join in self.cond_spans):
+            return True
+        # **A diamond assigns the same slot on both arms**, and the arm that
+        # comes second in the bytecode is skipped by the first arm's
+        # *unconditional* jump, not by the conditional one -- which lands at
+        # the first store rather than after it. So to a linear walk
+        #
+        #     if (c) { x = 0; } else { x = 26; } f(x);
+        #
+        # is just two assignments and a read, and the read folds whichever
+        # came last. Paladin's `create_room` emitted both arms empty and
+        # `add_clock(26, 6, -2, -2)` -- the else arm's coordinates -- so
+        # every layout_2 cabin put its clock where the other layout's goes,
+        # and `create_hallways` lost a pair of door coordinates the same way.
+        #
+        # What distinguishes it from an ordinary jump over an assignment is
+        # the *earlier write to the same slot*: the value this read wants
+        # exists on one path and that other write supplies the other, so
+        # neither may be folded.
+        # The shape has to be matched structurally, not approximated. "Some
+        # earlier write to this slot, plus some forward `JMP` that skips the
+        # bind" is true inside any loop that contains a `break`, and that
+        # looseness cost 8 of BGT's 149 library functions their exact call
+        # sequence. What a diamond really looks like is
+        #
+        #     JNZ -> else ; <then: writes off> ; JMP -> join
+        #     else: <... bind_pos ...> ; join: <the read>
+        #
+        # so the conditional jump must target the instruction *immediately
+        # after* that `JMP`, and the then-arm between them must write this
+        # very slot.
+        if off is not None and self._diamond_bind(bind_pos, off, now):
             return True
         # ...or computed before a loop and read inside it. The read runs once
         # per iteration while the computation ran once, so any assignment the

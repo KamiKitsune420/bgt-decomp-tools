@@ -59,6 +59,12 @@ class FoldSafetyTests(unittest.TestCase):
         """
         from decompile import FuncDecompiler
         sim = object.__new__(FuncDecompiler)
+        # The diamond test reads three more fields. They default to
+        # empty here so a case that is not about diamonds stays about
+        # what it was written for; the diamond's own test sets them.
+        sim.jmp_spans = []
+        sim.slot_writes = {}
+        sim.short_circuit_slots = set()
         for name, value in attrs.items():
             setattr(sim, name, value)
         return sim
@@ -738,3 +744,95 @@ class DiscardedCallTests(unittest.TestCase):
         run = inspect.getsource(FuncDecompiler.run)
         self.assertNotIn("for off in sorted(self.temps)", run)
         self.assertIn("unsound", run)
+
+
+class DiamondBindTests(unittest.TestCase):
+    """`if (c) { x = A; } else { x = B; } f(x);` is two stores and one read.
+
+    To a linear walk that is indistinguishable from an ordinary
+    reassignment, so the read folds whichever arm came second in the
+    bytecode. Paladin's `create_room` rendered
+
+        if (arg6 == 14) {
+        } else {
+        }
+        local_1.add_clock(26, 6, -2, -2);
+
+    with both arms empty and the *else* arm's coordinates baked into the
+    call, so every layout_2 cabin put its clock where the other layout's
+    goes. `create_hallways` lost a pair of door coordinates the same way.
+    Those were the only two double-empty `if`s in the title, which is what
+    made them findable: an `if` with two empty arms is the signature this
+    whole class of bug leaves behind.
+
+    The shape the compiler emits is
+
+        JNZ -> else ; <then: writes x> ; JMP -> join
+        else: <... writes x ...> ; join: <the read>
+
+    and the *conditional* jump lands at the first store rather than after
+    it, so only the unconditional `JMP` says the second store is skipped.
+    """
+
+    @staticmethod
+    def _op(name, pos, w_arg=0, jump_target=None):
+        return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                     w_arg=w_arg, jump_target=jump_target)
+
+    def _sim(self, **attrs):
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        #           JNZ->6   SetV4 x   JMP->10   SetV4 x   <read at 10>
+        sim.instrs = [self._op("JNZ", 2, jump_target=6),
+                      self._op("SetV4", 4, w_arg=11),
+                      self._op("JMP", 5, jump_target=10),
+                      self._op("SetV4", 6, w_arg=11),
+                      self._op("SUSPEND", 10)]
+        sim.pos_of = {i.pos: k for k, i in enumerate(sim.instrs)}
+        sim.cond_spans = [(2, 6)]
+        sim.jmp_spans = [(5, 10)]
+        sim.slot_writes = {11: [4, 6]}
+        sim.short_circuit_slots = set()
+        sim.back_edges = []
+        sim.k = 4                                  # reading at pos 10
+        for name, value in attrs.items():
+            setattr(sim, name, value)
+        return sim
+
+    def test_the_second_arm_of_a_diamond_is_conditionally_bound(self):
+        sim = self._sim()
+        # The else arm's store at 6, read at 10 past the join.
+        self.assertTrue(sim._conditionally_bound(6, 11))
+        # Without the slot there is nothing to recognise it by, which is the
+        # state this was in: the plain conditional span ends *at* 6, not
+        # after it, so the old rule saw nothing.
+        self.assertFalse(sim._conditionally_bound(6, None))
+
+    def test_a_short_circuit_merge_slot_is_never_a_diamond(self):
+        """`(a && b)` has the diamond's exact shape and must not promote.
+
+        Each operand is computed into one slot on mutually exclusive paths
+        and read after the join. Promoted, every arm's computation becomes
+        an unconditional statement and the terms overwrite each other:
+        `(local_13.x < 4) && (local_13.y >= 6)` came out as
+        `(local_6 < 4) && (local_6 != 0)`, reading one slot twice. Measured
+        against BGT's shipped library, leaving them out is worth 8 of 149
+        functions' exact call sequence and 3 of their literals.
+        """
+        self.assertFalse(
+            self._sim(short_circuit_slots={11})._conditionally_bound(6, 11))
+
+    def test_an_ordinary_jump_over_an_assignment_is_not_a_diamond(self):
+        """A `break` inside a loop makes a forward `JMP` past a store too.
+
+        Treating every one of those as a diamond is the loose version, and
+        it costs the same 8 functions. What a diamond needs is the *other*
+        arm writing the same slot, between the conditional jump and the
+        `JMP` that skips this one.
+        """
+        # The then arm writes a different slot, so slot 11 has one store.
+        self.assertFalse(self._sim(slot_writes={11: [6], 12: [4]})
+                         ._conditionally_bound(6, 11))
+        # ...and a conditional jump that does not enter this arm is no help.
+        self.assertFalse(self._sim(cond_spans=[(2, 99)])
+                         ._conditionally_bound(6, 11))
