@@ -381,6 +381,7 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | SBYW | tagged | 154 / 154 | 2,348 | ends exactly at EOF |
 | Super Egg Hunt | tagged | 10 / 10 | 141 | ends exactly at EOF |
 | Crazy Party | tagged | 550 / 550 | 4,486 | ends exactly at EOF |
+| Manamon 1 | len2 | 784 / 784 | — | **class blocks do not parse yet** |
 
 Super Egg Hunt is the fifth, and the first picked up cold after all of the
 above: `bgt validate` passed it on every stage, byte-exact rewrite included,
@@ -424,7 +425,7 @@ read out of the relevant binary, not inferred:
 |---|---|---|
 | script-object flag | `0x00100000` | `0x00200000` |
 | phase 1 shared byte | absent entirely | one byte if `asOBJ_SHARED` |
-| in/out + default-arg lists | written **unconditionally** | only when `paramCount != 0` |
+| in/out + default-arg lists | written **unconditionally** | `paramCount != 0` -- but **per build**, see below |
 | funcdef (`funcType 4`) | ends at the namespace | one more traits byte |
 | funcdef namespace | plain string | `'n'`/`'o'` tag first |
 | interface vftable offset | always read | skipped for interfaces |
@@ -451,13 +452,45 @@ constructor still parses perfectly, with its declared 177 instructions and a
 clean `RET` — and the factory record that follows is one byte out, taking the
 whole class block with it.
 
-### One difference is per-build, not per-dialect
+### Two differences are per-build, not per-dialect
 
 `ReadTypeInfo`'s `'a'` (template) form carries a namespace string after the name
 in Psycho Strike and Manamon 2, and does **not** in Paladin of the Sky — same
 `tagged` dialect, different record. So `as_module` trials both and keeps the one
 whose tail lands exactly on EOF, the same way the dialect itself is detected.
 `summarize()` reports which won as `template_namespace`.
+
+**The second is the zero-parameter list guard**, and it was tied to the
+dialect until Manamon 1 disproved that. The newer reader guards both the
+in/out and the default-argument list on `paramCount != 0`; the older one
+writes them unconditionally. Manamon 1 is `len2` and writes them
+unconditionally, while Manamon 2 is `len2` and does not -- 27 of 27 funcdefs
+parse with the guard and 0 of 27 without it. Two builds of one dialect, two
+answers, so it is trialled the same way and reported as `unguarded_lists`.
+
+`phone_callback` is the record that shows it, and nothing in the corpus had
+exercised a zero-parameter funcdef before -- Manamon 2's twenty-seven all
+take at least one parameter:
+
+```
+04        return type (void)
+00        parameter count = 0
+00        inOutFlags count     <- skipped when guarded
+04        funcType = 4
+00        default-argument count
+00 6E 00  owner (none), 'n', empty namespace
+01        funcdef traits
+```
+
+Nine bytes, landing exactly on the next `'f'`. Guarded, the reader takes the
+`04` for the funcType position, reads the real funcType as a type-info and
+raises `bad type-info tag 0x04` -- which is a *parse* failure rather than a
+quiet one, and that is the only reason it was cheap to find.
+
+Both trials try the assumptions this reader already held **first** and keep
+them on a tie, so adding a second field cannot silently re-describe a module
+that was already landing on EOF. Paladin, Psycho Strike, Super Egg Hunt and
+Manamon 2 all still pass every stage, Manamon 2 with its 9,700 bodies.
 
 Do not assume a third title matches either of these two. Run `bgt validate`.
 
