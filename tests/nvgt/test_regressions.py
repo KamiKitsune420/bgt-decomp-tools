@@ -645,3 +645,96 @@ class SwitchDefaultTests(unittest.TestCase):
         _, cases, default, _, next_range = sim._dense_table(5)
         self.assertEqual(default, 0x40)
         self.assertEqual(cases, [(1, 0x30), (4, 0x50)])
+
+
+class DiscardedCallTests(unittest.TestCase):
+    """A call whose result nothing reads still ran.
+
+    `_bind` parks a value in `temps[off]` and emits nothing, on the
+    assumption that a later read will fold it in. A call that nothing reads
+    has no such read, so the call itself disappears -- and a call is not a
+    value, it is something the program did.
+
+    BGT ships the proof. Stock `form.bgt` opens `create_window` with
+
+        if(!active)
+        {
+        get_characters();
+        }
+
+    where `get_characters` returns a string nobody wants, because the point
+    of calling it is to drain the keyboard buffer. Recovered, that came out
+    as `if (!active) { }` -- so a recovered form never drains the buffer and
+    stale keystrokes leak into the first field. Same shape in Psycho
+    Strike's `character::find_target`, which ends
+    `CALLINTF set_target_x ; LOADOBJ 8 ; RET` and lost the setter, and in
+    `create_character`, which ends `CALL create_person ; LOADOBJ 1 ; RET`.
+
+    Two of the four ends of a temp's life were handled (`FREE`, and the
+    value register when a void function returns); these are the other two.
+    Both were measured against BGT's own shipped library source before being
+    kept, and the two that were *not* kept are recorded in the source beside
+    them: flushing at every rebind emitted each intermediate of a built-up
+    expression as its own statement, and sweeping the leftover temps at the
+    end of a body emitted calls that had been consumed inside a loop.
+    """
+
+    def test_only_the_value_register_return_may_discard_a_pending_call(self):
+        """`return` writes the pending call only when it returns that register.
+
+        The other three return forms -- an out-reference, the *object*
+        register, and the hidden return slot -- have nothing to do with the
+        value register, so a call left pending there is an unrelated one
+        that merely happened to run last. Discarding it unconditionally is
+        what lost `set_target_x` and `create_person`.
+        """
+        import inspect
+        from decompile import FuncDecompiler
+        source = inspect.getsource(FuncDecompiler.step)
+        ret = source[source.index('if name == "RET":'):]
+        ret = ret[:ret.index("self.stack.clear()")]
+        # The flag is set in exactly one branch: the one that writes the
+        # register's value into the `return`.
+        self.assertEqual(ret.count("returned_the_register = True"), 1)
+        self.assertIn("value = self._normalize_arg(self.value_reg", ret)
+        # ...and every other path flushes rather than drops.
+        self.assertIn("if returned_the_register:", ret)
+        self.assertIn("self._flush_pending_call()", ret)
+        self.assertNotIn("self.pending_value_call = None\n            else:", ret)
+
+    def test_a_destructor_is_not_a_read(self):
+        """Destructing a temporary does not count as using it.
+
+        `PSF 2 ; CALLSYS get_characters ; PSF 2 ; CALLSYS $beh2` destroys
+        the string the call returned. Popping the receiver is what marks the
+        slot consumed, so no later sweep can see that nothing read it.
+
+        **The consumed mark must not be cleared to find out**, which was the
+        first attempt: a slot whose value really had been read earlier then
+        looked unread too, and every string built by a call was emitted a
+        second time. Measured against BGT's shipped `include/`, that cost 20
+        of 149 library functions their exact call sequence and 18 their
+        exact literals; leaving the mark alone costs none of either.
+        """
+        import inspect
+        from decompile import FuncDecompiler
+        source = inspect.getsource(FuncDecompiler)
+        branch = source[source.index("if meth in DTORS or meth.startswith"):]
+        branch = branch[:branch.index("# A base-class constructor")]
+        self.assertIn("self._discarded_call(off)", branch)
+        self.assertNotIn("consumed_temps.discard", branch)
+
+    def test_a_rebind_is_not_the_end_of_a_temps_life(self):
+        """The two rejected flush points stay rejected, with their reasons.
+
+        Both read as obvious fixes and both make the output worse, so the
+        argument lives next to the code rather than in a commit message.
+        """
+        import inspect
+        from decompile import FuncDecompiler
+        bind = inspect.getsource(FuncDecompiler._bind)
+        self.assertNotIn("self._discarded_call", bind)
+        self.assertIn("tried and is wrong", bind)
+        run = inspect.getsource(FuncDecompiler.run)
+        self.assertNotIn("for off in sorted(self.temps)", run)
+        self.assertIn("unsound", run)

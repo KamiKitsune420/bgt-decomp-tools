@@ -1008,8 +1008,67 @@ class FuncDecompiler:
             return value
         return a
 
+    def _discarded_call(self, off: int) -> None:
+        """A call whose result nothing reads still ran: emit it where it ran.
+
+        `_bind` parks a value in `temps[off]` and emits nothing, on the
+        assumption that some later read will fold it in. A call that nothing
+        reads has no such read -- so the call itself disappears, and a call
+        is not a value, it is something the program did.
+
+        BGT's own `audio_form::create_window` is the clearest case. Stock
+        `form.bgt` opens
+
+            if(!active)
+            {
+            get_characters();
+            }
+
+        where `get_characters` returns a string nobody wants, because the
+        point of calling it is to drain the keyboard buffer. The bytecode is
+        `PSF 2 ; CALLSYS get_characters ; PSF 2 ; CALLSYS $beh2`, and the
+        recovered source was `if (!active) { }` -- so a recovered form never
+        drains the buffer and stale keystrokes leak into the first field. It
+        compiles, it runs, and nothing reports it.
+
+        `FREE` has handled this since the value-register work; these are the
+        other three ends of a temp's life, and the statement is emitted at
+        the position the value was *bound* rather than here, because events
+        are sorted by bytecode position at the end of the simulation.
+        """
+        value = self.temps.get(off)
+        if (value is None or value.kind != "call"
+                or off in self.consumed_temps):
+            return
+        bound = self.temp_bound.get(off)
+        if bound is None:
+            return
+        self.stmt_count += 1
+        self.stmt_texts.append("")
+        self.events.append(Event("stmt", bound[0], ("", f"{value.text};")))
+        self.consumed_temps.add(off)
+
     def _bind(self, off: int, a: Atom) -> None:
-        """Store a value into frame slot `off` (statement or temp alias)."""
+        """Store a value into frame slot `off` (statement or temp alias).
+
+        **Flushing a discarded call here was tried and is wrong**, and the
+        measurement is why: a rebind is not proof that the previous value
+        went unread. A short-circuit merge binds its condition slot, the
+        branch reads it, and the slot is written again -- and every
+        intermediate of a built-up expression does the same, so Paladin's
+        `clock::reset` came out as
+
+            get_time(false);
+            ("The time is " + get_time(false));
+            (("The time is " + get_time(false)) + "[/]Today's date is ");
+            this.speeches[this.mode] = ((((...)));
+
+        with each partial expression emitted *and* folded into the final
+        statement. That is not recovering a dropped call, it is running
+        `recorder.rand(...)` five extra times. The ends of a temp's life
+        that really are ends -- `FREE`, a destructor, the end of the body --
+        are handled where they happen.
+        """
         a = self._deref(a) if a.is_ptr else a
         if (a.kind == "const" and off in self.var_types
                 # ...unless this constant was typed from where it is stored
@@ -1185,6 +1244,16 @@ class FuncDecompiler:
             # its last value. FREE and explicit stores maintain aliases.
             self.step(ins)
             self.k += 1
+        # **Sweeping the leftover temps here was tried and is unsound.** A
+        # call still parked in `temps` at the end of the body has not
+        # necessarily gone unread -- a value consumed inside a loop is still
+        # sitting there afterwards -- and emitting those put spurious
+        # `key_down()`, `key_pressed()` and `length()` statements into
+        # `audio_form::check_shortcuts` and `get_list_selections`. Measured
+        # against BGT's own shipped source it cost two functions their exact
+        # call sequence and bought one real recovery, so it is not here.
+        # `RET` flushes the value register, which is where the cases that
+        # *are* provable arrive.
         # Ignored non-void calls can be recognized only after later opcodes
         # overwrite their result. Keep their original location in the CFG.
         return sorted(self.events, key=lambda event: event.pos)
@@ -1723,6 +1792,17 @@ class FuncDecompiler:
             return
         if name == "RET":
             if self.returns_value:
+                # **Only the branch that actually returns the value register
+                # may discard the pending call**, because only there is the
+                # call already written -- inside the `return`. Discarding it
+                # unconditionally loses a *different*, unrelated call that
+                # merely happened to be the last one to touch that register:
+                # `character::find_target` ends
+                # `CALLINTF set_target_x ; LOADOBJ 8 ; RET`, returns the
+                # OBJECT register, and lost the setter entirely, leaving the
+                # arm it sat in empty. Same shape in `create_character`,
+                # which ends `CALL create_person ; LOADOBJ 1 ; RET`.
+                returned_the_register = False
                 if _needs_out_ref(self.fn.return_type):
                     if self.return_slot in self.temps:
                         self._stmt(f"return {self.temps[self.return_slot].text};")
@@ -1731,10 +1811,14 @@ class FuncDecompiler:
                 elif self.value_reg.kind != "raw" and not self.value_reg.is_ptr:
                     value = self._normalize_arg(self.value_reg, self.fn.return_type)
                     self._stmt(f"return {value.text};")
+                    returned_the_register = True
                 elif 0 in self.temps:
                     # value was copy-constructed into the hidden return slot
                     self._stmt(f"return {self.temps[0].text};")
-                self.pending_value_call = None
+                if returned_the_register:
+                    self.pending_value_call = None
+                else:
+                    self._flush_pending_call()
             else:
                 self._flush_pending_call()
             self.stack.clear()
@@ -2528,6 +2612,17 @@ class FuncDecompiler:
             self.pending_value_call_pos = self._pos()
             return
         if meth in DTORS or meth.startswith("$list") or meth.startswith("$dlgte"):
+            # Destructing a value is not reading it. A temporary built by a
+            # call and then thrown away is exactly the discarded-result case
+            # -- `get_characters()` in `audio_form::create_window` -- and
+            # popping the receiver has already marked the slot consumed, so
+            # no later sweep can see it.
+            if meth in DTORS and pop_this is not None:
+                off = pop_this.offset
+                if off is not None and not self.is_named(off):
+                    held = self.temps.get(off)
+                    if held is not None and held.kind == "call":
+                        self._discarded_call(off)
             return
 
         # A base-class constructor called on `this` from a derived constructor
