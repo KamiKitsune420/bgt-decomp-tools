@@ -106,6 +106,63 @@ class FoldSafetyTests(unittest.TestCase):
         self.assertTrue(loop._conditionally_bound(8))    # bound before the loop
         self.assertFalse(loop._conditionally_bound(16))  # bound at the head
 
+    def test_an_expression_built_out_of_a_variable_goes_stale_with_it(self):
+        """A property read is repeatable by kind; what it READS may not be.
+
+        The check asked whether the whole value *was* one variable, so
+        `arg0.interacts[local_2].mode` -- kind `prop`, no call in its text --
+        folded past the statement that reassigned `local_2`.
+
+        Paladin's `add_event` keeps the old interact's mode before removing
+        it, because afterwards there is nothing to read it from. Folded, the
+        `set_mode` at the end read the element at the *new* index, which the
+        line above had removed, so every save that had passed through
+        `init_events` died with `Index out of bounds` on load.
+        """
+        from decompile import Atom
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+        value = Atom(kind="prop", text="arg0.interacts[local_2].mode")
+
+        def sim(writes):
+            return self._sim(instrs=instrs, k=8,          # reading at pos 32
+                             temps={12: value}, temp_bound={12: (8, 0)},
+                             var_names={0: "arg0", 2: "local_2"},
+                             slot_writes=writes, var_types={},
+                             duplicate_binds=set(), cond_spans=[],
+                             back_edges=[], stmt_count=3,
+                             stmt_texts=["a;", "b;", "c;"])
+
+        # local_2 written at 20: after the bind at 8, before this read.
+        self.assertTrue(sim({2: [20]})._stale_fold(12))
+        # written before the bind, so the expression still means what it did.
+        self.assertFalse(sim({2: [4]})._stale_fold(12))
+        # a slot the expression does not read is somebody else's business.
+        self.assertFalse(sim({9: [20]})._stale_fold(12))
+        # and a name that is only a property, never a slot, is not a read:
+        # `interacts` and `mode` name members, and nothing writes them
+        # through the frame.
+        self.assertFalse(
+            sim({2: [4], 0: [4]})._stale_fold(12))
+
+    def test_lowering_the_duplication_threshold_for_calls_is_not_the_answer(self):
+        """Pins the threshold, and the measurement that says why it is 3.
+
+        `_is_repeatable` rejects any text with a bracket in it, so it cannot
+        tell `do_damage(a, b)` from `(y - backward_range)`. Lowering the
+        threshold only for the ones that really call something looks like the
+        right narrowing and is not: it removes 561 duplicated calls from
+        Crazy Party and takes that title from 14 residual gotos to 30, which
+        is 16 new compiler errors, because AngelScript has no `goto`.
+
+        The duplications it would fix are real -- Paladin's four hp-drain
+        attacks each call `do_damage` twice, once to say the number and once
+        to apply it -- so this is recorded rather than forgotten. The lever
+        is wrong: what must stay folded is a fold inside a condition.
+        """
+        from decompile import DUPLICATE_FOLDS
+        self.assertEqual(DUPLICATE_FOLDS, 3)
+
     def test_a_slot_tested_with_jlow_is_a_bool_whatever_its_width_says(self):
         """`JLow*` tests the low byte of the value register and follows no
         compare, so it is the bool protocol and nothing else.

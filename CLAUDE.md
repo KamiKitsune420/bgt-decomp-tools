@@ -1206,17 +1206,32 @@ Every title that parses recovers with **0 unmodelled opcodes and 0 bodies
 that failed to decompile**. What the compiler says, and what the project's own
 checks say:
 
-| title | lines | files | goto | unbalanced | split | calls read back | compiler says |
-|---|---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,564 | 16 | 0 | 0 | yes | 1,607 | **compiled cleanly, and it runs** |
-| Paladin of the Sky | 28,223 | 61 | 0 | 0 | yes | 7,145 | **compiled cleanly, and it runs** |
-| Psycho Strike | 28,067 | 75 | 0 | 0 | yes | 6,462 | 33, every one the engine's |
-| Manamon 2 | 175,032 | 1,638 | 4 | 0 | yes | 51,249 | 33 parse errors, so **nothing** |
-| Crazy Party | 196,488 | 560 | 0 | 0 | yes | 90,494 | **compiled cleanly, and it runs** |
+| title | lines | goto | unbalanced | split | calls read back | compiler says |
+|---|---|---|---|---|---|---|
+| Super Egg Hunt | 6,231 | 0 | 0 | yes | 1,611 | **compiled cleanly** |
+| Paladin of the Sky | 27,208 | 0 | 0 | yes | 7,142 | **compiled cleanly** |
+| Psycho Strike | 27,307 | 2 | 0 | yes | 6,467 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 188,904 | 14 | 0 | yes | 90,628 | not re-measured |
+| Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
-The line and goto counts are a fresh run of all five, not the figures this
-table carried before: Manamon 2's gotos are 4 rather than 6, and the rest
-moved by a few hundred lines as the decompiler improved. **And Paladin has
+**Every number above was re-measured, and several of them moved a long
+way.** The table used to claim 0 residual gotos for Psycho Strike and for
+Crazy Party; they are 2 and 14. The line counts were each a few hundred to
+seven thousand high. Nothing regressed to cause that -- the figures had
+simply outlived their run, across the borrowed-handle fix and six others,
+and a stale number in this file is worse than no number because it reads as
+a baseline. Re-derive before quoting.
+
+**And two titles can no longer be measured the same way.** Psycho Strike's
+and Manamon 2's own runtimes are not on this machine, so their modules were
+repacked onto BGT 1.3's stub. That works for Psycho Strike, whose figures
+above are from such a build -- the opcode table is identical across BGT
+builds, so the decompiled text is unaffected, though `engine_gap`,
+`method_gap` and the apicheck oracle are 1.3's rather than its fork's and
+are not quoted. It does **not** work for Manamon 2: 1.3's table does not
+decode that fork's bodies, and `bgt_asir.load` says so rather than
+guessing -- `module tail did not land on EOF`. Four titles, not five, until
+that runtime is back. **And Paladin has
 to be recovered from the game**, not from `paladin_fixed/game.exe`, which is
 the 1.27 MB executable `bgt compile --build release` *wrote* from an earlier
 recovery. Decompiling that is a round trip rather than a recovery, and it
@@ -2354,6 +2369,90 @@ path, so a recovered build sees whatever the installed original wrote. A
 registered install stays registered in the port, and an unregistered one
 stays unregistered -- neither is something the recovery changes.
 
+### ...but the registration *entry* flow is a structurer bug, and it is open
+
+Reading an existing registration works. **Entering a new one does not**, on
+Paladin, and the diagnosis is exact rather than suspected -- after one wrong
+answer that read perfectly well, recorded below because it is the trap.
+
+`register_software` prompts for a key in a loop:
+
+```
+L1: SetV1 4 1 ; CpyVtoR4 4 ; JLowZ L4    ; a literal while(true); exit is L4
+    key = input_box("Key", ...)
+    JLowZ L5                             ; key != "" -> L5
+    if (get_last_error() == -12) { "cancelled."; return; }
+    "This box cannot be left empty."
+    JMP L1                               ; <- the CONTINUE
+L5: if (get_key(name) == key) { ...write...; "successfully"; return; }
+L7: "Sorry, the name and key you provided appears to be invalid."
+    JMP L4                               ; <- the BREAK
+L4: if (done) return; else JMP L3        ; back to the name prompt
+```
+
+**The loop's extent is given by its header test's exit target, not by its
+last back edge.** L4 lies *after* L5 and L7, so the body runs to L7: the
+backward `JMP L1` is a `continue` and the forward `JMP L4` is the `break`.
+`plain_latches[-1]` takes the last backward jump to the header as the tail,
+which cuts the body off at the `continue` and leaves the forward jump over
+it looking exactly like a `break`:
+
+```
+if (local_10 != "") { break; }          // leaves with the key, doing nothing
+...
+speak("This box cannot be left empty.");
+if (get_key(local_6) == local_10) {     // local_10 is "" on this path
+```
+
+So the validation ends up in the branch where the key was *blank*. Enter a
+real key and it breaks out, `if (local_1 != 0) return;` is false, and the
+outer loop asks for the name again -- forever. Enter a blank one and the
+derived key is compared against `""`. **Registration can never succeed**,
+which is how it was reported. The header's own `SetV1 4 1` test is rendered
+as a nested `if (true)` inside `while (true)` rather than folded into the
+loop condition, which is the visible tell that the header test was not read
+as the loop's.
+
+**The wrong answer first**, since it is the one the output suggests: that L5
+is the loop's *exit* and belongs after it. Every line of the rendered source
+is consistent with that, and the bytecode is not -- the header names L4, not
+L5, and nothing but reading the header says so. Fixing the extent is the
+open work, and it is the expensive kind: generalising a loop handler once
+took Crazy Party from 17 residual gotos to 55.
+
+### What a probe over the recovered path does and does not settle
+
+Worth doing before blaming a decompiler, and worth writing down because it
+came back ambiguous. A probe that renames the game's `main`, calls
+`setup_registry()` and reports only booleans and lengths -- never the stored
+name or key -- says:
+
+```
+is_registered=0  username_len=11  key_len=9  derived_len=9  derived_matches=0
+```
+
+So the store and the value names are right (BGT puts them under
+`HKCU\SOFTWARE\Games\<company>\<product>`, with the `Games\` prefix the
+`settings` type adds), the values are read, and `get_key` returns a key of
+the right shape -- `string_left(4) + "-" + string_trim_left(4)`, nine
+characters -- that **disagrees with the stored one**.
+
+And `get_key` is faithful. It was checked against the bytecode instruction
+by instruction: both loop bounds (948, 296), `string_hash(s, 2, true)` then
+`string_hash(s, 2, false)`, the special iterations 400/490/750/911, 149, 479
+and `(i > 679) && (i <= 687)` from `JP`/`TNP`, the clamp at 60, `MULIi 4 6
+2`, the three `string_mid` triples, the `"-"` separator and the `opAdd`
+nesting. `remove_character_from_string` matches too, down to `ADDIi 4 -2 1`
+for the `arg1 + 1`.
+
+So the disagreement is **not explained**, and that is the honest state. What
+it is not: the recovered `register_software` cannot have written those
+values, since the only `write_string` pair sits behind the comparison that
+fails. The remaining candidates need the title's *own* executable to
+separate, and that is exactly what is no longer on this machine -- so the
+next step is to fix the entry flow and register again, because the broken
+flow could never have accepted anything.
+
 ## The screen-reader client, which decides whose voice the game has
 
 These are audio games, and a recovered one that calls `screen_reader_speak`
@@ -2682,6 +2781,66 @@ The duplications worth catching are far worse than doubled anyway:
 `file_menu` reads one result 4 times and `play_extended_1d` read one
 `reserve_slot()` 45 times. A two-read duplication is left folded and
 `bgt libcheck` still counts it.
+
+**And lowering it only for a value that CALLS something is not the narrowing
+it looks like.** `_is_repeatable` rejects any text with a bracket in it, so
+it cannot tell `do_damage(a, b)` from `(y - backward_range)`: re-evaluating
+the second costs nothing, while the first rolls the damage again. Measured,
+that removes **561 duplicated calls** from Crazy Party and costs that title
+**14 residual gotos -> 30**, which is 16 compiler errors, while Paladin,
+Super Egg Hunt and Psycho Strike all hold and compile. The duplications it
+would fix are real and some are serious -- Paladin's four hp-drain attacks
+each call `do_damage` twice, once to say the number and once to apply it, so
+the damage spoken is a different roll from the damage dealt; `walk` calls
+`interact_in_location` twice per direction; `get_global_slot` is called
+either side of the `remove_at` that changes its answer. It was still
+rejected, because 16 new errors on a title that compiles cleanly is not a
+trade this file takes.
+
+What the measurement says is that **the threshold is the wrong lever**. The
+folds that must stay folded are the ones inside a *condition*, and the ones
+worth promoting are in plain statements -- and `stmt_count` does not
+separate them, because nested `if` conditions emit no statement between
+them. That was tried too: it refolded Super Egg Hunt's
+`int(string_to_number(local_29[1]))` into **five** reads, including a
+`switch` selector, which HEAD had correctly kept as a variable. Finding the
+real distinction is the open work; both wrong answers are recorded here so
+the next attempt starts from them.
+
+### Five: the value is an expression built out of a variable
+
+Case one asks whether the *receiver* of a folded call was mutated. A value
+that is not a call at all slips past it, and so does `_is_repeatable`:
+`arg0.interacts[local_2].mode` is kind `prop` with no call in its text, so
+both halves of that test call it repeatable, while the slot it reads gets
+reassigned. The test used to ask whether the whole value *was* one variable,
+which a property read through one is not.
+
+Paladin's `add_event` is the whole bug in five lines. Replacing an event has
+to keep the old interact's mode *before* removing it, because afterwards
+there is nothing left to read it from:
+
+```
+int mode = arg0.interacts[slot].mode;   // slot 12
+arg0.interacts.remove_at(slot);
+slot = arg0.add_event(..., gslot);      // slot 2 rewritten
+global_interacts[slot].set_mode(mode);
+```
+
+Folded, that last line read `arg0.interacts[local_2].mode` with `local_2`
+now holding the *new* event's index and the element it named already
+removed. `init_events` runs on every load, so **every save that had ever
+replaced an event died with `Index out of bounds`** -- reported from a
+tester's machine as a seven-frame stack ending in `add_event`.
+
+So the question is every slot the expression *reads*, not whether the whole
+value is one. Intersecting the identifiers in its text with the frame's own
+names is what keeps a property or method name out of the answer:
+`arg0.interacts[local_2].mode` names three things and only `local_2` is a
+slot. Super Egg Hunt renders **byte-identical** under this, Paladin gains
+two lines and Psycho Strike six, and no title's goto count, split or
+`libcheck` score moves -- which is what a correctly scoped fold change looks
+like.
 
 ### A base class's method, called through `this`, recurses forever
 

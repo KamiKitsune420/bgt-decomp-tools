@@ -406,6 +406,12 @@ DECL_RE = re.compile(r"^\s*(?!(?:return|break|continue|case|default|else|goto|"
                      r"(?:const\s+)?[A-Za-z_][\w:]*(?:<[^>]*>)?(?:@|\[\])*@?\s+"
                      r"([A-Za-z_]\w*)\s*[;=(]")
 SLOT_NAME_RE = re.compile(r"\b((?:local|tmp)_?\d+)\b")
+#: any bare identifier, for asking which of a frame's own slots an
+#: expression reads. Intersecting with `var_names` is what keeps a
+#: property or method name out of the answer:
+#: `arg0.interacts[local_2].mode` names three things and only `local_2`
+#: is a slot.
+_IDENT = re.compile(r"[A-Za-z_]\w*")
 # Locals this decompiler generates. They belong to the function, never to the
 # block they were written in.
 GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list|hold)_")
@@ -418,6 +424,22 @@ GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list|hold)_")
 #: the duplications worth catching are far worse than doubled:
 #: `file_menu` reads one menu result 4 times and `play_extended_1d` read one
 #: `reserve_slot()` 45 times.
+#:
+#: **Two for a value that CALLS something was tried, and measured, and is
+#: not it either.** `_is_repeatable` rejects any text with a bracket in it,
+#: so it cannot tell `do_damage(a, b)` from `(y - backward_range)`, and
+#: lowering the threshold only for the former looks like exactly the
+#: narrowing this comment asks for. It removes 561 duplicated calls from
+#: Crazy Party and costs that title **14 residual gotos -> 30**: Paladin,
+#: Super Egg Hunt and Psycho Strike all hold at their own counts and
+#: compile, which is what makes it tempting. The duplications it would have
+#: fixed are real and some are serious -- Paladin's four hp-drain attacks
+#: each call `do_damage` twice, once to say the number and once to apply
+#: it, so the damage spoken is a different roll from the damage dealt --
+#: but 16 new errors on a title that compiles cleanly is not a trade this
+#: file takes. What the measurement says is that the threshold is the wrong
+#: lever: the folds that must stay folded are the ones inside a condition,
+#: and *that* is the distinction to find.
 DUPLICATE_FOLDS = 3
 
 
@@ -1914,6 +1936,30 @@ class FuncDecompiler:
                 # Counted, not acted on: a call folded into two reads runs
                 # twice, and the only place to fix that is before the first
                 # read. `_body` re-simulates with these marked.
+                #
+                # **Only a fold with a statement between it and the bind**,
+                # and that is what lets the threshold be two. Several folds
+                # inside ONE expression are the case the fold exists for --
+                # a loop condition the structurer can read as an expression
+                # -- and promoting those is what took Super Egg Hunt from 0
+                # residual gotos to 182. Once a statement has run there is no
+                # expression left to preserve and the duplication is the
+                # whole of what is there.
+                #
+                # Paladin's `add_event` is the shape this was blind to. The
+                # value is a BARE call, so there is no receiver for
+                # `_stale_fold` to be invalidated through, and the source
+                # kept it in a local precisely because the statement in
+                # between makes it unaskable twice:
+                #
+                #     int gslot = get_global_slot(old);
+                #     global_interacts.remove_at(gslot);
+                #     slot = arg0.add_event(..., gslot);
+                #
+                # Folded into both reads, the second `get_global_slot(old)`
+                # searched a list the line above had just removed `old` from
+                # and returned -1, so the replacement event was given the
+                # wrong global slot.
                 key = (off, bound[0])
                 self.fold_reads[key] = self.fold_reads.get(key, 0) + 1
             self.consumed_temps.add(off)
@@ -2009,14 +2055,36 @@ class FuncDecompiler:
             # 100.0. The recovered function computed `100.0 * 100.0`, and
             # pressing G in a battle to hear the enemy's health said
             # **10000 percent**. Every percentage in the game was that.
+            # **...and an expression BUILT OUT OF a variable is no more
+            # repeatable than that variable is.** This asked whether the
+            # whole value *was* one variable, which a property read through
+            # it is not: `arg0.interacts[local_2].mode` is kind `prop` with
+            # no call in its text, so it satisfies both halves of
+            # `_is_repeatable` while depending on a slot that gets
+            # reassigned.
+            #
+            # Paladin's `add_event` is the whole bug in five lines. Replacing
+            # an event has to keep the old interact's mode *before* removing
+            # it, because afterwards there is nothing left to read it from:
+            #
+            #     int mode = arg0.interacts[slot].mode;   // slot 12
+            #     arg0.interacts.remove_at(slot);
+            #     slot = arg0.add_event(..., gslot);      // slot 2 rewritten
+            #     global_interacts[slot].set_mode(mode);
+            #
+            # Folded, that last line read `arg0.interacts[local_2].mode` with
+            # `local_2` now holding the *new* event's index and the element
+            # it named already removed. Loading a save runs `init_events`,
+            # so every save that had ever replaced an event died there.
+            slot_of = {n: s for s, n in self.var_names.items()}
             if value.kind == "var":
-                name = value.text.lstrip("@")
-                slot = next((s for s, n in self.var_names.items() if n == name),
-                            None)
-                if slot is not None and any(
-                        bound[0] < write <= self._pos()
-                        for write in self.slot_writes.get(slot, ())):
-                    return True
+                names = {value.text.lstrip("@")}
+            else:
+                names = set(_IDENT.findall(_mask_strings(value.text)))
+            if any(any(bound[0] < write <= self._pos()
+                       for write in self.slot_writes.get(slot_of[name], ()))
+                   for name in names if name in slot_of):
+                return True
             return False
         if bound[1] == self.stmt_count:
             return False            # nothing has run since: the same moment
