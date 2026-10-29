@@ -977,3 +977,51 @@ class BorrowedHandleTests(unittest.TestCase):
         removed a further thousand lines of Paladin for no extra fix."""
         from decompile import FuncDecompiler
         self.assertLessEqual(FuncDecompiler.BORROW_WINDOW, 4)
+
+
+class MergeOnAFreeTests(unittest.TestCase):
+    """A handle release can sit on the merge point and says nothing about it.
+
+    `interact_in_location` is a ten-term `&&`, and its last operand lands on
+    `FREE 4` -- the chain borrowed an array element and the compiler released
+    it exactly there -- while every earlier merge in the same chain lands
+    straight on its `CpyVtoR4`:
+
+        0x13C CpyVtoV4 v8 <- v7
+        0x13E FREE 4            <- the jump target
+        0x140 CpyVtoR4 v8       <- the merge
+
+    Declining that merge detached the final operand from the chain, and the
+    `return true` went with it. The recovered test became
+
+        if (current_map.interacts[i].type != 16) { return true; }
+
+    so every interact that is not type 16 blocked the player in every
+    direction from the moment a map was entered -- the bump sound and no
+    movement. The other nine terms, `is_solid` among them, were emitted as
+    an `if` with two empty arms and dropped on the floor.
+
+    `merge` is only ever used as a lower bound on position, so the recorded
+    position stays the jump target; only the instruction the *shape* is read
+    from moves past the release.
+    """
+
+    def test_the_shape_is_read_past_a_release_but_the_position_is_not(self):
+        import inspect
+        from decompile import FuncDecompiler
+        source = inspect.getsource(FuncDecompiler._begin_bool_merge)
+        self.assertIn('("FREE", "SUSPEND")', source)
+        # The recorded merge position is still the jump target...
+        self.assertIn("finish_pos = merge_pos", source)
+        # ...and the shape is read from the instruction found past it.
+        self.assertIn("merge_ins = self.instrs[shape_idx]", source)
+
+    def test_the_arm_range_still_ends_at_the_jump_target(self):
+        """The ternary-versus-`&&` test counts the instructions in the other
+        arm, and a release swept into that range would stop it firing."""
+        import inspect
+        from decompile import FuncDecompiler
+        source = inspect.getsource(FuncDecompiler._begin_bool_merge)
+        arm = source[source.index("other_start ="):source.index("finish_pos =")]
+        self.assertIn("self.instrs[other_start:merge_idx]", arm)
+        self.assertNotIn("shape_idx", arm)

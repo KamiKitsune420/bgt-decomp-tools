@@ -3564,7 +3564,33 @@ class FuncDecompiler:
         merge_idx = self.pos_of.get(merge_pos)
         if merge_idx is None:
             return False
-        merge_ins = self.instrs[merge_idx]
+        # **A handle release can sit on the merge point**, and it says nothing
+        # about the shape. The last operand of `interact_in_location`'s
+        # ten-term `&&` lands on `FREE 4` -- the chain borrowed the array
+        # element and the compiler released it exactly there -- while every
+        # earlier merge in the same chain lands straight on its `CpyVtoR4`:
+        #
+        #     0x13C CpyVtoV4 v8 <- v7
+        #     0x13E FREE 4            <- the jump target
+        #     0x140 CpyVtoR4 v8       <- the merge
+        #
+        # Declining the merge detached the final operand from the chain and
+        # the `return true` went with it, so the recovered test was
+        # `if (interacts[i].type != 16) return true;` -- every interact that
+        # is not type 16 blocks the player, in every direction, from the
+        # moment a map is entered. The other nine terms, `is_solid` among
+        # them, were emitted as an `if` with two empty arms and dropped.
+        #
+        # `merge` is only ever used as a lower bound on position, so the
+        # recorded `finish_pos` stays the jump target; only the instruction
+        # the *shape* is read from moves.
+        shape_idx = merge_idx
+        while (shape_idx < len(self.instrs)
+               and self.instrs[shape_idx].name in ("FREE", "SUSPEND")):
+            shape_idx += 1
+        if shape_idx >= len(self.instrs):
+            return False
+        merge_ins = self.instrs[shape_idx]
         result_dest = _s16(setv.w_arg)
         # `&&` / `||` produce a bool. The same shape with a non-bool
         # destination is a ternary over constants -- basic_character_
@@ -3602,7 +3628,7 @@ class FuncDecompiler:
             stored = _s16(merge_ins.w_arg)
             b_type = self.var_types.get(stored)
             if ((b_type is None or b_type.format() != "bool")
-                    and not self._tested_as_bool(stored, merge_idx + 1)):
+                    and not self._tested_as_bool(stored, shape_idx + 1)):
                 # Typing is not the only evidence, and on a compiler scratch
                 # slot it is the weaker one: `slot_types` reads widths, and
                 # `SetV4` is as true of an int as of a bool. The bytecode says
