@@ -40,6 +40,80 @@ def _unescape(text: str) -> bytes:
     return bytes(out)
 
 
+class LoopExtentTests(unittest.TestCase):
+    """A head-tested loop whose `continue` sits in the middle of its body.
+
+    Paladin's `register_software` is the shape, and getting it wrong meant
+    the game could not be registered at all: the validation ended up inside
+    the branch where the key was left blank, so a real key was never checked
+    and a blank one was compared against the derived key.
+
+    The bytecode, with the compiler's own labels:
+
+        L1: SetV1 t,1 ; JLowZ L4     ; a literal while(true); its exit is L4
+            key = input_box(...)
+            JLowZ L5                 ; key != "" -> L5
+            ...empty handling...
+            JMP L1                   ; the CONTINUE, mid-body
+        L5: if (get_key(name) == key) { ...; return; }
+        L7: "invalid"
+            JMP L4                   ; the BREAK -- and L4 is the NEXT event
+        L4: ...after the loop...
+    """
+
+    def _render(self):
+        from decompile import Event, Structurer
+
+        def stmt(pos, text):
+            return Event("stmt", pos, ("", text))
+
+        # Positions are dword positions; only their order matters here.
+        events = [
+            Event("branch", 0x10, ("true", 0x90)),     # the header test
+            stmt(0x20, 'key = input_box("Key");'),
+            Event("branch", 0x30, ('key != ""', 0x60)),  # -> L5
+            stmt(0x40, 'speak("empty");'),
+            Event("jump", 0x50, 0x10),                 # the CONTINUE
+            Event("branch", 0x60, ("get_key(name) == key", 0x80)),   # L5
+            stmt(0x70, "return;"),
+            stmt(0x80, 'speak("invalid");'),           # L7
+            Event("jump", 0x88, 0x90),                 # the BREAK, next event
+            stmt(0x90, "after_the_loop();"),           # L4
+        ]
+        return Structurer(events).render()
+
+    def test_the_body_runs_to_the_exit_not_to_the_back_edge(self):
+        """The back edge closes the body only when nothing follows it.
+
+        Ending at the back edge drops everything after the `continue` --
+        here the whole validation -- and leaves the forward jump over it
+        looking exactly like a `break`.
+        """
+        lines = [line.strip() for line in self._render() if line.strip()]
+        self.assertIn("while (true) {", lines)
+        # the empty-key arm continues rather than breaking out
+        self.assertIn("continue;", lines)
+        # ...and the validation is INSIDE the loop, not in the empty arm
+        body = lines[lines.index("while (true) {") + 1:]
+        self.assertTrue(any("get_key(name) == key" in l for l in body),
+                        "the validation must be inside the loop: %r" % lines)
+        # the code after the loop is emitted exactly once, outside it
+        self.assertEqual(sum("after_the_loop();" == l for l in lines), 1)
+
+    def test_a_break_to_the_very_next_event_is_not_a_fallthrough(self):
+        """`JMP 0` -- a break whose target is the next instruction.
+
+        A jump to the next event skips no source action and is normally a
+        fallthrough, but falling through stays *inside* the loop: at the end
+        of a body it goes round again. Dropped, an invalid key re-prompted
+        for the key instead of returning to the name, and the statement
+        after the loop became unreachable.
+        """
+        lines = [line.strip() for line in self._render() if line.strip()]
+        self.assertIn("break;", lines)
+        self.assertLess(lines.index("break;"), lines.index("after_the_loop();"))
+
+
 class FoldSafetyTests(unittest.TestCase):
     """When a folded value stops being the value the bytecode computed.
 

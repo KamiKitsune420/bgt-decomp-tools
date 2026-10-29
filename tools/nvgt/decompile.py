@@ -4322,7 +4322,30 @@ class Structurer:
                              if not self.done[j] and self.ev[j].kind == "jump"
                              and self.ev[j].data <= self.ev[j].pos
                              and self._next_index(self.ev[j].data) == i]
-            if plain_latches and i not in self.handled_plain_loops:
+            # **A conditional header is a head-tested loop, not a
+            # `while (true)`.** This path claims any index a backward jump
+            # returns to, and it claimed the *branch* that tests the loop's
+            # own condition -- so the condition came out as a nested `if`
+            # inside a `while (true)`, and the body was cut off at the back
+            # edge. Paladin's `register_software` is the cost: its key
+            # prompt is `while (true)` with a `continue` in the middle, and
+            # the validation after that `continue` fell outside the body.
+            # When the header branches past the back edge, the branch arm
+            # below knows the real exit; leave it alone.
+            conditional_header = (
+                e.kind == "branch" and not self.done[i] and plain_latches
+                and e.data[1] > self.ev[plain_latches[-1]].pos
+                # **...and only when body lies between the two.** Where the
+                # back edge is the last event before the header's exit, the
+                # `while (true)` reading loses nothing and is what every
+                # other title relies on: demanding only that the header
+                # branch past the latch cost Paladin's `storyline_scroll` a
+                # residual goto, because nothing then claimed its loop at
+                # all. It is when events sit between the back edge and the
+                # exit that those events are the rest of the body.
+                and self._next_index(e.data[1]) > plain_latches[-1] + 1)
+            if (plain_latches and i not in self.handled_plain_loops
+                    and not conditional_header):
                 tail = plain_latches[-1]
                 self.handled_plain_loops.add(i)
                 self.done[tail] = True
@@ -4378,10 +4401,21 @@ class Structurer:
             if e.kind == "jump":
                 self.done[i] = True
                 t = e.data
-                if self._next_index(t) == i + 1:
+                if (self._next_index(t) == i + 1
+                        and not (loop and loop.is_break(t))):
                     # Serialized cleanup/label instructions can separate a
                     # jump from the next source event. No source action is
                     # skipped, so the jump is simply a fallthrough.
+                    #
+                    # **Unless it LEAVES the enclosing loop.** Falling
+                    # through stays inside -- at the end of a body it loops
+                    # round again -- where the jump exits, so the two are not
+                    # the same control flow. A `break` whose target happens
+                    # to be the very next instruction compiles to `JMP 0`,
+                    # and Paladin's `register_software` ends its key loop
+                    # with exactly that: dropped, an invalid key re-prompted
+                    # for the key instead of going back to the name, and the
+                    # `if (done) return;` after the loop became unreachable.
                     i += 1
                     continue
                 if loop and loop.is_break(t):
@@ -4480,10 +4514,30 @@ class Structurer:
                     back = j
                     break
             if back is not None:
+                # **The back edge closes the body only when nothing follows
+                # it before the exit.** Otherwise it is a `continue` in the
+                # middle, and the body runs all the way to the exit target:
+                #
+                #     while (true) {
+                #         key = input_box("Key", ...);
+                #         if (key == "") { ...; continue; }   // JMP -> head
+                #         if (get_key(name) == key) { ...; return; }
+                #         speak("invalid");
+                #         break;                              // JMP -> exit
+                #     }
+                #
+                # Ending at the back edge drops everything after the
+                # `continue`, which in Paladin's `register_software` is the
+                # whole validation -- so no key could ever be accepted. For
+                # the ordinary shape, where the back edge *is* the last
+                # event before the exit, this changes nothing.
+                head_pos = self.ev[back].data
+                body_end = back if back == t_idx - 1 else t_idx
                 self.out.append((indent, f"while {_condition(cond)} {{"))
-                self.done[back] = True
-                self._block(indent + 1, i + 1, back,
-                            LoopCtx(self.ev[back].data, self.ev[back].data, e.pos, target))
+                if body_end == back:
+                    self.done[back] = True
+                self._block(indent + 1, i + 1, body_end,
+                            LoopCtx(head_pos, head_pos, e.pos, target))
                 self.out.append((indent, "}"))
                 i = t_idx
                 continue

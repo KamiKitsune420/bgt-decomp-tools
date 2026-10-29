@@ -2369,56 +2369,85 @@ path, so a recovered build sees whatever the installed original wrote. A
 registered install stays registered in the port, and an unregistered one
 stays unregistered -- neither is something the recovery changes.
 
-### ...but the registration *entry* flow is a structurer bug, and it is open
+### A head-tested loop whose `continue` is in the middle of its body
 
-Reading an existing registration works. **Entering a new one does not**, on
-Paladin, and the diagnosis is exact rather than suspected -- after one wrong
-answer that read perfectly well, recorded below because it is the trap.
+The worst shape in this file so far, because what it broke was a *feature*
+rather than a line: Paladin's recovered build could not be registered at
+all, and nothing reported anything. The project recovers with 0 residual
+gotos, a verified split and `compiled cleanly`, and the game runs.
 
-`register_software` prompts for a key in a loop:
+`register_software` prompts for a name, then for a key, and validates:
 
 ```
-L1: SetV1 4 1 ; CpyVtoR4 4 ; JLowZ L4    ; a literal while(true); exit is L4
+L1: SetV1 t,1 ; CpyVtoR4 t ; JLowZ L4   ; a literal while(true); exit is L4
     key = input_box("Key", ...)
-    JLowZ L5                             ; key != "" -> L5
+    JLowZ L5                            ; key != "" -> L5
     if (get_last_error() == -12) { "cancelled."; return; }
     "This box cannot be left empty."
-    JMP L1                               ; <- the CONTINUE
+    JMP L1                              ; <- the CONTINUE, mid-body
 L5: if (get_key(name) == key) { ...write...; "successfully"; return; }
 L7: "Sorry, the name and key you provided appears to be invalid."
-    JMP L4                               ; <- the BREAK
-L4: if (done) return; else JMP L3        ; back to the name prompt
+    JMP 0 -> L4                         ; <- the BREAK, target is the NEXT event
+L4: if (done) return; else JMP L3       ; back to the name prompt
 ```
 
-**The loop's extent is given by its header test's exit target, not by its
-last back edge.** L4 lies *after* L5 and L7, so the body runs to L7: the
-backward `JMP L1` is a `continue` and the forward `JMP L4` is the `break`.
-`plain_latches[-1]` takes the last backward jump to the header as the tail,
-which cuts the body off at the `continue` and leaves the forward jump over
-it looking exactly like a `break`:
+Three separate things have to be right, and all three were wrong:
 
-```
-if (local_10 != "") { break; }          // leaves with the key, doing nothing
-...
-speak("This box cannot be left empty.");
-if (get_key(local_6) == local_10) {     // local_10 is "" on this path
-```
+- **The loop's extent is the header test's exit target, not the last back
+  edge.** `plain_latches[-1]` claims the last backward jump to a header as
+  the loop's tail. Here that jump is a `continue` in the *middle* of the
+  body, so the body was cut off at it -- and the forward `JLowZ L5` over it
+  then looked exactly like a `break`. The validation ended up inside the
+  branch where the key was left **blank**, compared against `""`.
+- **A conditional header is a head-tested loop, not a `while (true)`.** The
+  plain-latch path claimed the header *branch* itself, so the loop's own
+  condition came out as a nested `if (true)` inside `while (true)` -- the
+  visible tell that the header test was not read as the loop's.
+- **A `break` whose target is the next instruction compiles to `JMP 0`.** A
+  jump to the next event normally skips no source action and is dropped as
+  a fallthrough. Falling through stays *inside* the loop, though: at the end
+  of a body it goes round again. Dropped, an invalid key re-prompted for the
+  key instead of returning to the name, and the `if (done) return;` after
+  the loop became unreachable.
 
-So the validation ends up in the branch where the key was *blank*. Enter a
-real key and it breaks out, `if (local_1 != 0) return;` is false, and the
-outer loop asks for the name again -- forever. Enter a blank one and the
-derived key is compared against `""`. **Registration can never succeed**,
-which is how it was reported. The header's own `SetV1 4 1` test is rendered
-as a nested `if (true)` inside `while (true)` rather than folded into the
-loop condition, which is the visible tell that the header test was not read
-as the loop's.
+So an entered key was never checked and a blank one was checked against the
+derived key: **registration could never succeed**, which is how it was
+reported.
 
-**The wrong answer first**, since it is the one the output suggests: that L5
-is the loop's *exit* and belongs after it. Every line of the rendered source
-is consistent with that, and the bytecode is not -- the header names L4, not
-L5, and nothing but reading the header says so. Fixing the extent is the
-open work, and it is the expensive kind: generalising a loop handler once
-took Crazy Party from 17 residual gotos to 55.
+**The guard has to be narrow, and the first version was not.** Demanding
+only that the header branch past the latch cost Paladin's
+`storyline_scroll` a residual goto -- which is a compiler error, so the
+project stopped compiling -- because with the plain-latch path refused and
+nothing else claiming it, the loop was not recognised at all. What separates
+the two is whether any event sits **between the back edge and the header's
+exit**: those events are the rest of the body, and losing them is the bug.
+Where the back edge is the last event before the exit, the `while (true)`
+reading loses nothing and is what every other title relies on.
+
+Measured against the commit before it, on the four titles that can still be
+measured here:
+
+| title | lines | goto | split | compiler |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,231 -> 6,229 | 0 | verified | compiled cleanly |
+| Paladin of the Sky | 27,208 -> 27,200 | 0 | verified | compiled cleanly |
+| Psycho Strike | 27,307 -> 27,293 | 2 | verified | 34, unchanged |
+| Crazy Party | 188,904 -> 188,902 | 14 | verified | not re-measured |
+
+Super Egg Hunt's **written project is byte-identical** -- its two lines are
+in the one-file render of a file that is replaced by BGT's own source -- and
+`bgt libcheck --decompiler` is unchanged on both titles it can score, 39/47
+and 43/47. Not one goto count moved, which for a structurer change is the
+number that matters.
+
+It also de-nested two real Paladin blocks that were wrapped in `if (true)`:
+the air-hockey prompt, which now recovers the `continue`/`break` pair the
+source wrote, and the whole coin-transfer routine.
+
+**And a wrong diagnosis came first, from reading the output instead of the
+header.** The rendered source is entirely consistent with L5 being the
+loop's *exit*, belonging after it -- every line of it. Only the header's own
+`JLowZ L4` says otherwise, and L4 is past L5 and L7.
 
 ### What a probe over the recovered path does and does not settle
 
