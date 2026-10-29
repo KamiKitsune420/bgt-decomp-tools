@@ -2742,6 +2742,75 @@ the call receives `delta_forward` instead). Promoting computed values the
 same way took Paladin from 0 compiler errors to 16, so it stays open rather
 than guessed at, and the signature to grep for is an `if` with two empty arms.
 
+#### A handle materialised inside a `||` -- open, diagnosed, three attempts rejected
+
+`find_walls` walks outward from the player looking for walls, and its loops
+are
+
+```
+while (true) {
+    i += 1;
+    if (arg2.length() <= i || arg2[i].length() <= j
+            || arg2[i][j] == 0 || play_wall_tone(i, j)) { ...; break; }
+}
+```
+
+The third operand needs `arg2[i]` in a slot, and the bytecode puts it there
+with `RefCpyV 11 ; CALLSYS opIndex ; RDR4 ; FREE 11` -- inside the arm,
+after the bounds check that guards it. **`objVariableTypes` names every
+object slot**, so that handle copy is emitted as a *statement*, and an event
+sorts by its own bytecode position while the branch sorts by the end of the
+chain. So it lands ahead of the whole `if`:
+
+```
+local_10 += 1;
+@local_11 = arg2[int(local_10)];        // indexes HERE
+if (((arg2.get_length() <= int(local_10)) || ...
+```
+
+The index therefore runs before the test that protects it, and walking into
+a map's last row throws `Index out of bounds` from
+`map::map_setup` -> `find_walls()` -> `find_walls(int16, int16, int[][]@)`.
+A statement cannot be conditional on the operand before it, so the only
+correct rendering folds the handle into the expression.
+
+**Three changes were tried together and all three are reverted.** Measured
+over all 926 of Paladin's bodies, by line count and by how many bare
+`expr[i];` statements the output carries:
+
+| `_short_circuit_slots` takes arm handles | `_bind` folds a named SC slot | `RefCpyV` marks its slot used | lines | bare index | fixed |
+|---|---|---|---|---|---|
+| -- | -- | -- | +0 | 2 | no |
+| -- | -- | yes | +38 | 0 | no |
+| -- | yes | -- | -44 | 2 | no |
+| yes | -- | -- | **-477** | **49** | no |
+| yes | yes | yes | **-530** | 0 | **yes** |
+
+Only the full set fixes it, and the first column is what does the damage on
+its own. Adding every handle written in a short-circuit arm catches real
+variables, not just temps: `load_event_flags` came out with its call
+duplicated, the wrong dictionary key read, and `bool` assigned to an `int`
+--
+
+```
+local_4 = arg0.exists("quest_text");        // int = bool
+arg0.get("tutorial_text", local_4);
+tutorial_text = arg0.exists("quest_text");  // wrong key
+```
+
+Narrowing it to a handle whose `FREE` is in the same arm -- a temp's whole
+lifetime is inside the arm where a real variable's is not -- moved -477 to
+-447 and changed nothing else. That is not the separating condition.
+
+**And libcheck did not see any of it**, which is the part worth keeping.
+`bgt libcheck --decompiler` scored **144/149 call sequences and 148/149
+literals -- unchanged -- while the output was badly wrong**, because it
+compares only the functions BGT ships source for: 149 of 926. Every
+regression above was in the game's own code. The two checks that caught it
+cost one command each: the **line count**, which moved by 530, and
+`bgt recover --compile`, which named the file and the line. A passing
+oracle is evidence about what it covers and nothing else.
+
 ### Reading the compiler, not only the reader
 
 This document's first rule is to read `asCReader` rather than infer the
