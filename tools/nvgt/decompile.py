@@ -2568,6 +2568,35 @@ class FuncDecompiler:
                 # also REFCPY'd, by the constructor's generated member
                 # initialisation, which the source never wrote.
                 self._stmt(f"@{dest.text} = {value.text};")
+            elif dest.is_ptr and dest.kind == "call":
+                # **`@party[i] = c`: the destination is the reference
+                # `opIndex` returned**, not a frame slot or a member, so none
+                # of the branches above claims it and the assignment was
+                # dropped on the floor.
+                #
+                # `deserialize_all` loads a saved game with
+                #
+                #     party.resize(n);
+                #     for (i = 0; i < n; i++) {
+                #         character@ c = character();
+                #         @party[i] = c;
+                #         party[i].deserialize(d, "party_" + i);
+                #     }
+                #
+                # and `resize` leaves null handles, so without the middle
+                # line `party[i]` is null and `.deserialize` dereferences it:
+                # **loading any save died with `Null pointer access`** in
+                # `deserialize_all` -> `load` -> `handle_file_menu`.
+                #
+                # The bytecode is not ambiguous about the direction --
+                # `VAR v23 ; PshV4 i ; PshGPtr party ; CALLSYS opIndex ;
+                # PshRPtr ; REFCPY` leaves the element reference on top, and
+                # `REFCPY` pops the destination first. Rendered without this
+                # branch the statement vanished; an earlier revision of the
+                # borrowed-handle rule emitted it *backwards*, as
+                # `@local_23 = party[i];`, which compiles and silently keeps
+                # the null.
+                self._stmt(f"@{dest.text} = {value.text};")
             self.value_reg = value
 
     # -- calls ----------------------------------------------------------------
