@@ -65,6 +65,7 @@ class FoldSafetyTests(unittest.TestCase):
         sim.jmp_spans = []
         sim.slot_writes = {}
         sim.short_circuit_slots = set()
+        sim.var_names = {}
         for name, value in attrs.items():
             setattr(sim, name, value)
         return sim

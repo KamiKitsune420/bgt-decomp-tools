@@ -1989,6 +1989,34 @@ class FuncDecompiler:
             # because that arm is always taken.
             return True
         if _is_repeatable(value):
+            # **...but a plain VARIABLE is only repeatable while it still
+            # holds the same value.** `_is_repeatable` says a variable can be
+            # written at several reads because reading it again costs nothing
+            # and yields the same thing -- which stops being true the moment
+            # something assigns it in between.
+            #
+            # Paladin's `get_percent` is the whole bug in six instructions:
+            #
+            #     SetV8 v4, 0.0        local_4 = 0.0
+            #     v2 = v4 ; v2 = arg1 ; DIVd v4, v2
+            #                          local_4 = arg1 / arg0
+            #     v2 = v4              <- the temp captures the RATIO
+            #     SetV8 v4, 100.0      local_4 = 100.0
+            #     MULd  v4, v2         100.0 * <the ratio>
+            #
+            # The temp holds the plain variable `local_4`, so the fold was
+            # taken and the read wrote `local_4` -- by which time it was
+            # 100.0. The recovered function computed `100.0 * 100.0`, and
+            # pressing G in a battle to hear the enemy's health said
+            # **10000 percent**. Every percentage in the game was that.
+            if value.kind == "var":
+                name = value.text.lstrip("@")
+                slot = next((s for s, n in self.var_names.items() if n == name),
+                            None)
+                if slot is not None and any(
+                        bound[0] < write <= self._pos()
+                        for write in self.slot_writes.get(slot, ())):
+                    return True
             return False
         if bound[1] == self.stmt_count:
             return False            # nothing has run since: the same moment
@@ -3785,11 +3813,28 @@ class FuncDecompiler:
         the low byte of the value register, which is what a bool leaves there.
         So a slot copied to the register and tested that way is a bool whatever
         a width-based type inference called it.
+
+        **A handle release sits between the merge and the test, and says
+        nothing about either.** Skipping only `SUSPEND` made this bail on the
+        `FREE` that ends the borrowed array element's lifetime, which is the
+        same instruction that broke the merge-shape lookup in
+        `_begin_bool_merge`. `map::check_interacts` is what that cost:
+
+            can_interact() && (interact_keys() || on_approach)
+
+        The inner `||` stores into a slot the width inference calls `int`, so
+        it needs this test -- and the slot *is* loaded and tested with
+        `CpyVtoR4 v7 ; JLowZ`, two instructions after a `FREE 4`. Declined,
+        the `||` was emitted as an `if` with one empty arm, its value thrown
+        away, and the outer `&&` paired `can_interact` with `on_approach`
+        directly. An interact then fired only when it triggers on approach,
+        whatever key was pressed -- so in the recovered game **nobody could
+        be talked to**.
         """
         seen_load = False
         for idx in range(start, min(start + window, len(self.instrs))):
             op = self.instrs[idx]
-            if op.name == "SUSPEND":
+            if op.name in ("SUSPEND", "FREE"):
                 continue
             if not seen_load:
                 if op.name in ("CpyVtoR4", "CpyVtoR8") and _s16(op.w_arg) == slot:
