@@ -547,6 +547,42 @@ What the binary has already given, so none of it needs redoing:
   cleanest evidence that this is a different AngelScript generation rather
   than a build with one field moved.
 
+**The functions are named now, which is the expensive part of reading a
+stripped reader.** Identified from the stub, each by evidence rather than
+position:
+
+| function | what it is | how it was identified |
+|---|---|---|
+| `FUN_0041F210` | `asCReader::Error` | formats the `LoadByteCode` literal at VA 0x004D2818, calls the message virtual, sets a flag at `+0xD`, returns -1 |
+| `FUN_00423310` | **`ReadEncodedUInt64`** | tests `& 0x7F == 0x7F`, `& 0x7E`, `& 0x7C` for the 8/6/5-byte widths and lifts bit 7 out as the sign flag (`CONCAT13(b >> 7, ...) & 0xFF7FFFFF`), reading one byte per virtual call and counting them at `+0x10` |
+| `FUN_004216D0` | `ReadTypeInfo` | 42 call sites, and `FUN_0041F290` -- a type reader -- is built out of it |
+| `FUN_0040A530` | `asCArray::PushLast` | grows by doubling, falls back to an inline buffer at `+0xC` |
+| `FUN_0041AEF0` | a map insert | binary tree walk keyed on `param_1[4]` |
+| `FUN_00412C00` | a bytecode walker | steps by `asBCTypeSize[asBCInfo[op].type]`, which also confirms `asBCInfo` entries are **16 bytes with `.type` at +8** |
+
+`ReadEncodedUInt64` is the one that matters: **87 call sites across the
+reader**, one per field read, so the field order of any record can be read
+off the call sequence instead of guessed at from bytes. `FUN_00421F10`
+(817 lines) and `FUN_004250C0` (566) are the remaining candidates for the
+function reader and are still unread.
+
+What the bytes say so far, for cross-checking that read rather than
+replacing it. `elemental_node`'s **factory** record at 0x6559 parses as
+name, data_type (`elemental_node@`), `nparams = 0`, `inOutFlags = 0`,
+`funcType = 1`, `defaults = 0`, owner `None` -- and then this reader takes
+the next byte as a **namespace string**, reads the one after as a body
+flags byte of 0x04 ("body omitted"), and stops at 0x656A, twenty-two bytes
+short of the next record at 0x657E. A factory is a script function with a
+body, so the namespace read is the misstep; which field really sits there
+is what the call sequence will say.
+
+**Do not settle it by scanning.** Both obvious readings of those bytes
+decode to *something*: with the flags byte at 0x6568 the body is four
+instructions ending 0x6582, with it at 0x6569 four ending 0x6583, and both
+run past the next record. `ALLOC` (opcode 64) and `RET` (10) both appear in
+the span, so a scan looking for a factory's shape finds candidates and
+none of them lands. This is the 92%-parse-rate lesson in miniature.
+
 Two things about the Ghidra run itself, both of which cost time:
 
 - **Import the PE stub, not the executable.** The full 2 MB file dies with
