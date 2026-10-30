@@ -360,6 +360,14 @@ class Atom:
 _CALL_RECEIVER = re.compile(
     r"((?:@?[A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*)\.([A-Za-z_]\w*)\s*\(")
 
+#: what an index expression indexes: `songlist` from `songlist[local_2]`,
+#: `arg0.interacts` from `arg0.interacts[i]`. A read through a subscript is
+#: as invalidated by a mutation of the container as a call is by one of its
+#: receiver, and `_CALL_RECEIVER` cannot see it because there is no `.name(`
+#: in it at all.
+_INDEX_BASE = re.compile(
+    r"((?:@?[A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*)\s*\[")
+
 
 def _mutates(statement: str, receiver: str) -> bool:
     """Could this statement have changed what `receiver` holds?
@@ -456,6 +464,46 @@ GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list|hold)_")
 #: lever: the folds that must stay folded are the ones inside a condition,
 #: and *that* is the distinction to find.
 DUPLICATE_FOLDS = 3
+
+#: ...and TWO where the compiler itself says the source declared a local.
+#:
+#: The threshold is the wrong lever because counting reads cannot tell a
+#: value the source NAMED from one the compiler materialised -- but the
+#: engine can, and `bgt oracle` settled how: an initialiser ends in a copy
+#: into the declared offset (`CpyVtoV4 dest, scratch`), while an expression
+#: temporary is consumed straight out of the slot the register left it in.
+#: `copy_binds` is the set of binds that arrived that way, and a value the
+#: source held in a local needs no third read to be worth keeping.
+#:
+#: This is neither of the two rejected attempts at the same thing.
+#: `DUPLICATE_CALL_FOLDS` lowered the threshold for any value whose text
+#: held a bracket, which is every condition temporary, and cost Crazy
+#: Party 14 -> 30 gotos; a condition temporary is not a copy destination
+#: at all, so it is not reached from here. And declaration-FORCING over
+#: this same set cost all four titles their goto counts, by making every
+#: short-circuit merge slot a variable -- promotion here goes through
+#: `_stale_fold` instead, which only promotes a declarable value and puts
+#: its assignment back at the bind, so nothing is declared that was not
+#: read twice to begin with.
+#:
+#: Paladin's `assign_song` is the case that found it. One `rand` call,
+#: kept in a local, read twice:
+#:
+#:     CALLINTF input_recorder::rand ; CpyRtoV4 5 ; CpyVtoV4 2 5
+#:     PshV4 2 -> array<string>::opIndex    song = songlist[index]
+#:     PshV4 2 -> array<T>::remove_at       songlist.remove_at(index)
+#:
+#: Folded into both reads it drew TWO random indexes, removed one song and
+#: returned a different one -- and the order came out reversed as well,
+#: since the read placed at the bind is the one the source wrote first.
+#: Those eight entries are the speaker songs, so a recovered build played
+#: the wrong music and drained its own playlist.
+DUPLICATE_COPY_FOLDS = 2
+
+
+def _fold_limit(fd: "FuncDecompiler", key: tuple) -> int:
+    """How many folds of this bind are too many."""
+    return (DUPLICATE_COPY_FOLDS if key in fd.copy_binds else DUPLICATE_FOLDS)
 
 
 def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
@@ -957,6 +1005,9 @@ class FuncDecompiler:
         #: Counted so the *next* simulation of this function can promote the
         #: ones folded more than once -- see `_body`.
         self.fold_reads: dict[tuple[int, int], int] = {}
+        #: (slot, bind position) for every bind that arrived through
+        #: `CpyVtoV4`/`CpyVtoV8` -- the compiler's own declaration idiom.
+        self.copy_binds: set[tuple[int, int]] = set()
         #: (slot, bind position) pairs a previous pass found folded more than
         #: once. Promoted on sight here, which is the only way to get the
         #: assignment in before the first read rather than after it.
@@ -1487,7 +1538,13 @@ class FuncDecompiler:
                 value = Atom("call",
                              f"({merge['first'].text} {merge['op']} {operand.text})",
                              data_type=DataType(token_type=67))
-            self._bind(_s16(ins.w_arg), value)
+            # The destination of this copy is a slot the SOURCE named,
+            # which is what the engine's own output says; record the bind
+            # so a second read of it counts as a duplication.
+            dest = _s16(ins.w_arg)
+            self._bind(dest, value)
+            if dest in self.temp_bound:
+                self.copy_binds.add((dest, self.temp_bound[dest][0]))
             return
         if name in ("SetV4", "SetV8", "SetV2", "SetV1"):
             if ins.string_const is not None:
@@ -2141,7 +2198,24 @@ class FuncDecompiler:
             return False
         if bound[1] == self.stmt_count:
             return False            # nothing has run since: the same moment
-        receivers = [m.group(1) for m in _CALL_RECEIVER.finditer(value.text)]
+        masked = _mask_strings(value.text)
+        receivers = [m.group(1) for m in _CALL_RECEIVER.finditer(masked)]
+        # **...and what the value INDEXES, which has no receiver syntax.**
+        # Paladin's `assign_song` keeps the song before removing it, because
+        # afterwards the index names a different element:
+        #
+        #     int index = recorder.rand(0, songlist.length() - 1);
+        #     string song = songlist[index];
+        #     songlist.remove_at(index);
+        #     return song;
+        #
+        # `songlist[index]` is a call -- `opIndex` -- so it is not
+        # repeatable and reaches this test, and then `_CALL_RECEIVER` finds
+        # nothing, because a subscript is not a `.name(`. Folded into the
+        # return, the read happened AFTER `remove_at` and the function
+        # returned the next song rather than the one it had just taken out
+        # of the list. Those eight entries are the speaker songs.
+        receivers += [m.group(1) for m in _INDEX_BASE.finditer(masked)]
         if not receivers:
             # No receiver to be invalidated through. A bare call's result can
             # still go stale through engine state -- `reserve_slot()` hands
@@ -2344,7 +2418,29 @@ class FuncDecompiler:
         exist does not compile at all, so the type decides. Both read paths --
         a value pushed from a slot, and an address dereferenced -- come
         through here, because either one can be the second read.
+
+        **And both have to ask the same question.** The duplication rule
+        below was here and `_stale_fold` was not, so an object or string
+        temp -- which only ever reaches a read through `_deref` -- got no
+        fold-safety test at all, while a scalar read through
+        `_slot_atom` got the whole of one. Two places answering one
+        question, with one of them stricter: the recurring shape of
+        everything in this file.
+
+        Paladin's `assign_song` is what it cost. A copy constructor is a
+        value taken NOW, which is the whole reason the source wrote one:
+
+            string song = songlist[index];
+            songlist.remove_at(index);
+            return song;
+
+        The copy folded into the `return`, so `songlist[index]` ran after
+        the `remove_at` and the function handed back whichever song had
+        shifted into that position -- and at the last index it read off
+        the end of the array. Those eight entries are the speaker songs.
         """
+        if self._stale_fold(off):
+            return self._promote_temp(off)
         value = self.temps[off]
         known = self.var_types.get(off) or value.data_type
         if known is not None and known.obj_type is not None                 and known.obj_type.name.startswith("$"):
@@ -2945,6 +3041,26 @@ class FuncDecompiler:
                 else:
                     self.consumed_temps.discard(dst.offset)
                     self.temps[dst.offset] = src
+                    # **A copy constructor is a value taken NOW.** This
+                    # wrote `temps` directly and never recorded where,
+                    # so `_stale_fold` returned False on the missing
+                    # bind and every fold rule in this file was
+                    # unreachable for a copy-constructed temp -- which
+                    # is the one kind of temp whose whole purpose is
+                    # that it was taken before something else ran.
+                    #
+                    # Paladin's `assign_song` is the case:
+                    #
+                    #     string song = songlist[index];
+                    #     songlist.remove_at(index);
+                    #     return song;
+                    #
+                    # The copy was dropped and `songlist[index]` moved
+                    # into the `return`, past the `remove_at` -- so the
+                    # function handed back whichever song had shifted
+                    # into that position, and at the last index it read
+                    # off the end of the array entirely.
+                    self.temp_bound[dst.offset] = (self._pos(), self.stmt_count)
                 return          # leftover stack slot (if any) feeds the ALLOC
             self.value_reg = Atom("call", args[0].text if args else '""')
             return
@@ -4992,7 +5108,7 @@ class ModuleDecompiler:
             # and compared the result three ways; the menu came back after
             # every selection.
             duplicates = {key for key, n in fd.fold_reads.items()
-                          if n >= DUPLICATE_FOLDS}
+                          if n >= _fold_limit(fd, key)}
             rounds = 0
             while rounds < 4 and (fd.var_names != initial_names or duplicates):
                 rounds += 1
@@ -5010,7 +5126,8 @@ class ModuleDecompiler:
                 # a promoted bind is no longer folded, so it stops being
                 # counted, and re-adding it would loop.
                 duplicates = {key for key, n in fd.fold_reads.items()
-                              if n >= DUPLICATE_FOLDS and key not in carried}
+                              if n >= _fold_limit(fd, key)
+                              and key not in carried}
             # Stripped metadata reuses scalar slots across sibling blocks.
             # Keep one declaration in the function and initialization at its
             # original position, rather than declaring in just the first arm.

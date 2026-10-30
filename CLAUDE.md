@@ -1237,16 +1237,104 @@ and the four snapshots, and **not one title's residual goto count, split
 verification or `libcheck` score moves**. For a fold change that is the number
 that matters.
 
-**What this does NOT fix, and the fixture now proves why.** The duplication
-family is a different mechanism: `int damage = do_damage(...)` is
-`CALL do_damage ; CpyRtoV4 3 ; CpyVtoV4 5 3`, and the value is read twice
-rather than read late, so staleness never fires. All four of Paladin's
-hp-drain attacks call it twice -- once to say the number and once to apply it,
-so the damage spoken is a different roll from the damage dealt -- and
-`dragon_strike` fires twice, `get_global_slot` runs either side of the
-`remove_at` that changes its answer, and `walk` runs `interact_in_location`
-twice per direction. Only knowing the slot is a declared local fixes those,
-and the table above is the price of knowing it that way.
+#### And the duplication family, which the same knowledge closes
+
+The declaration idiom is the right fact; **forcing** was the wrong thing to
+do with it. Used as a *threshold* instead it costs nothing, and it closed the
+family this file had recorded as open for a long time.
+
+`copy_binds` is the set of binds that arrived through `CpyVtoV4`/`CpyVtoV8` --
+the compiler saying "the source named this slot" -- and for those the
+duplicate-fold threshold is **two** rather than three. A value the source
+held in a local needs no third read to be worth keeping.
+
+That is not either of the rejected attempts, and the difference is exactly
+what the engine supplied. `DUPLICATE_CALL_FOLDS` lowered the threshold for
+any value whose *text* contained a bracket, which is every condition
+temporary, and cost Crazy Party 14 -> 30 gotos. A condition temporary is not
+a copy destination at all, so it is not reached from here. And promotion goes
+through `_stale_fold`, which only promotes a declarable value and puts the
+assignment back **at the bind** -- so nothing is declared that was not read
+twice to begin with, and the statements come out in the order the source
+wrote them.
+
+**Three more gaps had to be closed with it**, and the first is the one worth
+remembering, because it made every rule in this file unreachable for a whole
+class of value:
+
+- **The dereferenced read path never asked `_stale_fold`.** `_slot_atom`
+  handles a value *pushed from a slot* and asks the whole question;
+  `_read_temp` handles an *address dereferenced* and asked only about
+  duplication -- while its own docstring claimed both paths came through it.
+  An object or string temp only ever reaches a read through `_deref`, so it
+  had no fold-safety test at all. Two places answering one question with one
+  of them stricter: the shape this file keeps recording.
+- **A copy-constructed temp had no bind position.** The constructor handler
+  wrote `self.temps[off]` directly rather than through `_bind`, so
+  `temp_bound` was never set and `_stale_fold` returned False on the missing
+  bind. That is the one kind of temp whose entire purpose is that it was
+  taken before something else ran.
+- **An indexed read has no receiver syntax.** `_CALL_RECEIVER` looks for
+  `name.method(`; `songlist[index]` has none, so "no receiver to be
+  invalidated through" let it fold. `_INDEX_BASE` supplies what the value
+  indexes.
+
+`assign_song` is the function that needed all four, and it was reported from
+the game as wrong music on the recreation floors:
+
+```
+    CALLINTF input_recorder::rand ; CpyRtoV4 5 ; CpyVtoV4 2 5
+    PshV4 2 -> array<string>::opIndex       string song = songlist[index];
+    PshV4 2 -> array<T>::remove_at          songlist.remove_at(index);
+    PSF 6 -> string::$beh0                  return song;
+```
+
+One `rand`, kept in a local, read twice, with the song taken **before** the
+list is shortened. It recovered as two `rand` calls with the read moved past
+the removal, so it removed one song and returned a different one -- and at
+the last index `songlist[index]` reads off the end of the array. Eight
+speakers on a recreation floor, so the eighth threw.
+
+What else it fixed, all of it previously recorded here as known and open:
+
+| duplication | call sites before | after |
+|---|---|---|
+| `do_damage` (Paladin) | 17 | **13** |
+| `interact_in_location` | 9 | **5** |
+| `dragon_strike` | 8 | **7** |
+| `get_global_slot` | 3 | **2** |
+
+`do_damage` is the one with teeth. All four hp-drain attacks called it twice,
+once to say the number and once to apply it, so the enemy healed by a
+different amount than it dealt and the number spoken was a third value
+again. Super Egg Hunt loses three more, the ones this file lists as accepted
+costs: `stick.get_x`/`get_y`, `get_total_distance`, and a menu item callback.
+
+Measured against the commit before it:
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,225 -> 6,243 | 0 | verified | 1,611 -> 1,608 |
+| Paladin of the Sky | 27,208 -> 27,327 | 0 | verified | 7,142 -> 7,110 |
+| Psycho Strike | 27,295 -> 27,467 | 2 | verified | 6,467 -> 6,443 |
+| Crazy Party | 188,926 -> 192,485 | 14 | verified | 90,628 -> 90,074 |
+
+**Not one goto count moved**, and Crazy Party's fourteen are the same
+fourteen labels in the same four files. That title is the measurement that
+matters here, because it is the one every over-broad fold change has broken:
+14 -> 30 for the call-text threshold, 14 -> 44 for dropping the declaration
+order rule, 14 -> 90 for forcing on the copy idiom.
+
+**The call count falling is the result, not a side effect.** A duplication
+count is a correctness number: running a call once per read runs it once per
+read. **554 of them on Crazy Party** -- and this file records the rejected
+call-text threshold as removing "561 duplicated calls" from that title at a
+cost of 16 compiler errors. Almost exactly the same duplications, for
+nothing, once the engine is asked which slots the source named instead of
+guessing from the shape of an expression.
+
+The line count rising is the same fact from the other side: each of those is
+a local the source declared and this had been inlining.
 
 ## The compiler is the judge, and it has to be driven
 
@@ -1300,10 +1388,10 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,225 | 0 | 0 | yes | 1,611 | **compiled cleanly** |
-| Paladin of the Sky | 27,208 | 0 | 0 | yes | 7,142 | **compiled cleanly** |
-| Psycho Strike | 27,295 | 2 | 0 | yes | 6,467 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 188,926 | 14 | 0 | yes | 90,628 | 14, every one a residual `goto` |
+| Super Egg Hunt | 6,243 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
+| Paladin of the Sky | 27,327 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
+| Psycho Strike | 27,467 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,485 | 14 | 0 | yes | 90,074 | 14, every one a residual `goto` |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
