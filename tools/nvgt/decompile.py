@@ -402,6 +402,16 @@ def _prop_receiver(text: str) -> str:
     return re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip() or "this"
 
 
+def _bare_type(dt) -> str:
+    """A type without the decoration that does not change what it IS.
+
+    `const bool&out` and `bool` are the same type for the purpose of
+    asking whether a `?&` argument's declared type matches the slot's.
+    """
+    return (dt.format().removeprefix("const ").replace("&", "")
+            .replace("in", "").replace("out", "").strip())
+
+
 def _is_repeatable(a: Atom) -> bool:
     """Whether writing this value at several reads keeps the program's meaning.
 
@@ -2884,7 +2894,36 @@ class FuncDecompiler:
             direction = fr.in_out_flags[index] if index < len(fr.in_out_flags) else 0
             if direction & 2 and arg.is_ptr and arg.offset is not None and arg.offset > 0:
                 off = arg.offset
-                if not self.is_named(off):
+                # **A `?&` argument carries its type to the callee, so a
+                # named slot of the wrong type cannot be handed over.**
+                # AngelScript passes the value address AND a type id,
+                # and the callee compares them: `dictionary::get` fails
+                # and leaves the variable untouched when the stored
+                # value is not of the type the caller declared.
+                #
+                # Paladin's `load_event_flags` reads its flags into one
+                # reused slot:
+                #
+                #     TYPEID 3 ; bool      <- what the source declared
+                #     VAR 4
+                #     dictionary::get("tutorial_text", ...)
+                #     LDG tutorial_text ; WRTV1 4
+                #
+                # That slot also carries an int elsewhere in the body,
+                # so it is declared `int` and the boolean uses are
+                # converted -- which is right for arithmetic and wrong
+                # here, because the type is the call. Every `bool` flag
+                # in the save silently stopped being restored:
+                # `tutorial_text` came back false, so the next battle
+                # ran the tutorial block, which speaks the tutorial
+                # text AND sets `immune_to_magic = true` -- so the
+                # dragon strike scroll did no damage. Reported from the
+                # game as two bugs; it is one.
+                declared = self.var_types.get(off)
+                wrong_type = (dt.token_type == 60 and dt.is_reference
+                              and declared is not None
+                              and _bare_type(output_type) != _bare_type(declared))
+                if not self.is_named(off) or wrong_type:
                     value = self.temps.get(off)
                     local = f"__nvgt_out_{off}_{ins.pos}"
                     output_type = copy.copy(output_type)

@@ -1336,6 +1336,68 @@ guessing from the shape of an expression.
 The line count rising is the same fact from the other side: each of those is
 a local the source declared and this had been inlining.
 
+### A `?&` argument carries its type, so the slot's type is the call
+
+A **`?&in` / `?&out` parameter (token 60)** takes two stack slots for one
+declared parameter: the value address and a hidden `TYPEID`. This file already
+records that as a stack-layout rule. It is also a **semantic** one, and that
+half was missing: the callee *compares* the type id, so handing it a variable
+of the wrong type is not a cosmetic difference. `dictionary::get` returns
+false and **leaves the variable untouched** when the stored value is not of
+the type the caller declared.
+
+That matters because BGT reuses one slot for several source locals, and the
+decompiler declares such a slot with its *numeric* type and converts the
+boolean uses -- which is right for arithmetic and wrong for a `?&` argument.
+
+Paladin's `load_event_flags` reads its save flags through one reused slot:
+
+```
+TYPEID 3  ; bool                 <- what the source declared
+VAR    4
+dictionary::get("tutorial_text", ...)
+LDG tutorial_text ; WRTV1 4      <- a one-byte write
+```
+
+Slot 4 also carries an `int` elsewhere in that body, so it was declared `int`
+and passed as one. **Every `bool` flag in the save therefore stopped being
+restored, silently** -- six of them in Paladin: `tutorial_text`,
+`disable_saving`, `initial_intro`, `beat_protector`, `play_wall_sound`, and
+`include_a` in `gift`.
+
+**One of those was reported as two separate bugs.** `tutorial_text` came back
+false from every load, so the next battle entered the `if (!tutorial_text)`
+block -- which speaks the tutorial text *and* sets
+`arg0.immune_to_magic = true`. So the player got the tutorial dialogue in a
+late-game fight, and the dragon strike scroll did no damage in it, because
+the enemy had been made immune to magic by a block that should never have
+run. Reading the two symptoms as one cause is what found it.
+
+The fix reuses the path that was already right: a `?&` argument whose TYPEID
+type differs from the slot's declared type gets a synthesised out local of
+the **TYPEID's** type, exactly as an unnamed slot already did. The named-slot
+shortcut was the bug -- it passed the variable and dropped the type.
+
+Measured on the four titles, and the scope is the evidence:
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,243 -> 6,243 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,327 -> 27,340 | 0 | verified | 7,110 |
+| Psycho Strike | 27,467 -> 27,468 | 2 | verified | 6,443 |
+| Crazy Party | 192,485 -> 192,485 | 14 | verified | 90,074 |
+
+Two titles do not move at all and the other two move by the lines the fix
+adds. Nothing else in the corpus passes a `?&` argument with a type-mismatched
+slot, which is what a correctly scoped change looks like.
+
+**Still open, found alongside it:** a `dictionary::get` whose out argument is
+a synthesised local is emitted **twice** -- once as a bare statement and once
+as the initialiser of the `__nvgt_ret` that holds its return value. `get` is
+a pure read so nothing observable changes, but it is a duplicated call and it
+is in every save-loading body. Not fixed here, because it needs the deferred
+out-call path rather than this one.
+
 ## The compiler is the judge, and it has to be driven
 
 `bgt.exe` takes a script path and *runs* it. There is no console mode and no
@@ -1389,8 +1451,8 @@ checks say:
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 6,243 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
-| Paladin of the Sky | 27,327 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
-| Psycho Strike | 27,467 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
+| Paladin of the Sky | 27,340 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
+| Psycho Strike | 27,468 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
 | Crazy Party | 192,485 | 14 | 0 | yes | 90,074 | 14, every one a residual `goto` |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
