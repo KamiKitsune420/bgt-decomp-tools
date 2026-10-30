@@ -2389,7 +2389,10 @@ def test_a_zero_parameter_funcdef_may_still_write_both_lists():
     all take at least one parameter. Its nine bytes only add up unguarded.
     """
     #      f   len2 "phone_callback"            ret  n   inout fT  dflt own n  ns traits
-    record = (b"f" + b"phone_callback"
+    # 0x1C is the len2 length prefix: 2 * len("phone_callback"). Spelled as an
+    # escape rather than written as a raw control byte, which a reader cannot
+    # see and which is indistinguishable from an escape a shell ate.
+    record = (b"f\x1c" + b"phone_callback"
               + bytes([0x04, 0x00, 0x00, 0x04, 0x00, 0x00, 0x6E, 0x00, 0x01]))
 
     r = as_module.Reader(record, as_module.LEN2, 0, unguarded_lists=True)

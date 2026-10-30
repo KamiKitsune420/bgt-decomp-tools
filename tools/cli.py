@@ -52,6 +52,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_compile, bgt_crack, bgt_ghidra,
+                   bgt_oracle,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_unpack, bgt_validate,
                    bgtlib, engine, script_files)
@@ -63,6 +64,7 @@ except ImportError:       # run directly from a checkout
     import as_write
     import bgt_api
     import bgt_apicheck
+    import bgt_oracle
     import bgt_compile
     import bgt_crack
     import bgt_ghidra
@@ -285,6 +287,21 @@ def cmd_api(args: argparse.Namespace) -> int:
     if args.missing:
         argv.append("--missing")
     return _run(bgt_api.main, argv, prog="bgt api")
+
+
+def cmd_oracle(args: argparse.Namespace) -> int:
+    """`bgt oracle` asks whether a recovery is the SAME PROGRAM, not a valid one."""
+    argv = []
+    if args.out:
+        argv += ["-o", args.out]
+    if args.compiler:
+        argv += ["--compiler", args.compiler]
+    argv += ["--timeout", str(args.timeout)]
+    if args.no_stock_includes:
+        argv.append("--no-stock-includes")
+    if args.json:
+        argv.append("--json")
+    return bgt_oracle.main(argv)
 
 
 def cmd_apicheck(args: argparse.Namespace) -> int:
@@ -687,6 +704,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--compiler", help="the bgt.exe to point them at")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_verbs)
+
+    p = sub.add_parser("oracle",
+                       help="round-trip a source whose answer is known, and "
+                            "compare what the two builds compute")
+    p.add_argument("-o", "--out", help="where to work (default: a temp folder)")
+    p.add_argument("--compiler", help="path to bgt.exe")
+    p.add_argument("--timeout", type=float, default=600.0)
+    p.add_argument("--no-stock-includes", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_oracle)
 
     p = sub.add_parser("apicheck",
                        help="every call in a recovered project, against every "

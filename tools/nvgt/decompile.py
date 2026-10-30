@@ -379,6 +379,21 @@ def _mutates(statement: str, receiver: str) -> bool:
                      r"(?:[-+*/%|&^]|<<|>>)?=(?!=)", statement))
 
 
+def _prop_receiver(text: str) -> str:
+    """The object a property read is a property OF, for `_mutates`.
+
+    `this` for a bare member, because a method call on the object can change
+    any of its fields and a snapshot of one is stale after it. Otherwise
+    everything before the last `.`, with a trailing subscript dropped:
+    `arg0.interacts[i].mode` depends on `arg0.interacts`, which is what
+    `remove_at` is called on by name.
+    """
+    head = text.rsplit(".", 1)[0] if "." in text else ""
+    if not head:
+        return "this"
+    return re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip() or "this"
+
+
 def _is_repeatable(a: Atom) -> bool:
     """Whether writing this value at several reads keeps the program's meaning.
 
@@ -861,6 +876,10 @@ class FuncDecompiler:
         # source's own locals.
         self.short_circuit_slots = self._short_circuit_slots()
         forced |= prefix_forced - self.short_circuit_slots
+        #: branch instructions a merged switch chain consumed, which the
+        #: simulation must not emit. Filled by `_dense_switch_pattern`,
+        #: so it has to exist before the patterns are computed.
+        self.merged_switch_guards: set[int] = set()
         self.sparse_switches = {index: pattern for index in range(len(self.instrs))
                                if (pattern := self._sparse_switch_pattern(index)) is not None}
         # The dense form -- a jump table -- yields the same tuple, so the rest
@@ -1267,6 +1286,7 @@ class FuncDecompiler:
                     for v in decls:
                         redeclare.setdefault(v.declared_at, []).append(v)
         self.skip_indexes.update(self.generated_member_init)
+        self.skip_indexes.update(self.merged_switch_guards)
         while self.k < n:
             if self.k in self.skip_indexes:
                 self.k += 1
@@ -2085,6 +2105,39 @@ class FuncDecompiler:
                        for write in self.slot_writes.get(slot_of[name], ()))
                    for name in names if name in slot_of):
                 return True
+            # **...and a MEMBER read goes stale through a call on its own
+            # object, which no slot write can show.** The test above asks
+            # which of the frame's slots the expression reads; `level` reads
+            # none, so a snapshot of a member folded straight through
+            # whatever ran in between.
+            #
+            # Paladin's `calculate_experience` is four of them:
+            #
+            #     int old_level = level;          LoadThisR ; RDR4 2 ; CpyVtoV4 N 2
+            #     int old_strength = strength;    ...three more like it
+            #     while (...) gain_level();
+            #     if (old_level == level) return; // nothing to report
+            #     "...Strength has increased by " + (strength - old_strength)
+            #
+            # Folded, every snapshot was re-read *after* the loop, so the
+            # guard became `if (level == level)` -- always true -- and the
+            # message said `+0` to everything. A level-up was therefore
+            # silent, which is what "the math is very broken" looked like
+            # from inside the game.
+            #
+            # `this` is the receiver for a bare member, and deliberately so:
+            # a method can change any field, so any call on the object
+            # invalidates the snapshot. That is only broad-sounding --
+            # `bound[1] == self.stmt_count` has already excluded every read
+            # that happens at the moment of the bind, which is what an
+            # ordinary expression temporary is. What is left is a value the
+            # compiler parked in a slot and read later, and the compiler does
+            # that where the source declared a local.
+            if value.kind == "prop" and bound[1] != self.stmt_count:
+                owner = _prop_receiver(value.text)
+                if any(_mutates(text, owner)
+                       for text in self.stmt_texts[bound[1]:]):
+                    return declarable
             return False
         if bound[1] == self.stmt_count:
             return False            # nothing has run since: the same moment
@@ -3373,7 +3426,16 @@ class FuncDecompiler:
         # first switch's extent swallows the later ranges' bodies -- they come
         # out as `return` statements with no `case` above them, which compiles
         # and answers the wrong thing. So follow the chain and merge.
+        # This table's OWN range guard, as opposed to the ones bounding the
+        # whole switch: `CMPIi arg0, 3 ; JP next_range`. If the chain turns
+        # out to be one table it stays, because its target is then the
+        # switch's own exit and the `if` it produces is correct. If tables
+        # merge, it is wrong -- see where it is registered below.
+        own_guard = next((i for i in range(index - 1, max(-1, index - 9), -1)
+                          if self.instrs[i].name in ("JP", "JS", "JNS", "JNP")),
+                         None)
         seen = {index}
+        merged = False            # a dense table OR an equality tail
         while next_range is not None:
             following = self.pos_of.get(next_range)
             if following is None:
@@ -3387,12 +3449,14 @@ class FuncDecompiler:
                 if link is None:
                     break
                 cursor, more_cases, next_range = link
+                merged = True
                 cases += [case for case in more_cases if case[1] != default]
                 continue
             more = self._dense_table(nxt)
             if more is None or more[3] != selector:
                 break
             seen.add(nxt)
+            merged = True
             cursor = max(cursor, more[0])
             cases += [case for case in more[1] if case[1] != default]
             next_range = more[4]
@@ -3414,6 +3478,25 @@ class FuncDecompiler:
                 joins.append(_jump_target(body[-1]))
         if not joins or len(set(joins)) != 1:
             return None
+        # **A merged chain must lose the first table's own range guard.** The
+        # guards before `JMPP` are simulated as ordinary branches -- only the
+        # span *after* it is skipped -- so that guard survives the merge as a
+        # real `if`, and its target is `next_range`, which merging has just
+        # moved *inside* the switch. Every case the later tables contributed
+        # then sits inside `if (arg0 <= 3)` and cannot be reached:
+        #
+        #     switch (day) { case 1..3, case 20, case 21, case 30, case 31 }
+        #
+        # came back with all seven cases, correctly merged, wrapped in
+        # `if (arg0 <= 3)` -- so `scattered_switch(21)` answered the default.
+        # The case list was right, which is why this survived the fix that
+        # introduced the merge: a count can be right while the program is
+        # wrong, and only running it says which.
+        #
+        # One table keeps its guard, because then the guard's target *is* the
+        # switch's exit and the `if` is simply a redundant bound.
+        if merged and own_guard is not None:
+            self.merged_switch_guards.add(own_guard)
         return cursor, cases, default, joins[0], selector
 
     def _equality_chain(self, index, cursor, selector, default):

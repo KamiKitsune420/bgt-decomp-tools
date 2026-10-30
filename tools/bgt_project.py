@@ -415,7 +415,7 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method) or len(method) < 3:
             continue
         documented = types[owner.name]["methods"] + types[owner.name]["properties"]
-        if any(re.search(r"%s" % re.escape(method), line) for line in documented):
+        if any(re.search(r"\b%s\b" % re.escape(method), line) for line in documented):
             continue
         if method in installed:               # registered, merely undocumented
             continue
@@ -1165,6 +1165,60 @@ def verify(sections: List[Section], order: List[str], source: str) -> bool:
     return strip(rebuilt) == strip(source)
 
 
+def declares_anything(text: str) -> bool:
+    """Is there anything here but comments, blank lines and `#include`?
+
+    What BGT means by "The script section is empty", and it is not a cosmetic
+    warning: measured, the engine shows it in a modal dialog and then **writes
+    no executable at all**.
+
+    The scrubber that reads calls back is reused rather than a second one
+    written, because a `//` can sit inside a string literal and a quote inside
+    a comment -- two passes over one text desynchronise, which is how
+    `url_get("http://...")` once turned a one-argument call into a
+    thirty-three argument report.
+    """
+    stripped = bgt_apicheck.scrub(text)
+    return bool(re.sub(r'(?m)^\s*#include\b.*$', "", stripped).strip())
+
+
+def inline_prefix(order: List[str],
+                  written_text: Dict[str, List[str]]) -> Tuple[List[str], Optional[str]]:
+    """Which sections the entry script carries inline, and any problem with that.
+
+    The entry script holds the text of a **prefix** of the order rather than
+    only `#include` lines, and takes as many sections as it needs before one
+    declares something.
+
+    A prefix is what keeps the concatenation exactly as the module had it. The
+    inlined text is emitted ahead of every `#include`, so inlining anything
+    but a prefix moves a declaration -- and `verify` compares the sections
+    against the one-file render, so it could not see that happen.
+
+    **Declaring something is the requirement, and naming the types section was
+    a proxy for it that failed.** A module with no enums, typedefs or funcdefs
+    still gets a `types.bgt` section, holding the decompiler's comment banner
+    and nothing else, so the old test inlined a section that declared nothing
+    and the entry script stayed empty. `bgt recover --compile` then reported
+    `compiled cleanly` while `--build release` produced 901,120 bytes of
+    runtime stub with no script attached -- which Windows declines to launch
+    at all, as "not a valid application for this OS platform".
+    """
+    inlined: List[str] = []
+    for path in order:
+        if path not in written_text:
+            # A substituted library file: BGT's own source is already on disk
+            # there, so there is nothing of ours to carry, and the prefix stops
+            # rather than skipping past it and reordering the rest.
+            break
+        inlined.append(path)
+        if declares_anything("\n".join(written_text[path])):
+            return inlined, None
+    return [], ("the entry script declares nothing of the module's own, so it "
+                "carries a marker global: BGT writes no executable for a script "
+                "section it calls empty")
+
+
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
             timeout: float = 600.0, with_data: bool = True,
@@ -1245,10 +1299,12 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     # A substituted file is already written, so its decompiled sections must
     # not be written over it -- but its place in the order is kept.
     written = [s for s in sections if s.origin not in stock_used]
-    # Only the types section is inlined into the entry script: it is first in
-    # the order, so nothing moves, and it is the one section with no natural
-    # file of its own.
-    first_path = order[0] if order and order[0] == "includes/types.bgt" else None
+    written_text: Dict[str, List[str]] = {}
+    for section in written:
+        written_text.setdefault(section.path, []).append(section.text)
+    inlined_paths, inline_problem = inline_prefix(order, written_text)
+    if inline_problem:
+        problems.append(inline_problem)
 
     project = Project(name=name, out_dir=out_dir, entry=name + ".bgt",
                       files=[], includes=order, plugins=plugins,
@@ -1257,12 +1313,12 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
 
     # The entry script, plus one file per path in the order -- except the
     # inlined one, whose text the entry script carries instead.
-    progress("writing %d files" % (len(order) + (0 if first_path else 1)))
+    progress("writing %d files" % (len(order) + 1 - len(inlined_paths)))
     by_path: Dict[str, List[Section]] = {}
     for section in written:
         by_path.setdefault(section.path, []).append(section)
     for path, group in by_path.items():
-        if path == first_path:
+        if path in inlined_paths:
             # The entry script carries this section's text inline, so writing
             # the file too leaves one in the project that nothing includes --
             # and, if anyone does include it, a duplicate declaration.
@@ -1322,11 +1378,18 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     # The first section is `types.bgt` (enums, typedefs, funcdefs), and it is
     # first in the order, so moving its text into the entry script leaves that
     # order exactly as the module had it.
-    inlined = [section for section in written if section.path == first_path]
+    inlined = [section for path in inlined_paths
+               for section in written if section.path == path]
     for section in inlined:
         entry_lines.append(section.text.rstrip())
         entry_lines.append("")
-    included = [path for path in order if not (inlined and path == first_path)]
+    included = [path for path in order if path not in inlined_paths]
+    if not inlined_paths:
+        entry_lines.append("// BGT writes no executable for a script section it")
+        entry_lines.append("// calls empty, and nothing of the module can go first")
+        entry_lines.append("// here without moving a declaration. One unused global:")
+        entry_lines.append("int __bgt_recovered_entry = 0;")
+        entry_lines.append("")
     entry_lines += ['#include "%s"' % path for path in included]
     entry_lines.append("")
     entry_path = os.path.join(out_dir, project.entry)
@@ -1530,7 +1593,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                    # script had inlined it -- a file list nothing reads is
                    # still a claim about the project.
                    "includes": included,
-                   "inlined": [first_path] if inlined else [],
+                   "inlined": list(inlined_paths),
                    "order": order,
                    "plugins": plugins, "newer_engine": newer,
                    "script_loaded_dlls": loaded,

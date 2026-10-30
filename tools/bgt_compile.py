@@ -63,6 +63,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+try:                      # installed as a package
+    from . import bgtlib
+except ImportError:       # run directly from a checkout
+    import bgtlib
+
 DEFAULT_COMPILERS = (
     r"C:\Program Files (x86)\BGT\bgt.exe",
     r"C:\Program Files\BGT\bgt.exe",
@@ -203,11 +208,17 @@ class Diagnostic:
 
 @dataclass
 class Report:
-    outcome: str                   # compiled | errors | started | timeout | nodriver
+    outcome: str                   # compiled | errors | started | timeout
+                                   # | nodriver | nobuild | crashed
     diagnostics: List[Diagnostic] = field(default_factory=list)
     title: str = ""
     raw: str = ""
     exit_code: int = -1
+    #: why a build produced no usable executable. Carried separately from
+    #: `raw`, which holds what the compiler said about the *source* and is
+    #: worth keeping alongside: the two answer different questions, and an
+    #: outcome with no explanation reads like a result.
+    reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -241,6 +252,8 @@ class Report:
                 if line.strip()]
 
     def summary(self) -> str:
+        if self.outcome == "nobuild":
+            return "the compiler reported no errors and still built nothing: %s" % self.reason
         if self.outcome == "compiled":
             return "compiled cleanly"
         if self.outcome == "started":
@@ -750,7 +763,76 @@ def check(script: str, compiler: Optional[str] = None, timeout: float = 60.0,
             return Report(outcome="nodriver",
                           raw="another compile check still holds %s after %ds"
                               % (_LOCK, int(timeout)))
-        return _check(exe, script, timeout, keep_driver, build, workdir)
+        before = _built_stamp(script)
+        report = _check(exe, script, timeout, keep_driver, build, workdir)
+        if build and report.ok:
+            unbuilt = _unbuilt(script, before)
+            if unbuilt:
+                return Report(outcome="nobuild", diagnostics=report.diagnostics,
+                              raw=report.raw, title=report.title,
+                              exit_code=report.exit_code, said=report.said,
+                              reason=unbuilt)
+        return report
+
+
+def built_path(script: str) -> str:
+    """Where `-c` / `-C` writes the executable: beside the script, same stem."""
+    return os.path.splitext(os.path.abspath(script))[0] + ".exe"
+
+
+def _built_stamp(script: str) -> Optional[Tuple[int, int]]:
+    """(mtime_ns, size) of any executable already there, or None.
+
+    Taken *before* the compile, because a stale executable from an earlier
+    successful build is exactly what makes a failed build look like a good
+    one -- and the next thing anyone does with a build is run the file.
+    """
+    try:
+        st = os.stat(built_path(script))
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _unbuilt(script: str, before: Optional[Tuple[int, int]]) -> Optional[str]:
+    """Why this build produced no usable executable, or None if it did.
+
+    **A build that reports success and writes nothing is the worst outcome
+    this driver can produce**, and it happened for as long as `--build`
+    existed in a second shape after the `$Switch` one. BGT writes the
+    executable only *after* its report window is answered, and it declines
+    to write one at all when the entry script declares nothing of its own
+    ("The script section is empty"). Measured: an includes-only entry script
+    compiles with that warning, the driver dismisses the window, the engine
+    exits 0, and either no file appears or a truncated copy of the runtime
+    stub does -- 901,120 bytes of BGT with no script attached, which Windows
+    then refuses to launch as "not a valid application".
+
+    So the artifact is checked rather than inferred, on the same principle as
+    every other layer here: the trailer is `bgtlib`'s to read, a BGT
+    executable is the stub plus an overlay plus that trailer, and a file
+    without one is not a game however plausible its size.
+    """
+    built = built_path(script)
+    name = os.path.basename(built)
+    try:
+        st = os.stat(built)
+    except OSError:
+        return "no %s was written" % name
+    if before is not None and (st.st_mtime_ns, st.st_size) == before:
+        return ("%s is the one that was already there, untouched -- this build "
+                "wrote nothing" % name)
+    try:
+        with open(built, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return "could not read %s (%s)" % (name, exc)
+    try:
+        bgtlib.read_trailer(data)
+    except Exception as exc:
+        return ("%s has no script attached (%s) -- it is the runtime stub, not "
+                "a game" % (name, exc))
+    return None
 
 
 @contextlib.contextmanager

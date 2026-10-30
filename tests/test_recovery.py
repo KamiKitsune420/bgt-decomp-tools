@@ -570,6 +570,131 @@ def test_verify_rejects_a_split_that_reorders_declarations():
     assert not bgt_project.verify(sections, list(reversed(order)), source)
 
 
+# -- the entry script, and what BGT calls an empty script section -----------
+
+def test_the_entry_script_always_declares_something():
+    """A declaration-empty entry script builds no executable at all.
+
+    BGT reports "The script section is empty" for a file that declares
+    nothing, in a modal dialog, and then writes **no executable**. Measured:
+    an includes-only entry script compiled with that warning, the driver
+    dismissed the window, the engine exited 0 -- and `--build release` left
+    901,120 bytes of runtime stub with no script attached, which Windows
+    declines to launch as "not a valid application for this OS platform".
+
+    The old rule inlined the section at `includes/types.bgt`, as a proxy for
+    "the section that declares the module's types". A module with no enums,
+    typedefs or funcdefs still gets that section -- holding the decompiler's
+    comment banner and nothing else -- so the proxy inlined a banner and the
+    entry script stayed empty.
+    """
+    banner = "// Decompiled from NVGT/AngelScript bytecode.\n// Comments are not recoverable;\n"
+    order = ["includes/types.bgt", "includes/classes/holder.bgt",
+             "includes/functions/part_0.bgt"]
+    written = {"includes/types.bgt": [banner],
+               "includes/classes/holder.bgt": ["class holder { int level; }\n"],
+               "includes/functions/part_0.bgt": ["void main() {}\n"]}
+
+    inlined, problem = bgt_project.inline_prefix(order, written)
+    assert problem is None
+    # A PREFIX, so the concatenation is unchanged -- the banner cannot be
+    # skipped over, because the inlined text is emitted ahead of every
+    # `#include` and skipping would move a declaration.
+    assert inlined == ["includes/types.bgt", "includes/classes/holder.bgt"]
+
+    # ...and where the first section does declare something, nothing changes.
+    written["includes/types.bgt"] = [banner + "enum team { red, blue }\n"]
+    inlined, problem = bgt_project.inline_prefix(order, written)
+    assert problem is None
+    assert inlined == ["includes/types.bgt"]
+
+
+def test_an_include_line_is_not_a_declaration():
+    """`#include` is what an empty section is usually full of.
+
+    The word boundaries in this pattern were once eaten by a shell and became
+    literal backspace bytes, so it matched nothing and an includes-only file
+    was judged to declare something -- which is the one case the whole check
+    exists for.
+    """
+    assert not bgt_project.declares_anything('#include "includes/a.bgt"\n')
+    assert not bgt_project.declares_anything("// just a comment\n")
+    assert not bgt_project.declares_anything("   \n  \n")
+    assert bgt_project.declares_anything("int g = 0;")
+    # A `//` inside a string literal must not eat the rest of the line: that
+    # is the trap `scrub` exists for, and a second scrubber would drift.
+    assert bgt_project.declares_anything('string u = "http://x/y";')
+
+
+def test_a_build_that_wrote_no_executable_is_not_a_clean_compile(self=None):
+    """The compiler reporting no errors is not evidence that a file exists.
+
+    BGT writes the executable only after its report window is answered, and
+    writes none at all for a script section it calls empty. Read as success,
+    a build that produced nothing looks exactly like a build that worked --
+    and the next thing anyone does with a build is run it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        script = os.path.join(tmp, "game.bgt")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("void main() {}\n")
+        built = bgt_compile.built_path(script)
+        assert built == os.path.join(tmp, "game.exe")
+
+        # nothing written at all
+        assert "no game.exe was written" in bgt_compile._unbuilt(script, None)
+
+        # the runtime stub, with no script attached: the measured failure
+        with open(built, "wb") as fh:
+            fh.write(b"MZ" + b"\x00" * 4096)
+        reason = bgt_compile._unbuilt(script, None)
+        assert "no script attached" in reason
+
+        # a real one passes: stub + overlay + the 12-byte trailer, whose
+        # offset field `bgtlib` requires to point inside the file
+        payload = b"MZ" + b"\x00" * 4096
+        overlay = b"0 " + b"\xab\xcd" * 8
+        trailer = b"xproc10\x00" + len(payload).to_bytes(4, "little")
+        with open(built, "wb") as fh:
+            fh.write(payload + overlay + trailer)
+        assert bgt_compile._unbuilt(script, None) is None
+
+        # ...and a stale one from an earlier build does not pass, because the
+        # stamp taken before the compile is unchanged.
+        before = bgt_compile._built_stamp(script)
+        assert "untouched" in bgt_compile._unbuilt(script, before)
+
+
+def test_no_source_file_holds_an_escape_a_shell_ate():
+    """A control byte where `\b` was meant matches nothing, silently.
+
+    This has happened twice. `_drop_unreachable`'s word boundaries became
+    backspace bytes when the pass was edited through a shell, so `return` and
+    `goto` quietly stopped terminating a block while the output stayed valid.
+    And `method_gap`'s documentation test carried the same two bytes, so the
+    help file -- the whole oracle for whether a method is absent, since a list
+    makes an absence provable where a substring search cannot -- was never
+    consulted at all.
+
+    Neither failed a test, because a pattern that matches nothing just makes
+    its branch dead. So the bytes are what get checked.
+    """
+    import glob
+
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    allowed = {9, 10, 13}            # tab, LF, CR
+    offenders = []
+    for pattern in ("tools/**/*.py", "tests/**/*.py"):
+        for path in glob.glob(os.path.join(root, pattern), recursive=True):
+            data = open(path, "rb").read()
+            for index, byte in enumerate(data):
+                if byte < 32 and byte not in allowed:
+                    line = data[:index].count(b"\n") + 1
+                    offenders.append("%s:%d holds byte 0x%02X"
+                                     % (os.path.relpath(path, root), line, byte))
+    assert not offenders, offenders
+
+
 def test_the_documented_api_is_read_out_of_the_reference_pages():
     """One page per function, each carrying its signature verbatim.
 

@@ -129,6 +129,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_apicheck.py` | `bgt apicheck`: every call in a recovered project's text, against every arity its own build declares -- the check for a title the compiler cannot parse |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
+| `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
@@ -176,6 +177,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 bgt recover game.exe -o recovered/ --compile
 bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt compile recovered/game.bgt            # just the compiler, on any script
+bgt oracle                                # does a recovery still COMPUTE the same?
 bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 ```
@@ -1156,6 +1158,96 @@ temporary, and folding each value into its one read is both correct and what
 lets the structurer still see a loop condition as an expression rather than as
 a statement before a jump.
 
+### Which slots the source NAMED, read off the compiler's own output
+
+`slot_types` answers what a slot *is*. A separate question decides whether it
+is a **variable at all**, and the module does not record it -- which is what
+every attempt at the duplication problem has really been about.
+
+BGT compiles, so the question has a known answer: write both shapes and look.
+
+| source | bytecode |
+|---|---|
+| `int v = bump(); return (v + v);` | `CALL bump ; CpyRtoV4 2 ; `**`CpyVtoV4 1 2`**` ; ADDi 2 1 1` |
+| `if (bump() > 3)` | `CALL bump ; CpyRtoV4 1 ; CMPIi 1 3` -- no copy at all |
+
+**A declared variable's initialisation ends in a copy into its own offset; an
+expression temporary is consumed straight out of the slot the register left it
+in.** That holds for every initialiser shape in the fixture -- a call, a
+member read, a second assignment, a loop bound, a snapshot before a mutating
+call -- and a ternary does not use the opcode at all: both arms `SetV4`
+straight into the destination.
+
+**That is a fact about the compiler, and forcing on it is still wrong.** The
+third rejected attempt, and the most convincing one, because it was read from
+the engine rather than fitted to a metric. Declaring every
+`CpyVtoV4`/`CpyVtoV8` destination that is not in `short_circuit_slots`:
+
+| title | residual gotos |
+|---|---|
+| Super Egg Hunt | 0 -> **4** |
+| Paladin of the Sky | 0 -> **2** |
+| Psycho Strike | 2 -> **12** |
+| Crazy Party | 14 -> **90** |
+
+Every one of those is a compiler error, so three titles that compile cleanly
+stop compiling. The reason is the exclusion, not the idiom: a short-circuit
+merge writes its destination with the same `CpyVtoV4`, and
+`_short_circuit_slots` is a **shape** test by necessity -- it has to answer
+before the simulation starts. Every merge whose shape it does not match
+becomes a forced variable, each arm's computation is emitted as an
+unconditional statement, and the condition collapses. That is the
+`use_screen_reader` defect again, reached from a third direction.
+
+So the knowledge is worth having and the lever is still wrong. Recorded here
+rather than in a commit, with the two earlier rejections, so the next attempt
+starts from three measurements instead of one.
+
+#### What was adopted instead: a member read goes stale through a call
+
+The bug that prompted all of this does not need the slot declared, only the
+fold refused. `_stale_fold` already asks which of the frame's slots an
+expression reads, and a **member** reads none -- so a snapshot of one folded
+straight through whatever ran in between. Paladin's `calculate_experience`
+is four of them:
+
+```
+int old_level = level;              LoadThisR ; RDR4 2 ; CpyVtoV4 N 2
+int old_strength = strength;        ...three more like it
+while (current_exp >= ... ) gain_level();
+if (old_level == level) return;
+"...Strength has increased by " + (strength - old_strength)
+```
+
+Folded, every snapshot was re-read *after* the loop: the guard became
+`if (level == level)`, always true, so the level-up message never appeared,
+and had it appeared it would have read `+0` to everything. That is what "the
+math is very broken" looked like from inside the game.
+
+The receiver for a bare member is **`this`**, deliberately: a method can
+change any field, so any call on the object invalidates the snapshot. That is
+only broad-sounding, because `bound[1] == self.stmt_count` has already
+excluded every read that happens at the moment of its bind -- which is what an
+ordinary expression temporary is. What is left is a value the compiler parked
+in a slot and read later, and the compiler does that where the source declared
+a local.
+
+Measured on the four titles that can be measured here: Paladin gains 8 lines
+and the four snapshots, and **not one title's residual goto count, split
+verification or `libcheck` score moves**. For a fold change that is the number
+that matters.
+
+**What this does NOT fix, and the fixture now proves why.** The duplication
+family is a different mechanism: `int damage = do_damage(...)` is
+`CALL do_damage ; CpyRtoV4 3 ; CpyVtoV4 5 3`, and the value is read twice
+rather than read late, so staleness never fires. All four of Paladin's
+hp-drain attacks call it twice -- once to say the number and once to apply it,
+so the damage spoken is a different roll from the damage dealt -- and
+`dragon_strike` fires twice, `get_global_slot` runs either side of the
+`remove_at` that changes its answer, and `walk` runs `interact_in_location`
+twice per direction. Only knowing the slot is a declared local fixes those,
+and the table above is the price of knowing it that way.
+
 ## The compiler is the judge, and it has to be driven
 
 `bgt.exe` takes a script path and *runs* it. There is no console mode and no
@@ -1208,10 +1300,10 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,231 | 0 | 0 | yes | 1,611 | **compiled cleanly** |
+| Super Egg Hunt | 6,225 | 0 | 0 | yes | 1,611 | **compiled cleanly** |
 | Paladin of the Sky | 27,208 | 0 | 0 | yes | 7,142 | **compiled cleanly** |
-| Psycho Strike | 27,307 | 2 | 0 | yes | 6,467 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 188,904 | 14 | 0 | yes | 90,628 | not re-measured |
+| Psycho Strike | 27,295 | 2 | 0 | yes | 6,467 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 188,926 | 14 | 0 | yes | 90,628 | 14, every one a residual `goto` |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
@@ -1242,13 +1334,30 @@ Paladin's window now reads `Paladin of the sky`, which supersedes the note
 below about it reporting `command`: that was the uncompiled-build path, and
 reaching the real title means the module got further than it used to.
 
-**Three titles compile clean and run**, including the largest. Crazy Party is
-195,364 lines across 558 files and reports `compiled with 2 warning(s)`;
-`bgt compile --run` on it opens a window of its own titled `Crazy Party
-beta77`. Super Egg Hunt reports `compiled cleanly` and `--run` opens
-`Super Egg Hunt Version 1.53` — the title the original executable shows,
-checked by launching it. That is the end-to-end check: executable in, source
-out, source back into the engine, game on screen.
+**Two titles compile clean, and the largest does not.** Super Egg Hunt
+reports `compiled cleanly` and `--run` opens `Super Egg Hunt Version 1.53`
+— the title the original executable shows, checked by launching it — and
+Paladin compiles cleanly and runs as a built executable. That is the
+end-to-end check: executable in, source out, source back into the engine,
+game on screen.
+
+**Crazy Party's compiler column has now been measured, and it is 14 errors.**
+This said `compiled with 2 warning(s)` at 195,364 lines, and a later section
+said the base-method fix had taken those two warnings away so "all three
+titles now report `compiled cleanly`". Both were written before the residual
+goto count for this title was re-derived from 0 to 14, and **AngelScript has
+no `goto`, so each of those lines is an error**: 14 of them, in
+`CarteCombat` (4), `part_6` (6), `Jeu` (2) and `CombattantSauvage` (2).
+Nothing else is an error. The two warnings are also still there, and they are
+a different pattern from the one that fix addressed —
+`if (!((local_6 is local_5) || (null == local_5)))` compares a handle against
+`null` with `==` where the language wants `is`, which is worth a look and is
+not a goto.
+
+The lesson is the one this file keeps paying for from a new direction: the
+goto count had been corrected and **the sentences that depended on it had
+not**. A number and a claim about that number are two places to keep in step,
+and only one of them was re-derived.
 
 **And a window on screen is not the check that matters** — Super Egg Hunt
 passed every line of this table while its menu could not be navigated. See
@@ -1726,11 +1835,40 @@ and a warning nobody can explain invites the conclusion that an entry
 script of nothing but `#include` lines is why a recovery does not run.
 It is not — `#include` is textual, so the module is the concatenation, and
 `main()` inside an included file runs, which was checked directly with a
-two-file probe rather than argued. The entry script now carries the
-module's own types section (enums, typedefs, funcdefs) inline instead of
-only includes. That section was already first in the order, so nothing
-moves, and Super Egg Hunt went from `compiled with 1 warning(s)` to
-`compiled cleanly, and ran`.
+two-file probe rather than argued. The entry script carries the module's
+own declarations inline instead of only includes, and Super Egg Hunt went
+from `compiled with 1 warning(s)` to `compiled cleanly, and ran`.
+
+**It is worse than a stalled compile, and "not cosmetic" understated it:
+BGT writes NO EXECUTABLE for a script section it calls empty.** Measured
+directly -- an includes-only entry script compiles with that warning, the
+driver dismisses the window, the engine exits 0, and either no file appears
+or a truncated copy of the runtime stub does. 901,120 bytes of BGT with no
+`xproc10` trailer and no script attached, which Windows then declines to
+launch at all: "not a valid application for this OS platform". Driven by
+hand with `-C` and no driver at all, BGT sits on its dialog with no
+executable written and exits without writing one.
+
+**And the fix was a proxy for the requirement, which failed.** Inlining
+"the types section" is not the same as inlining *something that declares
+something*: a module with no enums, typedefs or funcdefs still gets a
+`types.bgt` section, holding the decompiler's comment banner and nothing
+else. So the entry script stayed empty, `bgt recover --compile` reported
+`compiled cleanly`, and the build was a stub. `inline_prefix` takes as many
+sections from the front of the order as it needs before one declares
+something -- a **prefix**, because the inlined text is emitted ahead of
+every `#include`, so inlining anything else would move a declaration, and
+`verify` compares sections against the one-file render and could not see
+that happen.
+
+**`bgt compile --build` now checks the artifact rather than the report.**
+A clean report is not evidence that a file exists: the executable is
+written only after the report window is answered. `_unbuilt` requires a
+file that is newer than whatever was there before -- a stale executable
+from an earlier good build is exactly what makes a failed build look like
+a good one -- and that `bgtlib.read_trailer` accepts it. The outcome
+`nobuild` carries its reason, because an outcome with no explanation reads
+like a result.
 
 ## A literal has to reach the engine as the bytes the module held
 
@@ -2173,6 +2311,23 @@ found by reading what it said rather than by inspection:
   warnings per title looked like something the compiler had a right to say.
   Paladin's four are gone, and both the pass and the dialect probe now have
   tests.
+
+  **It happened again, and nothing caught it for however long it had been
+  there.** `method_gap`'s documentation test carried the same two bytes --
+  `re.search(r"\b%s\b")` arriving with a literal backspace in place of each
+  `\b` -- so the branch that
+  skips a method the help file *does* document never fired, and the help
+  file is the whole oracle there: a *list* of a type's methods makes an
+  absence provable where a substring search for a short name cannot. A
+  third instance was a raw `0x1C` written into a bytes literal in
+  `test_toolkit`, which is real data (`len2` writes `2 * length`, and
+  "phone_callback" is 14 characters) spelled in a way no reader can see and
+  no reader can tell from an eaten escape.
+
+  So the bytes are what get checked now: no file under `tools/` or `tests/`
+  may hold a control character other than tab, LF or CR. A pattern that
+  matches nothing does not fail a test -- it just makes its branch dead --
+  which is why this needed a test about *bytes* rather than about behaviour.
 - **A constant that is only ever stored is typed by where it is stored.**
   `slot_types` types a slot from the opcodes that *compute* with it, which
   says nothing about `pool.pan_step = 1.5`: `SetV4 v2, 0x3FC00000` is width
@@ -2195,6 +2350,31 @@ found by reading what it said rather than by inspection:
   fourteen cases the source wrote. **And a gap of more than five splits the
   table** -- see **Reading the compiler, not only the reader** below, where
   that constant comes from and what it is worth.
+- **...and a merged chain must lose the first table's own range guard.** The
+  guards before `JMPP` are simulated as ordinary branches -- only the span
+  *after* it is skipped -- so the guard that sends out-of-range values to the
+  *next* table survives the merge as a real `if`, and merging has just moved
+  its target inside the switch. Every case the later tables contributed then
+  sits inside `if (day <= 3)` and cannot be reached, so a seven-case switch
+  answered its default for four of them.
+
+  **The case list was right, which is why this outlived the merge that was
+  supposed to fix it.** All seven cases are present, correctly merged, in the
+  right order, with the right bodies -- and `scattered_switch(21)` returned
+  `"none"`. No count, brace check, split verification or compiler diagnostic
+  can see that; `bgt oracle` found it on its first run by calling the
+  function. One table keeps its guard, because then the guard's target *is*
+  the switch's exit and the `if` is a redundant bound rather than a wrong one.
+
+  **And a shipped title was affected.** Super Egg Hunt's `cabinet::mode_check`
+  is a switch over 6, 10, 14 ... 42, 48, which came out wrapped in
+  `if (count <= 42)` -- so `case 48`, the one arm that is not just another
+  `play_mode()` call, could never run. That arm awards the `allaboard`
+  trophy, which a recovered build therefore could not give you. The recovery
+  is **four lines shorter** for losing the guard, and that is the only sign
+  of it anywhere in the counts: 0 residual gotos before and after, split
+  verified before and after, `libcheck --decompiler` 43/47 before and after,
+  `compiled cleanly` before and after.
 - **A `for` header may not hoist the increment** when something jumps straight
   to the condition. That jump is a `continue` in a loop whose increment is
   part of the body; hoisted into the header it would run on that path too.
@@ -2625,6 +2805,96 @@ writes `if (local_4.handle.get_playing()) { continue; }` and the assignment
 after it, which is the same program -- and the way to tell is to read both,
 which is what the report is for.
 
+## The engine compiles, so a known answer is available
+
+`bgt libcheck` validates against source nobody here wrote, which is the right
+instinct and reaches 149 of a title's 926 bodies. **The stronger version is to
+write the source yourself**, because then the answer to "what should this do?"
+was decided before the bytecode existed:
+
+```bash
+bgt oracle                 # one command; needs only a BGT install
+```
+
+```
+oracle.bgt  --BGT-->  oracle.exe  --run-->  report A
+                          |
+                     bgt recover
+                          v
+                 recovered project  --BGT-->  exe  --run-->  report B
+```
+
+A mismatch between A and B is a decompiler defect, named by shape, **with no
+game file involved** -- so it lives in this repository, where per-title
+findings cannot. The fixture is generated from a string in `bgt_oracle.py`
+rather than shipped as data, so this folder still holds only the document and
+the Python tools.
+
+Each of the 31 values is chosen because getting it wrong is *silent*. The
+`declared_*` family calls a `bump()` that returns a different number every
+call, so a fold that duplicates it computes something the source never did;
+`counter` is the module's duplication detector, and any duplicated or dropped
+call moves it. `temp_in_condition`, `temp_in_short_circuit` and
+`ternary_result` are the other half, and they are why "fold less" is not the
+fix. The rest are one per bug class this file records: the snapshot across a
+mutating call, the stale read across a `remove_at`, the mid-body `continue`,
+the clamp, the base-class override, the reused string slot in a `||` chain,
+the scattered `switch`, stacked case labels, a guarded compound assignment, a
+`do-while`, an out parameter, and a literal above 0x7F.
+
+**It paid for itself on the first run, three times over.** The fixture was
+written to settle the declaration idiom above, and it found two more defects
+and one stale claim:
+
+- **A recovered project with no types section built no executable at all**
+  -- see the empty-script-section note below, which this upgraded from a
+  warning to a build failure.
+- **A scattered `switch` lost every case after the first table** -- below.
+- **The clamp is not open.** This file listed "a computed value bound on one
+  path and read past the join" as remaining work in two places. It recovers
+  exactly as written, and did so at the previous commit too, so the item had
+  simply outlived its fix. A stale open question costs as much as a stale
+  number.
+
+**And one it found and did not fix.** `"" + bump() + "," + bump() + ","
++ bump()` answers `3,2,1` from the engine and `2,3,1` from the recovery.
+That order is not arbitrary: `opAdd` evaluates its **argument** before the
+receiver is pushed, so a left-nested concatenation runs its operands
+right-to-left, and the bytecode agrees -- three `CALL bump` into slots 7, 5
+and 1, in that order, consumed as `slot1 + "," + slot5 + "," + slot7`.
+(That also confirms from the source side what `control::focus` settled from
+the bytecode: `text.length()` genuinely runs first there, and the
+"order by closing parenthesis" in `libcheck` is the approximation.)
+
+The recovery keeps the first call in the right place and swaps the other
+two, because a folded call's statement is positioned by the `opAdd` that
+consumes it rather than by the `CALL` that produced it -- and the
+innermost `opAdd` is the *last* instruction of the three. It is present at
+the previous commit too, so it is not new.
+
+Why it is recorded rather than fixed: it needs statement placement inside a
+nested expression to follow the operand, which is the kind of change this
+file keeps measuring and rejecting, and three other changes were already in
+flight. It is **not** in `bgt oracle`, deliberately, so that command stays a
+green gate; the fixture above is the whole repro. The exposure is narrow --
+it needs two or more impure operands in one concatenation, where a getter is
+the normal case -- and the symptom is a string built in the wrong order,
+which compiles, runs, and reads perfectly.
+
+Two things make it a check rather than a demo:
+
+- **A check that cannot run is worse than no check**, because it is counted.
+  `OracleError` is distinct from a mismatch and says why: no compiler, a
+  build that wrote nothing, an executable that would not start, a report that
+  was never written. The NVGT round-trip fixture was inert through 774 lines
+  of decompiler change, and that is the trap being avoided.
+- **A stale report reads as a pass.** The report file is deleted before each
+  run, so a previous run's answer can never be read as this one's.
+
+What it does *not* do is cover a title's own code: 31 shapes are 31 shapes.
+It is the fastest way to find out whether a change broke a construct, and
+`measure.py` over four titles is still what says whether it broke a *program*.
+
 ## When a folded temporary stops being the value the bytecode computed
 
 The fold is **load-bearing**, which is why this took three attempts and two
@@ -2937,9 +3207,11 @@ it. What cannot terminate is the same name with the same number of arguments.
 | Crazy Party | 167 | **15** |
 | Super Egg Hunt | 0 | 0 -- it declares no base class |
 
-Fixing it also took Crazy Party's last two compiler warnings
-(`The operand is implicitly converted to handle in order to compare them`)
-away, so all three titles now report `compiled cleanly`.
+Fixing it took two of Crazy Party's compiler warnings away. **It did not
+make that title compile**, and this claimed it did: see the standings, where
+its 14 residual gotos are 14 errors, and where two warnings of the same
+message remain from a different pattern — `null == handle`, which the
+language spells `is`.
 
 **And verifying that found the driver claiming a game had started when none
 had.** Compiling emits its own `Compilation Result` window on success, which
@@ -3067,13 +3339,24 @@ matched nothing, silently, and the output did not change by a single line.
 
 With it, Paladin recovers 83 lines shorter and `get_active_reader` -- whose
 four `return`s used to collapse into one `return WINDOW_EYES;` -- comes back
-as the accumulator the source wrote, from the same pass. What is left of this
-class is one case and it is the expensive one: a **computed** value bound on
-one path and read past the join, which `sound_pool`'s `true_y` clamp is
-(`if (listener_y < delta_backward) true_y = delta_backward;` folds away and
-the call receives `delta_forward` instead). Promoting computed values the
-same way took Paladin from 0 compiler errors to 16, so it stays open rather
-than guessed at, and the signature to grep for is an `if` with two empty arms.
+as the accumulator the source wrote, from the same pass.
+
+**The clamp that this file listed as the one case left is not open, and had
+not been for some time.** A **computed** value bound on one path and read
+past the join -- `sound_pool`'s `true_y`, written
+`int true_y = listener_y; if (listener_y < delta_backward) true_y =
+delta_backward; else if (...) ...` -- recovers exactly as the source wrote
+it, including the `else if`. Checked as a shape in `bgt oracle`, and checked
+at the previous commit too, so it was not the declaration rule above that
+fixed it: the item had simply outlived its fix and stayed written down.
+
+A stale open question costs what a stale number costs. It had been quoted as
+the reason not to promote computed values, with "Promoting computed values
+the same way took Paladin from 0 compiler errors to 16" as the evidence --
+and that measurement was itself superseded by the one-name-per-slot fix,
+which this file records two sections earlier. The signature it names is
+still worth grepping for: an `if` with two empty arms is a condition that
+has lost its value.
 
 #### A handle borrowed for one expression is not a statement
 
