@@ -4670,6 +4670,50 @@ triaged as benign on the grounds that `enemy_count` is pure -- which is
 true, and is exactly why the shape went unnoticed: the first four
 instances anyone looked at were harmless.
 
+#### Sized, by the first call audit ever run on Crazy Party
+
+751 of that title's bodies are missing a call and 529 are a base
+constructor. Of the 222 that are not, **200 are `round` and are NOT
+TRIAGED.** That number is written here untriaged on purpose, because the
+first thing I did with it was generalise from one body and get it wrong.
+
+`MenuMap::placeZone` loses two, and in that body the bytecode is
+`iTOd ; CALLSYS round ; dTOi` -- `int(round(double(i)))`, which is `i`,
+so dropping the whole round trip is behaviour-preserving and the file
+contains no `round(` at all. From that I wrote that all 200 were the
+same identity. The next body I opened refutes it:
+`PechePerle::placeZone` renders `int(round(double((local_6 / 2)), 0))`
+exactly, so `round` is not dropped as a class -- that body is reported
+only because it has one more `round` in the bytecode than in the text,
+and which one is missing is not established.
+
+What is needed is the count of `round` calls in the module whose
+operand arrives by `iTOd` and whose result leaves by `dTOi`, against the
+200. Until someone has that, the honest statement is that **one site's
+two rows are benign and 198 are unread**, and the paragraph below -- the
+17 that are real -- stands on its own evidence rather than on this
+one's.
+
+**The other 17 are real, and they are worse than Manamon 1's four:**
+
+| lost | sites | what it costs |
+|---|---|---|
+| `random` | 12 | nine minigames' `placeZone`, which picks where a zone goes |
+| `joueSon` | 2 | `Jeu::termine` and `Monde::transitionJeu` -- two sounds |
+| `bouge` | 1 | `VaisseauEnnemi::suisPattern` -- an enemy ship never moves |
+| `getVariable` | 1 | `ReservePlanche::valide` |
+
+`placeZone` is the same family this file records for residual gotos --
+"almost all fifteen were a minigame's `placeZone` picking a spot far
+enough from something" -- so the roll that picks the spot is the one
+being dropped.
+
+So the defect is **21 real sites over five titles**: 17 on Crazy Party, 4
+on Manamon 1, 3 pure ones on Psycho Strike, and none at all on Paladin or
+Super Egg Hunt. That spread is itself worth knowing -- the two titles
+this project reads most are the two that do not have it, which is why it
+survived every earlier triage.
+
 #### Why the existing flush does not reach it, and why the obvious fix
 
 `FREE` already flushes an unconsumed call atom: a temp whose value
