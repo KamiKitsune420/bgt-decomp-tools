@@ -586,7 +586,7 @@ class Builder:
         hint, because `SetV4` is as true of an int as of a float.
         """
         strong: Dict[int, List[int]] = {}
-        weak: Dict[int, int] = {}
+        weak: Dict[int, List[int]] = {}
         handles: set = set()
 
         for ins in f.bytecode:
@@ -604,7 +604,9 @@ class Builder:
             width = WIDTH_SLOT_OPS.get(ins.name)
             if width is not None:
                 for field in slots:
-                    weak.setdefault(_s16(getattr(ins, field)), width)
+                    hints = weak.setdefault(_s16(getattr(ins, field)), [])
+                    if width not in hints:
+                        hints.append(width)
 
         variables = []
         for token, offset in ((ov[0], ov[-1]) for ov in rec.get("objVars", [])):
@@ -634,10 +636,12 @@ class Builder:
             for token in self._slot_votes(offset, votes, weak):
                 variables.append(asreader.ScriptVariable(
                     stack_offset=offset, type=DataType(token_type=token)))
-        for offset, token in weak.items():
+        for offset, hints in weak.items():
             if offset > 0 and offset not in strong:
-                variables.append(asreader.ScriptVariable(
-                    stack_offset=offset, type=DataType(token_type=token)))
+                for token in self._width_votes(hints):
+                    variables.append(asreader.ScriptVariable(
+                        stack_offset=offset,
+                        type=DataType(token_type=token)))
         f.variables = variables
         # **This list has no declaration order, and saying so matters.** The
         # newer engine writes one declaration per local in the order the
@@ -653,7 +657,7 @@ class Builder:
 
     @staticmethod
     def _slot_votes(offset: int, votes: List[int],
-                    weak: Dict[int, int]) -> List[int]:
+                    weak: Dict[int, List[int]]) -> List[int]:
         """The declarations to record for one slot, given its evidence.
 
         One slot serves several source locals, and without debug information
@@ -679,9 +683,40 @@ class Builder:
         # The type-tagged int wins the declaration either way; what matters is
         # recording that the slot is also used as a bool, so the boolean uses
         # are converted instead of assigned straight across.
-        if 67 in votes or weak.get(offset) == 67:
+        if 67 in votes or 67 in weak.get(offset, ()):
             return [67, numeric[0]]
         return votes[:1]
+
+    @staticmethod
+    def _width_votes(hints: List[int]) -> List[int]:
+        """The declarations for a slot whose only evidence is WIDTH.
+
+        `SetV1`/`RDR1`/`WRTV1` say one byte, `SetV4`/`CpyVtoV4`/`RDR4`
+        four, `SetV8` eight -- and the first of those seen is not the
+        answer, which is what this used to take it for. A slot that is
+        written one byte wide *and* four is a reused slot, exactly as in
+        `_slot_votes` above: the allocator erases a one-dword
+        primitive's type to `ttInt` before matching its free list, so
+        `bool`, `int`, `float` and every enum share one class and one
+        offset serves them in turn.
+
+        A four-byte store cannot land in a one-byte slot, so the WIDER
+        hint is the declaration and the one-byte one is a boolean use to
+        convert -- the same answer `_slot_votes` gives when the numeric
+        half happens to be type-tagged, reached here from width alone.
+
+        Paladin's `player_menu_callback` is what it costs. Slot 5 reads
+        `allow_escape` one byte wide and then carries the function's
+        `return -200;` -- dynamic_menu's "the user backed out" -- so
+        declared `bool`, that constant rendered as `true`, which is 1,
+        which is "the user chose item 1". Escape and the backup key
+        both SELECTED in every pause, shop and battle menu instead of
+        cancelling. It compiles, it runs, and the only way to see it is
+        to press escape.
+        """
+        if 67 in hints and len(hints) > 1:
+            return [67, next(t for t in hints if t != 67)]
+        return hints[:1]
 
     # -- bytecode ----------------------------------------------------------
 

@@ -1674,6 +1674,96 @@ a pure read so nothing observable changes, but it is a duplicated call and it
 is in every save-loading body. Not fixed here, because it needs the deferred
 out-call path rather than this one.
 
+### A slot's width evidence is not first-come-first-served
+
+`slot_types` has two kinds of evidence. A **type-tagged** opcode names its
+operand's type outright (`SUBi`, `iTOd`, `CMPd`); a **width-only** one says
+how many bytes moved (`SetV1`, `RDR4`, `CpyVtoV8`). Where a slot had only
+the second kind this kept the **first hint it saw** -- and a slot has
+several, because one offset serves several source locals in turn: the
+allocator rewrites any one-dword primitive's token to `ttInt` before
+matching its free list, so `bool`, `int`, `float` and every enum share one
+class.
+
+So a slot read one byte wide and then written four was declared `bool`, and
+`_typed_constant` rendered every constant stored into it through that
+declaration. **A bool holds 0 or 1, so every other value became `true`,
+which is 1.**
+
+A four-byte store cannot land in a one-byte slot, so the **wider** hint is
+the declaration and the one-byte one is a boolean use to convert -- which
+is the answer `_slot_votes` already gives when the numeric half happens to
+be type-tagged (`clear_pathway`), reached here from width alone.
+
+What it was costing, and the first of these was reported as two separate
+bugs:
+
+- **Paladin's menus could not be backed out of.**
+  `player_menu_callback` reads `allow_escape` one byte wide into slot 5
+  and then puts the function's `return -200;` -- dynamic_menu's "the user
+  backed out" -- in that same slot. Declared `bool`, the constant rendered
+  as `true`, which is 1, which is "the user chose item 1". So escape
+  **and** the X key selected the first item instead of cancelling, in the
+  pause menu, the shop and the bag. Reported as "escape works as enter"
+  and "x is bugged", and they are one line.
+- **Paladin's clock ran at one minute a scene.** `time.add_minutes(30)`,
+  `(10)`, `(45)`, `(70)` ... came out as `time.add_minutes(1)` **thirty-two
+  times**, `time.add_hours(12)` and `(2)` as `(1)`, and three `time.set()`
+  calls lost an operand each -- a new game's
+  `time.set(2040, 8, 17, 14, 30, 0)` became hour 1 rather than 14. The
+  whole in-fiction calendar, and the game gates scenes on it.
+- **Psycho Strike's menus returned 1 where they meant -1**, three times:
+  the same sentinel defect one title over.
+
+The cost is two Psycho Strike bodies that now read
+`int local_4; local_4 = 1; return local_4 != 0;` where they read `bool`
+before. Equivalent, and less pretty.
+
+**It is the same defect this file already records from the other side.**
+Manamon 1's seven character stats all came out as `1` -- `strength = 1`,
+`max_health = 1` -- and that was fixed by typing the constant from its
+**destination**. This is the same flattening reached through the **slot**,
+and the two are complementary rather than alternatives: one asks what a
+constant is being stored into, the other what the slot is.
+
+#### The instrument: every numeric constant, against the text
+
+This was found by an audit, not by a diagnostic, and the audit is worth
+keeping. The literal audit compares a body's **string** literals against
+the bytecode's; nothing compared its **numbers** -- and a number is where
+the quietest defects in this file live, because a flattened `30` is valid
+source that compiles, runs and is wrong.
+
+Per body: the multiset of `SetV1/2/4/8` constants in the bytecode against
+the numeric literals in the recovered text, skipping 0 and 1 -- both the
+commonest and the two a bool can hold honestly. On Paladin:
+
+| | constants the text does not hold |
+|---|---|
+| before | **44** |
+| after | **6** |
+
+and the six are accounted for: three each in `position_sound_custom_1d`
+and `_2d`, which are **stock library files** whose text is BGT's own source
+rather than the recovery, so the audit is comparing against a different
+artefact; `play_me`'s 4.0, which is the original's own dead store
+(`default_volume + 4.0` computed into a slot nothing reads -- the
+`sleep_in_bed` shape); and one `-1` in `init_events`, which is a single
+constant in a 500-line body and has not been run down.
+
+**And the counts say it is correctly scoped.** Across all five titles that
+can be measured here, not one residual goto, call count, split
+verification, passthrough or unbalanced-file count moves; two titles gain
+lines and three are unchanged:
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,335 | 0 | verified | 7,110 |
+| Psycho Strike | 27,446 | 2 | verified | 6,443 |
+| Crazy Party | 192,584 -> 192,626 | 14 | verified | 90,118 |
+| Manamon 1 | 90,848 -> 90,852 | 0 | verified | 26,568 |
+
 ## The compiler is the judge, and it has to be driven
 
 `bgt.exe` takes a script path and *runs* it. There is no console mode and no

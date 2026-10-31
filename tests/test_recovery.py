@@ -265,13 +265,33 @@ def test_a_slot_used_as_bool_and_number_records_both_declarations():
     declarations is what the newer format would hold, and what the decompiler
     reads to pick the numeric type and convert the boolean uses.
     """
-    votes = bgt_asir.Builder._slot_votes(1, [70], {1: 67})
+    votes = bgt_asir.Builder._slot_votes(1, [70], {1: [67]})
     assert votes == [67, 70]
     votes = bgt_asir.Builder._slot_votes(1, [67, 70], {})
     assert votes == [67, 70]
     # No bool evidence: the first type-tagged vote stands alone.
-    assert bgt_asir.Builder._slot_votes(1, [70], {1: 70}) == [70]
+    assert bgt_asir.Builder._slot_votes(1, [70], {1: [70]}) == [70]
     assert bgt_asir.Builder._slot_votes(1, [94, 70], {}) == [94]
+
+
+def test_a_four_byte_store_cannot_land_in_a_slot_declared_one_byte():
+    """Width evidence is not first-come-first-served.
+
+    Paladin's `player_menu_callback` reads `allow_escape` one byte wide
+    into slot 5 (`RDR1`) and then puts the function's `return -200;` in
+    the same slot (`SetV4`). Keeping the first hint declared it `bool`,
+    and -200 rendered through a bool is `true` -- which is 1, which is
+    "the user chose item 1" rather than "the user backed out". The
+    wider hint is the declaration; the one-byte one is a boolean use to
+    convert.
+    """
+    assert bgt_asir.Builder._width_votes([67, 70]) == [67, 70]
+    assert bgt_asir.Builder._width_votes([70, 67]) == [67, 70]
+    assert bgt_asir.Builder._width_votes([67, 94]) == [67, 94]
+    # One width only, or no bool among them: the first hint stands.
+    assert bgt_asir.Builder._width_votes([67]) == [67]
+    assert bgt_asir.Builder._width_votes([70]) == [70]
+    assert bgt_asir.Builder._width_votes([94, 70]) == [94]
 
 
 def test_behaviour_names_become_the_newer_conventions():
