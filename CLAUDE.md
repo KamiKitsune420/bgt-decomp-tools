@@ -3867,6 +3867,103 @@ that differ. Taking the engine's file and **dropping the members the game's
 module does not declare** gets both, and stripping is already how `#include`
 and `funcdef` lines are handled there. Recorded, not done.
 
+### The receptionist, run down -- and the sixth rejection
+
+The wrong-floor defect above was chased to its cause, and the cause is
+**a third place that writes an object slot, which nothing recorded.**
+
+This file already has two: `slot_writes`, built from opcodes that name a
+slot in an operand, and `behaviour_writes`, which catches a constructor
+reached as `PSF v ; CALLSYS $beh0`. The commonest object construction in
+the corpus is neither:
+
+```
+PSF 1 ; STR "Product_Id" ; CALLSYS _string_factory_ ; PshRPtr
+      ; ALLOC string string::$beh0
+```
+
+`ALLOC` names its destination on the **stack** -- pushed deepest,
+because the constructor pops its own arguments first -- so no operand
+mentions slot 1; and the `PSF` that pushed it sits four instructions
+back, before the literal and the factory, so the `PSF`-adjacency rule
+cannot see it either. Two places answering one question is the shape
+this file keeps recording; this was a third place that answered it
+**nowhere**.
+
+`_alloc` records it now, as the simulation passes it, which is all
+`_stale_fold` needs -- it asks whether a write lies between a bind and a
+read, and every write before the current position is already in. **On
+its own it changes no output**: all four recovered trees that can be
+measured here are byte-identical with it and without it, because the
+rule that would consult it is gated. So it is a condition rather than a
+fix, in for the same reason the `CallPtr` one is: the next title to need
+it should not have to pay for finding it again.
+
+#### The gate, removed and measured and put back -- the sixth rejection
+
+`_stale_fold` consults `behaviour_writes` only for a value that IS a
+slot, and this file justified that narrowing as costing 56 lines "for no
+correctness at all". **The lines were right and the "for nothing" was
+wrong**, which the round trip is what found: the receptionist's folded
+value is `improve_map_name(local_6)`, a COMPUTED value, so the gate let
+it through and it was re-read after slot 6 had been rebuilt.
+
+Removing the gate fixes it exactly:
+
+```
+local_6 = world[your_floor].name;
+local_16 = improve_map_name(local_6);        <- the floor, taken FIRST
+local_6 = world[your_cabin].name;
+local_16 = (... string_trim_left(improve_map_name(local_6), 6)
+            ... ", located on " + local_16 ...);
+```
+
+and it is **safe on every count this file measures**:
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,780 -> 5,786 | 0 | verified | 1,608 |
+| Paladin of the Sky | 25,942 -> 26,000 | 0 | verified | 6,952 |
+| Psycho Strike | 25,870 -> 25,870 | 2 | verified | 6,406 |
+| Crazy Party | 190,735 -> 191,844 | **14** | verified | 90,145 |
+| Manamon 1 | 89,712 -> 90,106 | 0 | verified | 26,481 |
+
+Not one residual goto, call count or split check moves, `bgt signatures`
+**improves** -- `double_assign` 3 -> 2 on Egg Hunt, 6 -> 5 on Paladin
+(that row is the receptionist) and 20 -> 13 on Manamon 1 -- and the suite
+and the oracle pass.
+
+**It was still put back, and the round trip is what decided it.** The
++1,567 lines are concatenation chains decomposed into one statement per
+link:
+
+```
+before:  local_4 = (("The garden..." + get_possessive(local_4))
+                     + " back give " + this.name + ...);
+after:   local_22 = "The garden like collection of plants on ";
+         local_21 = get_possessive(local_4);
+         local_2  = (local_22 + local_21);
+         ...
+```
+
+Both are correct -- seven of Manamon 1's `double_assign` rows were
+already right before the change, so that count falling is not seven
+fixes. What the chain decomposes for is that **every string literal is
+constructed into a NAMED scratch slot**, so a value mentioning one is
+stale by this rule. And asked of the goal rather than of taste, the
+round trip says it buys nothing: Super Egg Hunt's edit distance goes
+**15,124 -> 15,133**, nine instructions the wrong way, because the
+compiler recombines what the decomposition split.
+
+So: safe, one confirmed defect fixed, 1,567 lines of readability spent,
+and no movement toward byte-for-byte. **The order is what is wrong, not
+the rule.** The cost is entirely those named literal scratch slots, and
+folding them away is the change one section down -- after which this one
+costs almost nothing and still fixes the receptionist. It is recorded
+here with its five-title table so the next attempt starts from the
+measurement instead of re-deriving it, which is the whole point of the
+five rejections above.
+
 ### ...and a third: a retained range guard is the COMPILER's, not source
 
 `day_to_word` comes back 148 -> 253 instructions, and part of that is the

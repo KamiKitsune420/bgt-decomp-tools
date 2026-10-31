@@ -3990,6 +3990,24 @@ class FuncDecompiler:
         if dest is not None and dest.kind == "list_elem":
             self.list_values.setdefault(dest.offset, {})[dest.list_index] = Atom("call", txt)
         elif dest is not None and dest.is_ptr and dest.offset is not None:
+            # **An ALLOC-form construction writes the slot, and NOTHING
+            # recorded that.** `slot_writes` is built from opcodes that name
+            # a slot in an operand and `ALLOC` names its destination on the
+            # STACK (pushed deepest, because the constructor pops its own
+            # arguments first); `behaviour_writes` wants a `PSF` immediately
+            # before the call, and here the `PSF` sits four instructions
+            # back, before the literal and the factory:
+            #
+            #     PSF 1 ; STR "Product_Id" ; CALLSYS _string_factory_
+            #           ; PshRPtr ; ALLOC string string::$beh0
+            #
+            # So this is the third place that answers "has this slot been
+            # written since?", and it was the one blind to the commonest
+            # object construction in the corpus. Recorded as the simulation
+            # passes it, which is all `_stale_fold` needs: it asks whether a
+            # write lies between a bind and a read, and every write before
+            # the current position is already in.
+            self.behaviour_writes.setdefault(dest.offset, []).append(self._pos())
             if self.is_named(dest.offset):
                 self._emit_assign(dest.offset, Atom("call", txt))
             else:
