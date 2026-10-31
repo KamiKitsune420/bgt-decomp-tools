@@ -496,6 +496,62 @@ Manamon 2 all still pass every stage, Manamon 2 with its 9,700 bodies.
 
 Do not assume a third title matches either of these two. Run `bgt validate`.
 
+### The string factory has a third spelling, and one title uses it
+
+`STR` pushes a literal's address **and its length** -- `stackInc` is 2 in
+both engines' own `asBCInfo[]`, read rather than assumed -- and the
+registered string factory pops both. Whichever name that factory has.
+
+BGT 1.3 calls it `_string_factory_`, and so do Paladin, Super Egg Hunt,
+Psycho Strike and Crazy Party. **Manamon 1's 2017 fork calls it `$str`**,
+and nothing else in the corpus does -- which is checkable in one line, since
+the name is a literal in the module:
+
+```
+egghunt    $str: False   _string_factory_: True
+paladin    $str: False   _string_factory_: True
+strike     $str: False   _string_factory_: True
+crazyparty $str: False   _string_factory_: True
+manamon1   $str: True    _string_factory_: False
+```
+
+Knowing only one spelling left both of the slots `STR` pushes on the stack,
+so every string literal in that title recovered as
+
+```
+name = string(<strlen>, "");
+local_4 = string(<strlen>, "Random");
+```
+
+-- `<strlen>` being the placeholder for the length slot. It is not source,
+it does not parse, and **a parse error cascades**: one unrecognised name
+became **24,916 diagnostics** across a 91,310-line project. Fixed, there is
+not one `<strlen>` left and the recovery is 91,290 lines.
+
+This is the third time one engine construct has had two names here, after
+`%delegate_factory`/`$dlgte` and `$list`/`factstub`. The pattern is worth
+stating as a rule: **a registered name is a per-build field like any other**,
+and the cheap check is that the name is a literal in the module, so asking
+which spelling a title uses costs one search rather than a compile.
+
+**And finding it cost somebody an 8.9 MB modal dialog.** Compiling a whole
+91,310-line recovery in the foreground put BGT's own report window on the
+screen of whoever was at the machine, holding every one of those 24,916
+errors. That is the third time this file has recorded the same lesson from a
+new direction -- `capabilities()`, the oracle against a stashed decompiler,
+and now this. The driver takes `--timeout` and `bgt recover --compile`
+already passes 600 s; what it does not have is a way to ask without
+drawing. Prefer the bytecode audits for "did we lose something?", and treat
+a whole-title compile as a thing to run deliberately and not while someone
+is using the machine.
+
+**Manamon 1 has not been compile-checked since**, deliberately, so its
+standings row says so. The `<strlen>` cause is gone, but it was built by a
+fork BGT 1.3 is not, and Manamon 2 is already in this document as 33 parse
+errors for exactly that reason -- `protected` and `weakref` the installed
+engine does not have. A number from the wrong engine is a statement about
+the engine.
+
 ### Manamon 1 is a third reader generation, and the body is where it differs
 
 Manamon 1 (`VGStorm.com\Manamon\rpg.exe`, 2017-07-30) is BGT, overlay
@@ -1500,11 +1556,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,243 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
-| Paladin of the Sky | 27,340 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
-| Psycho Strike | 27,468 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,485 | 14 | 0 | yes | 90,074 | 14, every one a residual `goto` |
-| Manamon 1 | 91,310 | 0 | 0 | yes | 26,553 | see below |
+| Super Egg Hunt | 6,247 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
+| Paladin of the Sky | 27,343 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
+| Psycho Strike | 27,469 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,603 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
+| Manamon 1 | 91,290 | 0 | 0 | yes | 26,553 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
@@ -1523,6 +1579,10 @@ files with **0 residual gotos**, a verified split, 0 unmodelled opcodes and
 26,553 calls read back against its own runtime. **2 bodies are given up on
 and counted**, and five `__nvgt_global_init_N` callees are reported as
 declared nowhere -- both are open and neither is a parse failure.
+
+Its compiler column is empty on purpose: the only engine installed here is
+BGT 1.3, which is not the fork that built it. See **The string factory has
+a third spelling** for what asking anyway cost.
 
 **And two titles can no longer be measured the same way.** Psycho Strike's
 and Manamon 2's own runtimes are not on this machine, so their modules were
@@ -2715,6 +2775,195 @@ closed the one thing that looked like one: a `tmp0(local_7, <?>, <?>, ...)`
 in a stale Manamon 2 project, which is the old `CallPtr`-operand bug and
 renders `local_6(local_7)` under current code. What it changes is that
 Manamon 2 is no longer unmeasured.
+
+## Reading the calls and the literals back against the BYTECODE
+
+`bgt libcheck` compares a recovered body against BGT's own library source,
+which is the right instinct and reaches **149 of Paladin's 926 bodies**. Every
+bug ever reported from playing these games has been in the other 777, and
+those had never been compared against anything.
+
+There is a better oracle than source for them, and it was in hand the whole
+time: **the module**. A call instruction is a call and a `STR` operand is a
+literal, so for every body the bytecode gives the exact multiset of callees and
+of string constants, and the decompiler cannot lose or invent one without being
+wrong. Two audits, both over all 753 bodies that pair unambiguously:
+
+| audit | Paladin's answer |
+|---|---|
+| callee multiset per body | 26 bodies missing a call -- **all** of them `super()`, a member's generated construction, or a base constructor |
+| literal multiset per body | **4 bodies missing 134 literals between them** |
+
+The literal one is what found the bug below. Compared as a **multiset**, not a
+sequence: the text's order is "sorted by closing parenthesis", which this file
+already records as an approximation of evaluation order, so a sequence diff
+would measure the approximation instead of the recovery.
+
+### `bgt_libcheck.calls` cannot see a method called on an indexed receiver
+
+The first result was in the checker, and it is worth stating before the
+finding, because it flatters `bgt libcheck --decompiler`'s own scores to this
+day. Its pattern is
+
+```
+(?<![\w.])(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(
+```
+
+-- a dotted chain of plain identifiers. `global_interacts[slot].add_event(...)`
+has a `]` in the chain, so the chain alternative cannot reach `add_event`, and
+starting the match there instead fails the `(?<![\w.])` lookbehind, because the
+character before it is a dot. **So every method called on an indexed receiver
+is invisible to it.** Reused for the audit it reported 67 lost `add_event`
+calls in `other_stuff`, all 67 of which are present.
+
+A checker that under-reports is the same shape as everything else in this file:
+the first version of the audit was *more* convincing for being wrong, because
+67 lost calls in one function is exactly what a real defect looks like.
+
+### An initialiser list was dropped, so the array came out EMPTY
+
+`string[] lines = {"a", "b", ...}` compiles to AngelScript's
+initialisation-list protocol: `AllocMem`, `SetListSize`, one `PshListElmnt`
+write per element, then the template's **list factory** taking the buffer.
+
+The newer engine's list factory is the behaviour `$list`, and that path already
+rendered the buffer as `{...}`. BGT's older AngelScript reaches the same
+factory through a **generated template factory stub** --
+`string[]@ factstub(int&in)` -- and the `factstub` branch dropped every
+by-reference argument on the stated grounds that a list buffer is "an
+engine-internal object with no name source can write". True, and the conclusion
+was wrong: the buffer has no name, but **the list it carries is the source**.
+
+So `{"a", "b", ...}` came out as `array<string>()`.
+
+**Nothing reports an empty array.** It is valid source, it compiles, it runs,
+and every loop over it runs zero times -- so no exception, no diagnostic, no
+line count out of place. What it costs, measured as the lists the fix
+recovers that nothing rendered before:
+
+| title | lists | elements |
+|---|---|---|
+| Crazy Party | 118 | **681** |
+| Paladin of the Sky | 3 | **134** |
+| Super Egg Hunt | 4 | **52** |
+| Psycho Strike | 1 | **6** |
+| Manamon 1 | 0 | 0 -- see below |
+
+Paladin's biggest is 114 lines of dialogue for the ship's passengers, built
+in `create_room_passengers` and looped over to create a `person` each. With
+the list empty the loop ran zero times, so **the ship had nobody generic to
+talk to** -- the shape of "it works but something is missing" that no count
+in this document can see.
+
+**The first figures for this were wrong in the flattering direction, and
+how they were wrong is the useful part.** They said 896 elements for Psycho
+Strike and 157 for Super Egg Hunt, counted by totalling every `SetListSize`
+in the module. That counts lists that were never lost: a list initialising a
+**global** is rendered by `_global_list_expr`, which reads the literals
+straight out of the initialiser function's bytecode and never reaches the
+factory at all. Nineteen of Psycho Strike's twenty lists are global, and so
+are three of Super Egg Hunt's six -- `female_names`, `male_names`,
+`surnames`, `trophy_list`, `modes` -- and they were in the recovery the whole
+time. The honest measure is the one above: lists the new path renders, which
+is **0 for every title before the fix** and is counted by scanning the braces
+with string literals skipped, because a comma inside `"a, b"` is not a
+separator either.
+
+**And Manamon 1 does not have the bug at all**, which is worth knowing
+before assuming a sixth title does. Its 2017 fork registers the list factory
+as the behaviour `$list`, the way the newer engine does, so its 13 lists and
+101 elements were already being recovered -- its whole project is
+**byte-identical** before and after. The factory spelling tracks the engine
+generation exactly as every other per-build field in this document does.
+
+`$list` and `factstub` now go through one `_list_literal`, because two places
+answering one question is the failure this file keeps recording, and this is
+the same question asked by two engine generations.
+
+**Two guards make it a recovery rather than a guess:**
+
+- **The buffer must be accounted for completely.** The number of element
+  writes seen has to equal the size `SetListSize` declared, or the list is
+  refused. A list rendered one element short would compile and run and be
+  wrong, which is worse than one that is empty, because the empty one at least
+  matches what the old code did.
+- **An element that names a frame slot is refused.** The declaration is hoisted
+  to the top of the body, so a slot name in it reads a value the slot does not
+  hold yet -- and may not be declared at all.
+
+### A scalar element's value is in the SLOT, and `bgt oracle` said so
+
+The fix was written for strings and `bgt oracle` broke it on the first run,
+which is the whole reason that command exists. A string element is written by
+constructing into the element's own address; a **scalar** one is not:
+
+```
+SetV4 3, 7 ; PshListElmnt 2, 1 ; PopRPtr ; WRTV4 3
+```
+
+The constant goes into a frame slot and `WRTV4` copies it through the reference
+register. Capturing the slot captures its *name* wherever that slot is also a
+named variable elsewhere in the body, so `int[] v = {7, 11, 13}` recovered as
+`{local_3, local_3, local_3}` -- the wrong value three times, and an undeclared
+name. The constant the last `SetV*` parked in the slot is the element, and it
+is remembered across exactly the `PshListElmnt`/`PopRPtr`/`WRTV*` window that
+consumes it: any other instruction invalidates it, so a stale constant can
+never be read back as an element.
+
+**The new shapes were measured in both directions.** `list_of_strings`,
+`list_of_ints` and `list_in_a_global` pass at 50/50 with the fix and, with it
+stashed, the recovered fixture **throws**: `Index out of bounds` in
+`int list_of_strings()`, because `names[0]` indexes an empty array. A shape
+that cannot fail is not a check, and this one fails loudly.
+
+**And a check that costs somebody a modal dialog is a cost.** Running the
+oracle against the stashed decompiler put a BGT runtime-error box on the
+screen of whoever was at the machine -- the same lesson this file records for
+`capabilities()`, arrived at from a new direction. The bytecode audits above
+answer "did we lose a literal?" without launching anything, and they are the
+cheaper place to ask.
+
+### What the audits leave, and what they cleared
+
+What is left on Paladin after the fix is one lost literal pair, and it is not
+the decompiler's: `generate_maze` compares
+`global_interacts[slot].interact_name == "dungeon_entrance"` and **discards the
+result**. There is no `CpyRtoV4` after the `opEquals` and no jump that reads
+it, so the statement has no effect -- the original wrote `==` where it meant
+`=`, and the dungeon doors never got their names. Dropping a pure expression
+whose value nothing reads changes nothing, so it stays dropped and is recorded
+here instead.
+
+The call audit's 26 are all explained and none is a defect: `super()` where
+the bytecode names the base constructor, a member's generated construction
+(`rec_timer` in `puck::puck`), and `steel_wall::act`, where two `dragon_strike`
+call sites in the bytecode are the two arms of one source call.
+
+**And the audits cleared the thing they were built to investigate.** The report
+was that music does not play on some maps, and the map-music path is faithful
+at every step that could cause it:
+
+- **`create_world`** -- 115 maps, every one given a non-empty `bgm`. Its 348
+  bgm / `reset` / `insert_last` events were compared against the bytecode's in
+  order, event for event: **zero mismatches**, which matters because `world` is
+  a value array, so a `bgm` store that landed after its `insert_last` would be
+  a map with no music.
+- **`map::map_setup`**, **`change_music`**, **`map::deserialize`**,
+  **`assign_song`** and **`input_recorder::is_playing`** -- read against the
+  disassembly instruction for instruction, all faithful. `change_music`'s early
+  return, the `nighttime_bgm` guard, the fade to -50 dB and the `?&out` string
+  temporary in the loader are all the original's.
+- **Every music track named in the module appears in the recovery** -- 117 of
+  the 128 files in `audio/bgm`, the other 11 being named nowhere.
+
+One hypothesis died cheaply and is worth recording so nobody pays for it
+twice. Several of Paladin's `bgm` literals carry capitals -- `Analytics`,
+`Genesis`, `Purgatory`, `Tower_of_fear` -- while `data.dat` stores every one of
+its 128 bgm entries in lower case, so a case-sensitive pack lookup would lose
+exactly "some maps". **It is case-insensitive**, which was put to the engine
+rather than argued: a probe built a pack holding `audio/bgm/analytics.ogg` and
+`pack_file::file_exists`, `list_files` and `sound::stream` all answer yes to
+`audio/bgm/Analytics.ogg` and to `AUDIO/bgm/analytics.ogg`.
 
 ## Run as a script, a game takes its developer path
 

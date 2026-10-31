@@ -496,6 +496,53 @@ int handle_identity()
     return total;
 }
 
+// An INITIALISER LIST, which is the one construct whose loss is completely
+// silent: `{"a", "b", "c"}` compiles to AngelScript's list protocol --
+// AllocMem, SetListSize, one PshListElmnt write per element, then the
+// template's list factory taking the buffer -- and a decompiler that drops
+// the buffer emits `array<string>()`. That is valid source, it compiles, it
+// runs, and the array is EMPTY. Every loop over it runs zero times, so
+// nothing throws and nothing reports anything.
+//
+// Paladin lost 114 elements this way in one function, which is why its ship
+// had no passengers to talk to; Psycho Strike loses 896 across 20 lists.
+// The length, an element and the ORDER are all read back, because a list
+// rebuilt in the wrong order would pass a length check.
+string[] list_global = {"ga", "gb", "gc"};
+
+int list_of_strings()
+{
+    string[] names = {"alpha", "beta", "gamma", "delta"};
+    int total = names.length() * 1000;
+    if (names[0] == "alpha") total += 100;
+    if (names[3] == "delta") total += 10;
+    if (names[1] == "beta") total += 1;
+    return total;
+}
+
+// Read without a loop, deliberately. The loop form of this shape trips a
+// SEPARATE and pre-existing structurer gap -- a bound computed into a slot
+// the body also uses for something else comes out as two gotos, with the
+// list fix stashed as well as applied -- and `bgt oracle` is only worth
+// having while it is a green gate. That repro is recorded in CLAUDE.md
+// rather than parked here where it would mask every later change.
+int list_of_ints()
+{
+    int[] values = {7, 11, 13};
+    int total = values.length() * 1000;
+    total += values[0] * 100;
+    total += values[1] * 10;
+    total += values[2];
+    return total;
+}
+
+int list_in_a_global()
+{
+    int total = list_global.length() * 100;
+    if (list_global[2] == "gc") total += 7;
+    return total;
+}
+
 // Global initialisation ORDER: a global initialised from another global. A
 // split that moves a declaration compiles perfectly and changes this, which
 // is the whole reason `verify` exists.
@@ -558,6 +605,9 @@ void main()
     report += "ternary_high=" + nested_ternary(9) + "|";
     report += "handle_identity=" + handle_identity() + "|";
     report += "global_order=" + second_global + "|";
+    report += "list_of_strings=" + list_of_strings() + "|";
+    report += "list_of_ints=" + list_of_ints() + "|";
+    report += "list_in_a_global=" + list_in_a_global() + "|";
     report += "counter=" + counter + "|";
     file f;
     f.open("REPORT_NAME", "wb");

@@ -339,6 +339,11 @@ def _needs_out_ref(dt: DataType) -> bool:
 # atoms: values living on the simulated stack / in variable slots
 # --------------------------------------------------------------------------
 
+#: A bare frame-slot or synthesised-local name, which an initialiser list
+#: hoisted to the top of a body must not refer to.
+_SLOT_NAME = re.compile(r"(?:local|arg|__nvgt)\w*")
+
+
 @dataclass
 class Atom:
     kind: str                    # const|var|global|prop|call|null|this|raw
@@ -1025,6 +1030,10 @@ class FuncDecompiler:
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
+        #: The constant the last `SetV*` put in a slot, live only across
+        #: the `PshListElmnt`/`PopRPtr` pair that follows it. See the
+        #: WRTV* handler.
+        self.last_set: tuple[int, Atom] | None = None
         self.object_branch_snapshots: dict[int, dict[int, Atom]] = {}
 
     # -- variable helpers ---------------------------------------------------
@@ -1438,6 +1447,15 @@ class FuncDecompiler:
 
     def step(self, ins: Instr) -> None:
         name = ins.name
+        # A scalar initialiser-list element is written
+        #     SetV4 s, K ; PshListElmnt ; PopRPtr ; WRTV4 s
+        # so the value is in the slot rather than on the stack. Remember
+        # it for exactly that window and for nothing else: any other
+        # instruction invalidates it, so a stale constant can never be
+        # read back as an element.
+        if name not in ("PshListElmnt", "PopRPtr") \
+                and not name.startswith(("SetV", "WRTV")):
+            self.last_set = None
         if self.k in self.sparse_switches:
             end, cases, default, join, offset = self.sparse_switches[self.k]
             self._flush_pending_call()
@@ -1565,6 +1583,7 @@ class FuncDecompiler:
                 a = self._typed_constant(
                     v, self.stored_const_types.get(self.k) or self.var_types.get(off),
                     name == "SetV8")
+            self.last_set = (_s16(ins.w_arg), a)
             self._bind(_s16(ins.w_arg), a)
             return
         if name == "LdGRdR4":
@@ -1577,11 +1596,19 @@ class FuncDecompiler:
                                   data_type=self.global_types.get(g))
             return
         if name in ("WRTV1", "WRTV2", "WRTV4", "WRTV8"):
-            v = self._slot_atom(_s16(ins.w_arg))
+            source = _s16(ins.w_arg)
+            v = self._slot_atom(source)
             g = self.pending_global
             self.pending_global = None
             if self.value_reg.kind == "list_elem":
                 ptr = self.value_reg
+                # The constant the compiler just parked in this slot is
+                # the element. Reading the slot instead gives its NAME
+                # wherever the slot is a named variable elsewhere in the
+                # body, which is a different value and an undeclared one.
+                if self.last_set is not None and self.last_set[0] == source:
+                    v = self.last_set[1]
+                self.last_set = None
                 dt = self.list_types.get(ptr.offset, {}).get(ptr.list_index)
                 self.list_values.setdefault(ptr.offset, {})[ptr.list_index] = self._normalize_arg(v, dt) if dt else v
             elif self.value_reg.kind == "global" and self.value_reg.is_ptr:
@@ -2597,6 +2624,72 @@ class FuncDecompiler:
                             constant_bits=bits)
         return Atom("const", str(value), 2 if wide else 1, constant_bits=bits)
 
+    #: Templates whose list factory takes KEY, VALUE pairs rather than
+    #: one element per entry.
+    PAIR_LISTS = ("dictionary", "name_value_collection",
+                  "internet_message_header", "http_request", "http_response")
+
+    def _list_literal(self, ret, arg: Atom, pos: int) -> str | None:
+        """The initialiser list a list factory was handed, as a declared local.
+
+        `string[] x = {"a", "b"}` compiles to AngelScript's
+        initialisation-list protocol: `AllocMem`, `SetListSize`, one
+        `PshListElmnt` write per element, then the template's list factory
+        taking the buffer. The buffer is VM bookkeeping with no name source
+        can write, so the call cannot be rendered as a call -- but the list
+        it carries IS the source, and dropping it loses every element.
+
+        Returns the name of a local declared with the list, or None when the
+        buffer cannot be accounted for completely. **Completely is the whole
+        check**: the number of element writes seen must equal the size
+        `SetListSize` declared, so a partially understood buffer renders as
+        nothing rather than as a shorter list. A list that is silently one
+        element short is worse than a call that does not compile.
+
+        Both spellings were put to BGT 1.3 before either was emitted:
+        `string[] a = {...}` and `array<string> a = {...}` compile and keep
+        their values, at global and at local scope.
+        """
+        if ret is None or ret.obj_type is None:
+            return None
+        if ret.obj_type.name not in ("array",) + self.PAIR_LISTS:
+            return None
+        # The argument is the buffer slot. It arrives named where the
+        # simulation gave the slot a name and as a bare pointer where it
+        # did not, so match on either.
+        off = next((o for o in self.list_values
+                    if self.name_of(o) == arg.text), None)
+        if off is None and arg.offset in self.list_values:
+            off = arg.offset
+        if off is None:
+            return None
+        values = self.list_values.get(off, {})
+        size = self.list_sizes.get(off, -1)
+        dictionary = ret.obj_type.name in self.PAIR_LISTS
+        if size < 0 or len(values) != size * (2 if dictionary else 1):
+            return None
+        subtype = (ret.template_subtypes[0]
+                   if ret.obj_type.name == "array" and ret.template_subtypes
+                   else None)
+        items = [self._normalize_arg(values[i], subtype).text if subtype
+                 else values[i].text for i in sorted(values)]
+        if dictionary:
+            items = ["{" + items[i] + ", " + items[i + 1] + "}"
+                     for i in range(0, len(items), 2)]
+        # **An element that names a frame slot is refused, not emitted.**
+        # The declaration is hoisted to the top of the body, so a slot
+        # name in it reads a value the slot does not hold yet -- and the
+        # name may not be declared at all. Refusing falls back to the
+        # empty-array rendering, which is wrong in a different way; it is
+        # the rendering this had before the list was recovered at all, and
+        # a list that does not compile is worse than one that is empty.
+        if any(_SLOT_NAME.fullmatch(item) for item in items):
+            return None
+        tname = ret.format().removeprefix("const ").rstrip("@&").strip()
+        local = f"__nvgt_list_{off}_{pos}"
+        self._stmt(f"{tname} {local} = " + "{" + ", ".join(items) + "};")
+        return local
+
     def _normalize_arg(self, atom: Atom, dt: DataType) -> Atom:
         source = atom.data_type
         if (dt.is_object_handle and source and source.obj_type
@@ -3022,6 +3115,29 @@ class FuncDecompiler:
             # and the list one takes the buffer by reference
             # (`string[]@ factstub(int&in)`). Only a by-value primitive is
             # something source wrote.
+            # ...and a by-reference parameter is not always bookkeeping. The
+            # template has a THIRD factory, the list one, and this older
+            # engine reaches it through a stub too -- `string[]@
+            # factstub(int&in)`, where the `int&in` is the initialiser-list
+            # buffer. Dropping it emitted `array<string>()` for
+            # `{"a", "b", ...}`, so the list came out empty and every
+            # element was lost: 114 of them in one of Paladin's functions,
+            # which is why the ship had no passengers to talk to.
+            for index, a in enumerate(args):
+                if index >= len(fr.param_types):
+                    continue
+                pt = fr.param_types[index]
+                if pt.obj_type is not None or not pt.is_reference:
+                    continue
+                local = self._list_literal(ret, a, ins.pos)
+                if local is None:
+                    continue
+                self.value_reg = Atom("var", local, data_type=ret)
+                self.pending_value_call = None
+                if has_out and pop_out is not None and pop_out.is_ptr \
+                        and pop_out.offset is not None:
+                    self._bind(pop_out.offset, self.value_reg)
+                return
             lengths = [a.text for index, a in enumerate(args)
                        if index < len(fr.param_types)
                        and fr.param_types[index].obj_type is None
@@ -3040,7 +3156,13 @@ class FuncDecompiler:
         # `const string&`, so nothing else rides on its frame. Collapsing the
         # call away entirely instead was tried in the lifter and reverted: it
         # desynchronises the literal from the PshRPtr that pushes the result.
-        if meth == "_string_factory_" or meth.endswith("stringfactory"):
+        # `$str` is the same registered factory under the name Manamon 1's
+        # fork gives it. Knowing only `_string_factory_` left both of the
+        # slots `STR` pushes on the stack, so every literal in that title
+        # rendered as `string(<strlen>, "the text")` -- a placeholder that
+        # is not source, and a parse error that cascades.
+        if meth in ("_string_factory_", "$str") \
+                or meth.endswith("stringfactory"):
             literal = next((a.text for a in args
                             if a.kind == "const" and a.text.startswith('"')), None)
             self.value_reg = Atom("const", literal if literal is not None else '""',
@@ -3108,21 +3230,9 @@ class FuncDecompiler:
             # LOADOBJ on a returning branch must not win at the next STOREOBJ.
             self.obj_reg = None
             tname = ret.format().removeprefix("const ").rstrip("@&").strip()
-            pair_lists = ("dictionary", "name_value_collection", "internet_message_header", "http_request", "http_response")
-            if meth.startswith("$list") and ret.obj_type and ret.obj_type.name in ("array",) + pair_lists and args:
-                off = next((o for o in self.list_values if self.name_of(o) == args[0].text), None)
-                values = self.list_values.get(off, {})
-                size = self.list_sizes.get(off, -1)
-                dictionary = ret.obj_type.name in pair_lists
-                if off is not None and len(values) == size * (2 if dictionary else 1):
-                    local = f"__nvgt_list_{off}_{ins.pos}"
-                    items = [self._normalize_arg(values[i], ret.template_subtypes[0]).text
-                             if ret.obj_type.name == "array" and ret.template_subtypes else values[i].text
-                             for i in sorted(values)]
-                    if dictionary:
-                        items = ["{" + items[i] + ", " + items[i + 1] + "}" for i in range(0, len(items), 2)]
-                    expr = "{" + ", ".join(items) + "}"
-                    self._stmt(f"{tname} {local} = {expr};")
+            if meth.startswith("$list") and args:
+                local = self._list_literal(ret, args[0], ins.pos)
+                if local is not None:
                     self.value_reg = Atom("var", local, data_type=ret)
                     return
             calltxt = f"{tname}({', '.join(a.text for a in args)})"

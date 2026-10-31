@@ -701,6 +701,42 @@ def test_no_source_file_holds_an_escape_a_shell_ate():
     assert not offenders, offenders
 
 
+#: The one expression that formats a braced initialiser list.
+JOIN_ITEMS = '", ".join(items)'
+
+
+def test_one_implementation_renders_an_initialiser_list():
+    """Both engine generations reach the same list factory, so one renderer.
+
+    `string[] x = {"a", "b"}` compiles to the initialisation-list protocol,
+    and the factory that consumes the buffer is reached as the behaviour
+    `$list` in the newer engine and as a generated template factory stub --
+    `string[]@ factstub(int&in)` -- in BGT's older one. The `$list` path
+    rendered the buffer as `{...}` while the `factstub` path dropped it, so
+    BGT arrays came out EMPTY: 681 elements across Crazy Party, 134 across
+    Paladin, 52 across Super Egg Hunt. Valid source that compiles, runs, and
+    loops zero times.
+
+    Two places answering one question, with one of them stricter, is the
+    failure this repository keeps recording. So it is asked once, and this
+    pins that: one definition, at least two call sites, and the braced form
+    built in exactly one place.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "tools", "nvgt", "decompile.py")
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+
+    assert source.count("def _list_literal(") == 1, (
+        "the list renderer must have exactly one definition")
+    callers = source.count("self._list_literal(")
+    assert callers >= 2, (
+        "both the $list and the factstub path must call it, found %d" % callers)
+    builders = source.count(JOIN_ITEMS)
+    assert builders == 1, (
+        "the braced list is formatted in %d places, expected 1" % builders)
+
+
 def test_the_documented_api_is_read_out_of_the_reference_pages():
     """One page per function, each carrying its signature verbatim.
 
