@@ -4742,10 +4742,42 @@ bytecode position rather than kept in append order. Counting only the
 binds a pass newly discovers is what makes it terminate, exactly as it
 does there.
 
-It is not done, and it is the next thing to do. The reason for writing
-it down rather than rushing it is the reason this section exists at all:
-the last fold-adjacent change measured clean on three titles and the
-fourth is where every one of them has been caught.
+#### The first attempt at it, measured and rejected
+
+That mechanism was built. It works on the defect -- `load_sound` comes
+back as `handle.stream(local_3);` in one arm and `handle.load(local_3);`
+in the other, each in the right place -- and it is **far too broad**:
+
+| title | lines changed | residual gotos |
+|---|---|---|
+| Paladin of the Sky | **7,627** | 0 |
+| Psycho Strike | **5,745** | 2 -> **4** |
+| Super Egg Hunt | **2,264** | 0 |
+
+Two new residual gotos is two new compiler errors, and a diff that size
+is not a fix, so it was reverted rather than tuned.
+
+**The mechanism was right and the signal was wrong, which is the part
+worth keeping.** Pass one was asked for "every call bind with no entry
+in `fold_reads`", and `fold_reads` is incremented in exactly one read
+path -- `_slot_atom`, the value pushed from a slot. A temp read through
+`_read_temp`, through `_deref`, or consumed straight off the simulation
+stack as an argument never touches it. So **"no entry" is not "never
+read"**; it is "not read through that one path", which is most of the
+call binds in a body.
+
+So the next attempt starts by making the read count complete -- a bind
+is read wherever its atom is handed out, which means every read path
+marking it, or the `Atom` carrying its own bind key and being marked
+when consumed. Only then is the two-pass carrying worth repeating. The
+`FREE` flush is the existing proof that the shape is recoverable; what
+it has that this lacked is a real end-of-life signal rather than an
+inferred one.
+
+That is the next thing to do, and the reason for writing this down
+rather than pushing on is the reason this section exists at all: the
+last fold-adjacent change measured clean on three titles, and the fourth
+is where every one of them has been caught.
 
 ### Eleven: a snapshot of a MEMBER is stale once that member is assigned
 
