@@ -1897,10 +1897,10 @@ checks say:
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | compiled cleanly, not re-run |
-| Paladin of the Sky | 27,254 | 0 | 0 | yes | 6,957 | compiled cleanly, not re-run |
-| Psycho Strike | 27,489 | 2 | 0 | yes | 6,403 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,678 | 14 | 0 | yes | 90,105 | 14, every one a residual `goto` |
-| Manamon 1 | 90,901 | 0 | 0 | yes | 26,476 | **not measured -- wrong engine** |
+| Paladin of the Sky | 27,256 | 0 | 0 | yes | 6,957 | compiled cleanly, not re-run |
+| Psycho Strike | 27,495 | 2 | 0 | yes | 6,403 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,725 | 14 | 0 | yes | 90,105 | 14, every one a residual `goto` |
+| Manamon 1 | 90,919 | 0 | 0 | yes | 26,476 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **All five rows are from one run of the code as it stands**, which this
@@ -3869,14 +3869,75 @@ consumes it rather than by the `CALL` that produced it -- and the
 innermost `opAdd` is the *last* instruction of the three. It is present at
 the previous commit too, so it is not new.
 
-Why it is recorded rather than fixed: it needs statement placement inside a
-nested expression to follow the operand, which is the kind of change this
-file keeps measuring and rejecting, and three other changes were already in
-flight. It is **not** in `bgt oracle`, deliberately, so that command stays a
+It is **not** in `bgt oracle`, deliberately, so that command stays a
 green gate; the fixture above is the whole repro. The exposure is narrow --
 it needs two or more impure operands in one concatenation, where a getter is
 the normal case -- and the symptom is a string built in the wrong order,
 which compiles, runs, and reads perfectly.
+
+#### It was built, measured three ways, and REJECTED -- the fifth
+
+This file said "no new evidence is needed for that change, only the
+work". The work was done and the sentence was wrong: what was needed was
+a measurement, and the measurement says do not take it.
+
+The mechanism is sound and read rather than fitted. `PshV4` pushes a copy
+of a temp's atom and its text is rendered only when a later call pops it,
+while `_append_stmt` places that statement at the **consuming**
+instruction; every `opAdd` result is an object slot, so each chain link is
+its own statement and the links run innermost-first, which is the reverse
+of the push order. Giving an operand its own position -- an `origin` on
+the atom and a generated local emitted at the bind, exactly as
+`_order_out_arguments` does for a deferred out-call -- fixes the order,
+and the chain's own statements cannot be reordered because each reads the
+slot the previous wrote.
+
+| attempt | placements (Paladin + Strike) | sites fixed |
+|---|---|---|
+| every placeable value on the stack, prefix-stopped | 50 + 52 | **1** |
+| ...only where a later impure call is in the same flow region | 35 + 33 | **1** |
+| ...only where the pop order was observed to differ from the push order | 1 + 8 | **0** |
+
+One site, in a title's `calculate_experience_formula`, whose six operands
+are pure engine date and time getters -- so nothing observable changes --
+against **102 generated locals in 23 files**, +75 lines on Paladin and
++102 on Psycho Strike, and one `bgt libcheck` score moving the wrong way
+(Strike 144 identical -> 143, on `control::focus`, which is the case this
+file already records as libcheck's own "order by closing parenthesis"
+approximation being the thing that is wrong). Super Egg Hunt stays
+byte-identical and no residual goto moves, so it is not a dangerous
+change -- it is an expensive one that buys almost nothing.
+
+**What tipped it was that the prize had already been taken.** On an older
+base the same change removed a real duplication --
+`party[recorder.rand(...)].strikes[recorder.rand(...)]`, four rolls where
+the source makes one, indexing a different party member than the one whose
+strike name it returns and reading off the end at the last index. On the
+current base `calls_checked` is **identical on all three titles** with and
+without it: the fold-safety rules and the `copy_binds` threshold hoist that
+roll already. So the ordering fix, judged alone, is one unobservable site.
+
+Three things the attempt established that are worth more than the diff:
+
+- **A call's own arguments are evaluated right to left by the engine too**,
+  so `random(f(1, 10), f(5, 30))` is *already* faithful -- the bytecode
+  computes the second argument first and the recovered text evaluates it
+  first. The pop order is therefore the wrong oracle: `_call` pops in
+  parameter order, so observing it calls a correct rendering "overtaken".
+  What would have to be observed is the statement each value lands in,
+  since two values folded into one statement are ordered by construction.
+- **The operands that matter carry no position to place.** In the one site
+  that is wrong, the string operands are object slots consumed as pointer
+  atoms with no origin, and the numeric one is only out of order relative
+  to *them*. Precision and coverage pull against each other because the
+  thing to be ordered is a mix of placeable primitives and unplaceable
+  object slots, and only the broad rule reaches both.
+- **A guard can go dead without anything failing.** The attempt needed
+  "every read so far must still be waiting on the stack" thirteen commits
+  ago, when BGT's own `sound_pool::play_stationary_extended` reserved two
+  slots where the source reserves one. Instrumented on the current base it
+  never fires: the promotion that now takes that slot happens first. Keep
+  such a guard on its mechanism, never on a measurement that has expired.
 
 Two things make it a check rather than a demo:
 
@@ -4473,6 +4534,270 @@ reads in that body are no longer bound in the statement that reads them
 and promote behind it -- three extra assignments that say nothing. The
 cascade is pre-existing rather than new here, and correct-and-noisier is
 the right side of that trade.
+
+### Ten: an object slot is written by a BEHAVIOUR, and nothing asked
+
+`slot_writes` answers "has this slot been written since the value was
+bound?", and it was built from the opcodes that name a slot. **A string
+is not filled by one.** It is filled by pushing its address and calling
+the constructor -- `PSF n` then `CALLSYS string::$beh0` -- and emptied by
+`$beh2`, so no entry in `_SLOT_WRITE_OPS` mentions slot `n` at all and
+the question could not be asked about an object slot.
+
+This file already records that sentence, for `_short_circuit_slots`, one
+place over. Two places answering one question with one of them blind is
+the shape it keeps recording, and this is the half that was never told.
+
+Manamon 1's `skill::will_fail` is the cost:
+
+```
+CALLINTF character::special_immunity        ; fills slot 1, the &out reason
+PSF 3 ; PSF 1 ; CALLSYS string::opAssign    ; slot1 = slot3
+STR "" ; $str ; PSF 3 ; CALLSYS string::$beh0    ; slot3 = ""
+PSF 3 ; PSF 1 ; CALLSYS string::opEquals    ; slot1 == slot3
+```
+
+-- `if (reason != "") { arg1 = reason; arg2 = ""; }`. The out string is
+taken by value into slot 1, so slot 1's atom reads `local_3`; nothing
+could see slot 3 being rebuilt as `""` in between, and the condition came
+out `if (local_3 != local_3)`. Always false, so **a skill's failure
+reason was never spoken** -- the player got the generic "The move
+failed!" every time -- and `unknown_gift::give` took its `else` arm,
+"You can't obtain this gift yet.", whatever the real reason was.
+
+Two things make the rule narrow enough to be safe, and both are read
+rather than tuned:
+
+- **The receiver of a behaviour is the address pushed LAST**, so only a
+  `PSF` immediately before the call counts. In
+  `PSF 3 ; PSF 1 ; opAssign` slot 1 is assigned and slot 3 is merely
+  read, which is the call-frame rule this file derives from the
+  bytecode and confirms from `MakeFunctionCall`. An operator counts only
+  when it **assigns**: `opAdd` returns a new value and leaves its
+  receiver alone.
+- **It counts only for a value that IS a slot**, and that narrowing is
+  measured rather than assumed. Counted for a computed value as well,
+  every string literal's scratch slot becomes a write -- so
+  `(arg1 + local_1)`, which merely mentions one, stops folding, and
+  Paladin's `map::deserialize` gains **56 lines** of literals pushed
+  into slots for no correctness at all. Kept to `kind == "var"`, the
+  same title moves by **two** lines in one body.
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,254 -> 27,256 | 0 | verified | 6,957 |
+| Psycho Strike | 27,489 | 2 | verified | 6,403 |
+| Crazy Party | 192,678 -> 192,693 | 14 | verified | 90,105 |
+| Manamon 1 | 90,901 -> 90,913 | 0 | verified | 26,476 |
+
+Psycho Strike and Super Egg Hunt render byte-identical and Paladin moves
+by one body -- `input_recorder::start_playing`, where a string copy now
+gets a name. Not one residual goto moves.
+
+#### What it found next door, diagnosed and open
+
+`input_recorder::rand` reads an out argument **before the call that fills
+it**:
+
+```
+211  CALLSYS dictionary::get      ; fills slot 5
+215  i64TOi 3 5                   ; int(local_5)   -- AFTER it
+216  CpyVtoV4 1 3
+```
+
+and the recovery emits `local_1 = int(local_5);` first, so the value
+converted is whatever slot 5 held before. That is the defect
+`_order_out_arguments` exists to prevent, and the reason it does not
+reach this one is read rather than guessed: an out argument is given a
+synthesised local only when the slot is **unnamed** or its type
+disagrees with the `TYPEID` (`if not self.is_named(off) or wrong_type`),
+and only those calls are registered in `deferred_out_calls`. A **named**
+slot passes straight through, so nothing records that the call writes it
+and nothing can order it.
+
+`rec_timer::real_elapsed` is the same shape and is fixed, by accident of
+scope: its receiver is the global `recorder`, so the ninth rule above
+promotes the value and the call lands at its own position. `rand`'s
+receiver is `system_data`, a member, so nothing reaches it. Fixing it
+properly means registering a named slot's out-call too, which is a
+change to what gets deferred and wants its own measurement.
+
+### A call whose result NOTHING READS is dropped, call and all
+
+Diagnosed and **not fixed**, with the sites named, because it is the
+most serious thing in this file that is still open.
+
+Dropping an expression whose value nothing reads is behaviour-preserving
+**only if the expression is pure**, and this file leans on that twice
+already: `generate_maze`'s discarded comparison and `sleep_in_bed`'s
+overwritten concatenation are both correctly dropped. A **call** is not
+pure, and the rule does not distinguish them.
+
+The first `bgt audit` ever run on Manamon 1 is what found it. 701 of its
+bodies are missing a call, and 695 of those are a base constructor the
+text writes `super()` -- the benign kind this file already records, in a
+title with 783 classes. **Six are not**, and four of the six are real:
+
+| body | lost | what it does |
+|---|---|---|
+| `sound_pool_item::load_sound` | `load`, `stream` | the sound pool never loads or streams a file |
+| `berserk::act` | `random` | a roll the confusion attack turns on |
+| `coin::act` | `update_sound_2d` | a coin's position never updates |
+| `pause_menu` | `menu_add_item` | an item never added to the menu |
+
+`load_sound` is the whole defect in eleven instructions:
+
+```
+SetV1 2 0 ; CpyVtoV4 1 2             ; bool ok = false;
+LoadThisR stream_sound ; RDR1 2 ; JLowZ L0
+    PSF 3 ; $beh0                    ; string tmp = filename
+    VAR 3 ; handle ; CALLSYS sound::stream
+    CpyRtoV4 2 ; CpyVtoV4 1 2        ; ok = <the result>
+    JMP L1
+L0: ... CALLSYS sound::load ; CpyRtoV4 2 ; CpyVtoV4 1 2
+L1: RET
+```
+
+`ok` is written and never read -- the original's own dead local -- so
+the recovery drops the store, and the call goes with it. What is left
+is `if (stream_sound) { local_3 = filename; return; } local_3 =
+filename;`: two branches that copy a string and do nothing. **A
+recovered Manamon 1's sound pool loads nothing at all.**
+
+Psycho Strike's three `enemy_count` rows are the same shape and were
+triaged as benign on the grounds that `enemy_count` is pure -- which is
+true, and is exactly why the shape went unnoticed: the first four
+instances anyone looked at were harmless.
+
+#### Why the existing flush does not reach it, and why the obvious fix
+
+`FREE` already flushes an unconsumed call atom: a temp whose value
+nothing read is emitted as a bare statement at the end of its life. Two
+things keep `load_sound` out of it:
+
+- **These slots are primitives and are never freed.** `FREE` is for
+  object slots; a `bool` in slot 1 has no end of life but the `RET`.
+- **The two calls are in different arms.** The simulation walks the
+  bytecode linearly, so by `RET` slot 1 holds whichever arm ran last
+  and the other arm's call is already gone. An end-of-body flush would
+  recover `load` and still lose `stream`.
+
+And flushing at a **rebind** is already recorded here as tried and
+wrong, with the measurement: a rebind is not proof the previous value
+went unread, so every intermediate of a built-up expression gets
+emitted *and* folded into the final statement -- Paladin's
+`clock::reset` came out running `get_time(false)` five times.
+
+So the fix is the **two-pass** mechanism this file already uses for
+`duplicate_binds`: `_body` re-simulates a function while each pass
+discovers more, so pass one can record every bind that was never read,
+and the next emits each at the position the bytecode computed it --
+which is inside the arm it belongs to, because events are sorted by
+bytecode position rather than kept in append order. Counting only the
+binds a pass newly discovers is what makes it terminate, exactly as it
+does there.
+
+It is not done, and it is the next thing to do. The reason for writing
+it down rather than rushing it is the reason this section exists at all:
+the last fold-adjacent change measured clean on three titles and the
+fourth is where every one of them has been caught.
+
+### Eleven: a snapshot of a MEMBER is stale once that member is assigned
+
+`_prop_receiver` gives `this` for a bare member, and deliberately: a
+method call on the object can change any field. What it cannot see is
+the simplest write of all. **`curseur += arg0;` names no `this`**, so
+the member rule asked whether anything had touched the object and missed
+the statement that moved the very thing being snapshotted.
+
+Crazy Party's `CodexOmbre::moveCurseur` is the shape, and six more of
+its classes have it:
+
+```
+int old = curseur;
+curseur += arg0;
+if (curseur < 0) curseur = 0;
+else if (curseur >= liste.length()) curseur = liste.length() - 1;
+if (curseur != old) joueSon("item", ...);
+```
+
+That guard plays the cursor sound only when the clamp did not eat the
+move. Folded it is `curseur != curseur`, always false, so **arrowing
+through those menus made no sound at all** -- the same symptom as Super
+Egg Hunt's silent menu, in seven minigames plus the lift, the dice and
+`ZrArcEnCiel`. Manamon 1's `coin_collector` is the same over `game_x`,
+where the guard decides whether to move the 2D listener at all.
+
+**And `audio_form`'s type-to-search is worse, in a library file Crazy
+Party edits** -- so BGT's own `form.bgt` settles what the shape should
+be. It keeps one snapshot for two guards:
+
+```
+if (list_position == list_position) { ...search again from the top... }
+if (list_position != list_position) { speak(list[list_position].item); }
+```
+
+The first is always true, so the wrap-around search runs even when the
+downward search succeeded and overwrites the find with the first match
+from the top; the second is always false, so the item found is never
+spoken. Typing a letter in any of that title's forms jumps to the wrong
+entry, silently.
+
+**If you assign to X, a snapshot of X is stale.** That is as narrow as a
+fold rule gets -- `_mutates` wants an assignment or an increment to that
+exact path, so a statement that only reads the member leaves it folded --
+and it is the one thing the member rule never asked.
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 -> 6,240 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,256 -> 27,256 | 0 | verified | 6,957 |
+| Psycho Strike | 27,489 -> 27,495 | 2 | verified | 6,403 |
+| Crazy Party | 192,693 -> 192,725 | 14 | verified | 90,105 |
+| Manamon 1 | 90,913 -> 90,919 | 0 | verified | 26,476 |
+
+Super Egg Hunt and Paladin are identical on every count, the other three
+move by the snapshots the rule gives back, and not one residual goto,
+call count, split check, passthrough or unbalanced count moves anywhere.
+
+**The sweep is where the result shows.** `bgt signatures` counts
+tautologies -- a condition comparing something with itself, which is what
+a collapsed snapshot leaves -- and on the two titles this rule reaches:
+
+| title | tautologies |
+|---|---|
+| Crazy Party | 19 -> **2** |
+| Manamon 1 | 4 -> **0** |
+| Paladin of the Sky | 1 -> 1 -- the author's own typo in `battle`, correctly kept |
+| Psycho Strike | 0 -> 0 |
+
+Crazy Party's whole networking menu comes back with it: a chain of
+`if (local_51 == "liste") ... else if (local_51 == local_2)` over one
+reused string slot, which had collapsed into comparisons against the
+last literal assigned.
+
+#### The two that are left are one line, and they are the open question
+
+`DeRetournable::bouge` snapshots both coordinates into declared locals
+and compares them after the move:
+
+```
+LoadThisR DeRetournable::x ; RDR4 1 ; CpyVtoV4 3 1     ; int oldx = x;
+LoadThisR DeRetournable::y ; RDR4 2 ; CpyVtoV4 4 2     ; int oldy = y;
+...
+if (x != oldx || y != oldy) { ...the tile flips... }
+```
+
+Nothing between the snapshot and the read assigns `x`, and nothing names
+`this`: what moves the object is a method on **another** object that
+holds a handle to it. So no receiver-based test can see it, and neither
+can this rule -- which makes it the second piece of evidence for the
+question the ninth rule left open, after the Manamon 1 healing items:
+**should a member read snapshotted across a call go stale
+unconditionally, the way a global's does?** Two sites now say yes and no
+measurement says what it would cost. That is the next fold rule to
+settle, and it is still not settled here.
 
 ### The signatures, swept
 

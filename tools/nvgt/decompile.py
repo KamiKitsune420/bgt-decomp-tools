@@ -108,6 +108,13 @@ SKIP_OPS = {"CHKREF", "ChkRefS", "ChkNullS", "ChkNullV", "SUSPEND", "ClrHi",
             "LINE", "LABEL", "ObjInfo", "Block", "VarDecl", "TryBlock",
             "SetListSize", "SetListType", "PshListElmnt", "AllocMem"}
 CTORS = {"$beh0", "$beh1"}     # default ctor / copy ctor
+#: Operators that write their receiver. `opAdd` returns a new value and
+#: leaves its receiver alone, so it is deliberately absent: a `PSF` before
+#: one is a receiver being read.
+_ASSIGN_OPS = frozenset((
+    "opAssign", "opAddAssign", "opSubAssign", "opMulAssign", "opDivAssign",
+    "opModAssign", "opPowAssign", "opAndAssign", "opOrAssign", "opXorAssign",
+    "opShlAssign", "opShrAssign", "opUShrAssign"))
 DTORS = {"$beh2", "$beh3"}
 
 
@@ -893,9 +900,50 @@ class FuncDecompiler:
                           if i.name == "JMP" and _jump_target(i) > i.pos]
         #: Where each frame slot is written, by bytecode position.
         self.slot_writes: dict[int, list[int]] = {}
-        for op in self.instrs:
+        #: Writes through a behaviour, kept apart from the opcode ones
+        #: because they answer a narrower question -- see below.
+        self.behaviour_writes: dict[int, list[int]] = {}
+        for index, op in enumerate(self.instrs):
             if op.name in _SLOT_WRITE_OPS:
                 self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
+                continue
+            #: **An object slot is written by a BEHAVIOUR, not by an opcode
+            #: that names it**, and this set was built from opcodes alone --
+            #: so the question "has this slot been written since?" could not
+            #: be asked about a string at all. `_short_circuit_slots` already
+            #: knows this, one place over; two places answering one question
+            #: with one of them blind is the shape this file keeps recording.
+            #:
+            #: Manamon 1's `skill::will_fail` is the cost:
+            #:
+            #:     CALLINTF character::special_immunity   ; fills slot 1
+            #:     PSF 3 ; PSF 1 ; CALLSYS string::opAssign     ; slot1 = slot3
+            #:     STR "" ; $str ; PSF 3 ; CALLSYS string::$beh0   ; slot3 = ""
+            #:     PSF 3 ; PSF 1 ; CALLSYS string::opEquals     ; slot1 == slot3
+            #:
+            #: -- `if (reason != "")`, where slot 1 took the out string by
+            #: value. The copy left slot 1's atom reading `local_3`, and
+            #: nothing could see slot 3 being rewritten to `""` in between,
+            #: so it rendered `if (local_3 != local_3)`: always false. The
+            #: skill's failure reason was never spoken, and
+            #: `unknown_gift::give` took its `else` arm for the same reason.
+            #:
+            #: The receiver of a behaviour is the address pushed LAST, which
+            #: is why only a `PSF` immediately before the call counts: in
+            #: `PSF 3 ; PSF 1 ; opAssign` slot 1 is assigned and slot 3 is
+            #: merely read.
+            if op.name != "PSF" or _s16(op.w_arg) <= 0:
+                continue
+            nxt = next((self.instrs[j] for j in range(index + 1,
+                                                      min(index + 4, len(self.instrs)))
+                        if self.instrs[j].name != "SUSPEND"), None)
+            callee = getattr(getattr(nxt, "func_ref", None), "name", "") or ""
+            #: A behaviour has two spellings (`$beh0` in the module, printed
+            #: `_beh_0_`), and an operator only counts when it ASSIGNS: a
+            #: `PSF` before `opAdd` is a receiver that is read, not written.
+            if callee.startswith(("$beh", "_beh_")) or callee in _ASSIGN_OPS:
+                self.behaviour_writes.setdefault(
+                    _s16(op.w_arg), []).append(op.pos)
         #: (loop head, back edge) for every backward jump. A read inside the
         #: loop runs once per iteration, so a value computed before the loop
         #: cannot be folded into it -- the loop body may assign the slot, and
@@ -2254,8 +2302,24 @@ class FuncDecompiler:
                 names = {value.text.lstrip("@")}
             else:
                 names = set(_IDENT.findall(_mask_strings(value.text)))
+            #: **A behaviour write counts only for a value that IS a slot.**
+            #: An object slot is filled by a constructor through a pushed
+            #: address, so `behaviour_writes` is the only record of it -- and
+            #: a string copied out of one keeps that slot's NAME, which is
+            #: exactly the value that goes stale when the slot is rebuilt
+            #: (`skill::will_fail`, where `if (reason != "")` became
+            #: `if (local_3 != local_3)`).
+            #:
+            #: Counting it for a COMPUTED value as well was measured and is
+            #: much too broad: every string literal in a body is constructed
+            #: into a scratch slot, so `(arg1 + local_1)` -- which merely
+            #: mentions one -- stopped folding, and Paladin's
+            #: `map::deserialize` gained 56 lines of literals pushed into
+            #: slots for no correctness at all.
+            behaviour = self.behaviour_writes if value.kind == "var" else {}
             if any(any(bound[0] < write <= self._pos()
-                       for write in self.slot_writes.get(slot_of[name], ()))
+                       for write in (tuple(self.slot_writes.get(slot_of[name], ()))
+                                     + tuple(behaviour.get(slot_of[name], ()))))
                    for name in names if name in slot_of):
                 # A repeatable value answers True whatever its type, which
                 # is what this did before it was hoisted. A computed one
@@ -2338,7 +2402,36 @@ class FuncDecompiler:
             # that where the source declared a local.
             if value.kind == "prop" and bound[1] != self.stmt_count:
                 owner = _prop_receiver(value.text)
-                if any(_mutates(text, owner)
+                #: **...and an assignment to the member ITSELF**, which the
+                #: receiver test cannot see when the member is written bare.
+                #: `_prop_receiver` gives `this` for a bare member -- a
+                #: method call on the object can change any field -- and
+                #: `curseur += arg0;` names no `this` at all, so a snapshot
+                #: of `curseur` survived the statement that moved it.
+                #:
+                #: Crazy Party's `CodexOmbre::moveCurseur` is the shape, and
+                #: six more of its classes have it:
+                #:
+                #:     int old = curseur;
+                #:     curseur += arg0;
+                #:     if (curseur < 0) curseur = 0;
+                #:     else if (curseur >= liste.length()) curseur = ...;
+                #:     if (curseur != old) joueSon("item", ...);
+                #:
+                #: -- the cursor sound, played only when the clamp did not
+                #: eat the move. Folded, that guard is `curseur != curseur`,
+                #: always false, so **arrowing through those menus made no
+                #: sound at all**. `audio_form`'s type-to-search is worse,
+                #: because it snapshots the position for two guards: the
+                #: `==` one always fires, so the wrap-around search
+                #: overwrites a successful find with the first match from
+                #: the top, and the `!=` one never fires, so the item found
+                #: is never spoken.
+                #:
+                #: If you assign to X, a snapshot of X is stale, which is
+                #: about as narrow as a fold rule gets -- `_mutates` wants
+                #: an assignment or an increment to that exact path.
+                if any(_mutates(text, owner) or _mutates(text, value.text)
                        for text in self.stmt_texts[bound[1]:]):
                     return declarable
             # **...and so does a GLOBAL, which has no receiver at all.**

@@ -138,6 +138,10 @@ class FoldSafetyTests(unittest.TestCase):
         # what it was written for; the diamond's own test sets them.
         sim.jmp_spans = []
         sim.slot_writes = {}
+        # Writes through a behaviour, which no opcode names. Empty here so a
+        # case that is not about object slots stays about what it was written
+        # for; the behaviour case sets it.
+        sim.behaviour_writes = {}
         sim.short_circuit_slots = set()
         sim.var_names = {}
         # `_stale_global` asks which of the module's globals a value
@@ -335,6 +339,140 @@ class FoldSafetyTests(unittest.TestCase):
         self.assertTrue(
             sim(length, ["item_list.resize(4);"], globals_=())
             ._stale_fold(12))
+
+    def test_a_snapshot_of_a_member_is_stale_once_that_member_is_assigned(self):
+        """`_prop_receiver` gives `this` for a bare member, and a bare
+        member assignment names no `this`.
+
+        A method call on the object can change any field, which is why the
+        receiver of a bare member is `this` -- but `curseur += arg0;` does
+        not mention `this`, so the test could not see the statement that
+        moved the very thing being snapshotted.
+
+        Crazy Party's `CodexOmbre::moveCurseur` and six more of its classes
+        keep `int old = curseur;`, move and clamp the cursor, and play the
+        cursor sound only `if (curseur != old)`. Folded, that guard is
+        `curseur != curseur` -- always false -- so arrowing through those
+        menus made no sound at all. `audio_form`'s type-to-search uses the
+        same snapshot for two guards, so its `==` one always fired (the
+        wrap-around search overwrote a successful find) and its `!=` one
+        never did (the item found was never spoken).
+        """
+        from decompile import Atom, DataType
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+
+        def sim(texts, text="curseur"):
+            return self._sim(instrs=instrs, k=8,
+                             temps={12: Atom(kind="prop", text=text)},
+                             temp_bound={12: (8, 0)},
+                             var_names={}, slot_writes={},
+                             var_types={12: DataType(token_type=70)},
+                             duplicate_binds=set(), cond_spans=[],
+                             back_edges=[], stmt_count=len(texts),
+                             stmt_texts=texts)
+
+        # The member itself is assigned in between, written bare.
+        self.assertTrue(sim(["curseur += arg0;"])._stale_fold(12))
+        self.assertTrue(sim(["curseur = 0;"])._stale_fold(12))
+        self.assertTrue(sim(["curseur++;"])._stale_fold(12))
+        # ...and qualified, which the receiver test already caught.
+        self.assertTrue(sim(["this.curseur = 0;"])._stale_fold(12))
+        # A statement that only READS it does not invalidate it.
+        self.assertFalse(sim(["local_4 = curseur;"])._stale_fold(12))
+        # ...but a method call on the object still does, by the older half
+        # of this test: a method can change any field, which is why a bare
+        # member's receiver is `this` in the first place.
+        self.assertTrue(sim(["this.lis(curseur, true);"])._stale_fold(12))
+        # A different member is a different thing.
+        self.assertFalse(sim(["curseurX += 1;"])._stale_fold(12))
+        # And a dotted member path is matched as the whole path.
+        self.assertTrue(
+            sim(["c_form[i].list_position = 4;"],
+                text="c_form[i].list_position")._stale_fold(12))
+
+    def test_an_object_slot_is_written_by_a_behaviour_not_by_an_opcode(self):
+        """`slot_writes` was built from opcodes, and a string is not filled
+        by one.
+
+        An object slot is filled by pushing its address and calling the
+        constructor -- `PSF n` then `CALLSYS string::$beh0` -- so no entry
+        in `_SLOT_WRITE_OPS` mentions slot `n` at all, and the question
+        "has this slot been written since?" could not be asked about a
+        string. `_short_circuit_slots` already knew this one place over.
+
+        Manamon 1's `skill::will_fail` is the cost. The out string is taken
+        by value into slot 1, `""` is then built in slot 3, and the two are
+        compared -- `if (reason != "")`. Nothing could see slot 3 being
+        rebuilt, so the copy's atom still read `local_3` and the condition
+        rendered `if (local_3 != local_3)`: always false, so the skill's
+        failure reason was never spoken and `unknown_gift::give` took its
+        `else` arm whatever the reason was.
+
+        It counts only for a value that IS a slot, and the narrowing is
+        measured: counting it for a computed value too made every string
+        literal's scratch slot stale, and Paladin's `map::deserialize`
+        gained 56 lines of literals pushed into slots for no correctness.
+        """
+        from decompile import Atom, DataType
+
+        class Ref:
+            def __init__(self, name):
+                self.name = name
+
+        def instr(pos, name, w_arg=0, func=None):
+            i = Instr(pos=pos, op=0, name=name, bc_type="", size=1)
+            i.w_arg = w_arg
+            i.func_ref = Ref(func) if func else None
+            return i
+
+        # PSF 3 ; CALLSYS string::$beh0   -- slot 3 is constructed at pos 4.
+        instrs = [instr(0, "SUSPEND"), instr(4, "PSF", 3),
+                  instr(8, "CALLSYS", 0, "$beh0"), instr(12, "SUSPEND"),
+                  instr(16, "SUSPEND")]
+        fn = type("F", (), {"variables": [], "param_types": [],
+                            "obj_variable_info": [], "has_debug_info": False,
+                            "parameters": [], "name": "will_fail"})()
+
+        def sim(kind):
+            s = self._sim(instrs=instrs, k=4,          # reading at pos 16
+                          temps={1: Atom(kind=kind, text="local_3")},
+                          temp_bound={1: (0, 0)},
+                          var_names={3: "local_3"},
+                          var_types={1: DataType(token_type=70)},
+                          duplicate_binds=set(), cond_spans=[],
+                          back_edges=[], stmt_count=2,
+                          stmt_texts=["local_3 = \"\";", "x = 1;"])
+            s.slot_writes = {}
+            s.behaviour_writes = {3: [4]}
+            return s
+
+        # The value IS slot 3, and slot 3 was rebuilt in between.
+        self.assertTrue(sim("var")._stale_fold(1))
+        # A computed value that merely mentions it still folds: that is
+        # every string literal's scratch slot, and refusing them all cost
+        # 56 lines in one body for nothing.
+        self.assertFalse(sim("call")._stale_fold(1))
+        # And with no behaviour write recorded, nothing changes.
+        bare = sim("var")
+        bare.behaviour_writes = {}
+        self.assertFalse(bare._stale_fold(1))
+
+    def test_a_behaviour_write_is_the_receiver_pushed_last(self):
+        """Only a `PSF` immediately before the call counts.
+
+        The receiver of a behaviour is the address pushed LAST, so in
+        `PSF 3 ; PSF 1 ; CALLSYS string::opAssign` slot 1 is assigned and
+        slot 3 is merely read. And an operator only counts when it
+        ASSIGNS: `opAdd` returns a new value and leaves its receiver
+        alone, so a `PSF` before one is a receiver being read.
+        """
+        from decompile import _ASSIGN_OPS
+        self.assertIn("opAssign", _ASSIGN_OPS)
+        self.assertIn("opAddAssign", _ASSIGN_OPS)
+        self.assertNotIn("opAdd", _ASSIGN_OPS)
+        self.assertNotIn("opEquals", _ASSIGN_OPS)
+        self.assertNotIn("opIndex", _ASSIGN_OPS)
 
     def test_assigning_a_field_of_an_object_changes_the_object(self):
         """`voice.rate++` is not a call on `voice` nor an assignment to it.
