@@ -129,6 +129,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_apicheck.py` | `bgt apicheck`: every call in a recovered project's text, against every arity its own build declares -- the check for a title the compiler cannot parse |
 | `bgt_audit.py` | `bgt audit`: every callee, string literal and numeric constant the BYTECODE holds, against the recovered text -- the instrument that found the dropped initialiser list and the flattened clock |
 | `bgt_signatures.py` | `bgt signatures`: shapes in recovered text that no author would write -- one per bug class in this file, swept, with the delta between two trees |
+| `bgt_roundtrip.py` | `bgt roundtrip`: the original bytecode against the RECOMPILED bytecode, body by body -- the only check that compares a recovery against the whole original |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
@@ -183,6 +184,7 @@ bgt oracle                                # does a recovery still COMPUTE the sa
 bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
 bgt audit    recovered/ game.exe          # ...and did it LOSE a value?
 bgt signatures recovered/                 # ...and does the text say something odd?
+bgt roundtrip game.exe recovered/game.exe # ...and does it COMPILE BACK to the same thing?
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 ```
 
@@ -1896,11 +1898,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | compiled cleanly, not re-run |
-| Paladin of the Sky | 27,257 | 0 | 0 | yes | 6,958 | compiled cleanly, not re-run |
-| Psycho Strike | 27,498 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,765 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
-| Manamon 1 | 90,925 | 0 | 0 | yes | 26,481 | **not measured -- wrong engine** |
+| Super Egg Hunt | 5,780 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
+| Paladin of the Sky | 25,942 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Psycho Strike | 25,870 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 190,735 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
+| Manamon 1 | 89,712 | 0 | 0 | yes | 26,481 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **All five rows are from one run of the code as it stands**, which this
@@ -1913,13 +1915,23 @@ and the way to keep saying this is the cheap one: freeze a copy of
 `tools/`, point `BGT_TOOLS` at it, and the verdict on a commit can be
 taken after the working tree has moved on.
 
-**The compiler column is still not re-run, and it is the one column that
-cannot be.** It is the verdict on a recovery those line counts no longer
-describe, and asking costs a modal dialog on whoever is at the machine --
-so it is a thing to do deliberately and not while someone is using the
-computer. What the column says is true of the commit it was measured at;
-the residual goto count is the proxy in the meantime, and `bgt audit`,
-`bgt signatures` and `bgt apicheck` are the checks that cost nothing.
+**Two of the compiler column's rows ARE re-run now**, which this section
+has said all along cannot be done cheaply. It still cannot be done
+cheaply -- asking costs a modal dialog on whoever is at the machine, so
+it is a thing to do deliberately and not while someone is using the
+computer -- but the two titles that compile cleanly are also the two
+where the dialog is the *success* one the driver dismisses, so the cost
+is small and the answer is worth having. Super Egg Hunt and Paladin were
+both built with `bgt compile --build release` at the current code and
+both report `compiled cleanly`, and the executables are what
+`bgt roundtrip` then compares against the originals.
+
+The other three rows stand as measured at their commit: Psycho Strike's
+34 are the installed engine's absences, Crazy Party's 14 are its
+residual gotos, and Manamon 1 cannot be asked at all because the only
+engine here is BGT 1.3 and that title is a 2017 fork. The residual goto
+count is the proxy for those, and `bgt audit`, `bgt signatures` and
+`bgt apicheck` are the checks that cost nothing.
 
 **Every number above was re-measured, and several of them moved a long
 way.** The table used to claim 0 residual gotos for Psycho Strike and for
@@ -3554,6 +3566,357 @@ exactly "some maps". **It is case-insensitive**, which was put to the engine
 rather than argued: a probe built a pack holding `audio/bgm/analytics.ogg` and
 `pack_file::file_exists`, `list_files` and `sound::stream` all answer yes to
 `audio/bgm/Analytics.ogg` and to `AUDIO/bgm/analytics.ogg`.
+
+## Compiling it back: the original bytecode against the RECOMPILED bytecode
+
+Every other check here compares a recovery against something *smaller*
+than the program. `bgt audit` compares a body's callees, literals and
+constants as **multisets**, so it cannot see a statement that moved, a
+comparison whose operator changed, or a conditional that lost its guard.
+`bgt libcheck` compares against BGT's own library source, which reaches
+149 of a title's 926 bodies. `bgt apicheck` asks only whether a call
+could resolve. `bgt oracle` runs 51 shapes nobody shipped. None of them
+answers the question the whole project is pointed at: **does the recovered
+source mean what the original meant?**
+
+The compiler answers it, and the answer is a number:
+
+```bash
+bgt recover game.exe -o out/
+bgt compile out/game.bgt --build release
+bgt roundtrip game.exe out/game.exe
+bgt roundtrip game.exe out/game.exe --detail sound_pool::verify_slot
+```
+
+Both modules are parsed, their bodies paired by `owner::name`, and each
+pair diffed instruction for instruction. What is compared, and what is
+deliberately not:
+
+- the **opcode sequence**, which is the whole point;
+- every operand that **names** something -- a callee, a literal, a global,
+  a member, a type -- taken as the name, because a rebuild reorders every
+  table and an index means nothing across two modules;
+- every operand that is a **constant**, taken as its value;
+- a **jump**, taken as its relative distance in instructions, which is
+  comparable between two bodies of one shape where a label number is not;
+- a **frame slot**, renumbered first-seen for the strict score and dropped
+  for the loose one. The compiler allocates slots in its own order, and a
+  recovered body with one local more shifts every later offset, so
+  comparing raw offsets would report every body as differing and mean
+  nothing by it.
+
+Which operands are slots comes from `asBCInfo[].type` -- AngelScript's own
+`asBCType` enum, where `asBCTYPE_wW_rW_DW_ARG` spells the shape out. The
+transcription is **checked against the build's own table**: every entry's
+operand count has to equal the count the decoder steps by, and a
+disagreement raises rather than being tolerated, because a wrong mapping
+would read a constant as a slot and renumber it away -- so a flattened
+constant would compare equal and nothing would say so.
+
+### It is calibrated against a known answer
+
+A comparison nobody has calibrated is worth nothing, and this one has an
+oracle built in. `bgt recover` substitutes **BGT's own shipped source**
+for a library file that matches, so those bodies are compiled from source
+this project did not write -- and every one of them comes back
+**instruction for instruction identical**: all four of Super Egg Hunt's
+`position_sound_*` bodies, one of them 110 instructions, and
+`number_speaker::speak`, `speak_next` and `speak_wait`.
+
+So the compiler is deterministic, equal source really does give equal
+bytecode, and **every differing body is a difference between the recovered
+source and the original's** rather than noise from the engine. That is the
+whole licence to read a difference as a lead.
+
+### The edit distance is the measurement; the exact-match count is not
+
+A body usually differs for several independent reasons at once, so closing
+one of them leaves it differing. The first real fix measured against this
+**halved Super Egg Hunt's distance while the exact-match count did not
+move at all**:
+
+| | instructions added or lost | of the original's 28,564 | bodies identical |
+|---|---|---|---|
+| before | 20,036 | 70.1% | 29 / 137 |
+| after | **15,124** | **52.9%** | 29 / 137 |
+
+and the module the engine wrote went from 119,103 bytes to 110,501 against
+the original's 106,166 -- oversize from **+12.2% to +4.1%**. Quoting the
+exact-match count alone would have reported that fix as worthless.
+
+### Two titles, and Paladin's compiler column re-run
+
+| title | bodies paired | identical | with slots | edit distance | of the original |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 137 / 210 | 29 | 29 | 15,124 | 52.9% |
+| Paladin of the Sky | 798 / 926 | **256** | 255 | 74,725 | 58.2% |
+
+Paladin pairs 798 bodies and **loses none** -- the only labels in the
+rebuilt module that are not in the original are its six generated
+`__nvgt_global_init_N`. Its strict score is one lower than its loose one,
+which is the first evidence that the slot half of the comparison does any
+work at all: one body uses its frame differently while doing the same
+things in the same order.
+
+**And it compiled cleanly**, which is why the standings' compiler column
+now carries two rows that were measured at the current code rather than
+inherited from the commit they were written at. The column is still the
+expensive one -- asking costs a dialog on somebody's screen -- but on a
+title that compiles cleanly the dialog is the success one the driver
+dismisses, which is a cost worth paying once per measurement.
+
+### A low ratio means MISALIGNMENT, not a defect
+
+The first thing worth knowing before reading a row. `preload_all` scores
+**0.015** over 560 instructions -- almost nothing matching -- and it is
+not a defect at all:
+
+```
+original:   preload_add("audio/se/cecil/strikestart.ogg");   // a temp per item
+rebuilt:    local_0 = "audio/se/cecil/strikestart.ogg";
+            preload_add(local_0);                            // one declared local
+```
+
+Both reach `preload_add` with the same bytes. The original constructs and
+destroys a string temp per item where the recovery assigns into one
+declared local, so **every item is offset by one instruction** and the
+sequence matcher cannot align any of it. The rebuilt body is even
+*shorter* -- 478 against 560 -- because it builds one string where the
+original builds ninety.
+
+So a ratio is a measure of alignment. Sort by it to find the bodies worth
+reading, never to rank how wrong they are, and read the delta and the diff
+before concluding anything. The same caution the rest of this file gives
+about `libcheck` scores applies here with more force, because this
+comparison is per instruction and a one-instruction phase shift is total.
+
+### What dominates the remaining distance, and it is one shape
+
+**A string literal routed through a declared local instead of being the
+argument.** It is the same finding as the dead handle alias one type over:
+an object slot the compiler materialised, treated as a source variable.
+The compiler reuses one slot for every literal in a body -- construct,
+pass, destroy, construct again -- and `objVariableTypes` names it, so the
+decompiler declares it and emits an assignment per literal:
+
+```
+local_6 = "wargrounds";
+starting_map = get_map_slot(local_6);        // get_map_slot("wargrounds")
+```
+
+It is behaviour-identical, and it is most of what is left. **Sized by
+asking the output**, per literal assignment, by how many times that
+value is read before the slot is written again:
+
+| | Super Egg Hunt | Paladin of the Sky |
+|---|---:|---:|
+| read once, slot reused after | 408 | 1,897 |
+| read once, slot used once | 17 | 144 |
+| read three times or more | 40 | 229 |
+| assigned and never read | 1 | 6 |
+| **total `local_N = "...";`** | **468** | **2,281** |
+
+So about 90% are read exactly once per value -- 425 lines of Egg Hunt's
+5,780 and 2,041 of Paladin's 25,942, **near enough 8% of the output on
+each**. And the 83-87% that reuse the slot say the fold has to be per
+VALUE rather than per slot, which is how `temp_bound` already works.
+
+#### ...and the engine names the discriminator outright
+
+The question a fold like this has to answer is the one this file keeps
+calling unanswerable: did the source NAME this slot? For a string it is
+answerable, because the two cases call different functions. Counted over
+the window `STR ; <factory> ; PshRPtr ; PSF v ; CALLSYS ?`:
+
+| what consumes the literal | Super Egg Hunt | Paladin |
+|---|---:|---:|
+| `string::string(const string&in)` -- a copy-constructed TEMPORARY | 544 | 2,759 |
+| `string& string::opAssign(const string&in)` -- a DECLARED local | 2 | 20 |
+
+**And the first reading of that was too strong, so here is the accurate**
+**one.** A copy construction is an *initialisation*, and a declared local
+is initialised too -- `string s = "x";` copy-constructs into `s`. What
+the split really says is that **`opAssign` is a RE-assignment to a slot
+already constructed**, which only a declared local has: a temporary is
+constructed at each use and destroyed after it. So Paladin's original
+re-assigns a string local 20 times and its recovery writes 2,281 such
+lines, which is the mismatch; the constructor alone does not name the
+case.
+
+What separates a reused temporary slot from a declared local is therefore
+**how many construction SITES target it**. A declared local is
+constructed once, where it is declared; the compiler's scratch slot is
+constructed afresh at every use, which is exactly the 83-87% the census
+above calls "slot reused". Two sibling scopes each declaring a local at
+one offset would give two sites and be folded, which is behaviour-
+identical and reads better, so the error that costs anything is the other
+one -- a single-site temp staying a variable, which is the status quo.
+
+Two independent counts agree closely: 2,759 copy-constructions against
+2,041 literal assignments read once, in a title where some literals are
+arguments never parked in a slot at all. That agreement is the reason to
+believe the sizing; the mechanism above is what the rule has to turn on.
+
+**And the lever is already in place**, which is what makes this worth
+trying rather than guessing at. The constructor handler branches on
+`self.is_named(dst.offset)`: a named slot gets `_emit_assign` and an
+unnamed one goes to `temps` with `temp_bound` set. So routing a reused
+slot's construction down the second path puts it under every fold-safety
+rule in this file -- `_stale_fold` promotes it if it goes stale, and the
+duplicate-bind pass promotes it back to a variable if it is read twice.
+The safety net is the existing one; only the classification changes.
+
+**Not attempted here.** A fold change is where every expensive mistake in
+this file lives -- five rejected attempts with their measurements -- and
+the change above is the one being measured. It owes the same five-title
+table: lines, residual gotos, the split check, the call count, all three
+audits, `libcheck`, `bgt signatures` and the oracle.
+
+### What it says the distance is MADE of
+
+Bucketed over all 108 of Super Egg Hunt's differing bodies rather than
+sampled, because the first two bodies opened said two different things and
+neither was evidence about the rest:
+
+| opcode | added | removed | net | bodies |
+|---|---:|---:|---:|---:|
+| `RefCpyV` | 1,245 | 232 | **+1,013** | 74 |
+| `PopPtr` | 1,030 | 12 | **+1,018** | 74 |
+| `FREE` | 1,005 | 129 | **+876** | 74 |
+| `PshVPtr` | 895 | 69 | **+826** | 81 |
+| `NOT` | 31 | 263 | -232 | 70 |
+| `SetV1` | 94 | 261 | -167 | 75 |
+
+The first four are one shape in three quarters of the bodies: **an object
+slot the compiler materialised, declared and assigned as a source local**.
+That is the dead handle alias, and fixing it is the measurement above --
+see **...and the window was hiding 353 dead assignments in one title**.
+
+The `NOT`/`SetV1` rows are the other half and are not a defect: the
+original computes `!x == false` through `NOT` and `CMPi` where the recovery
+writes `if (x)`, which is the bool-literal simplification this file records
+as deliberate. It is behaviour-identical and it is still distance, which is
+worth knowing before reading every row as a bug.
+
+### Two things it found immediately, neither of them the thing it was for
+
+**Paladin's receptionist tells you the wrong floor.** `handle_file_menu`
+builds one greeting out of two map names, and the bytecode keeps each in
+its own slot:
+
+```
+PshG4 your_floor ; PshGPtr world ; opIndex ; ADDSi map::name ; RDSPtr
+ALLOC string                            ; slot 6 = world[your_floor].name
+VAR 6 ; PSF 16 ; CALL improve_map_name  ; ...read AT ONCE, into slot 16
+PshG4 your_cabin ; ... ; ALLOC string   ; slot 6 REBUILT, cabin this time
+VAR 6 ; PSF 12 ; CALL improve_map_name  ; read again, into slot 12
+```
+
+so the source is
+`"...Your room number is " + string_trim_left(improve_map_name(world[your_cabin].name), 6)
++ ", located on " + improve_map_name(world[your_floor].name)`.
+The recovery renders
+
+```
+local_6 = world[your_floor].name;          // dead
+local_6 = world[your_cabin].name;
+... string_trim_left(improve_map_name(local_6), 6) ... improve_map_name(local_6) ...
+```
+
+-- **both calls get the cabin's name** and the first assignment is lost.
+It is the `get_percent_of_range` family again (rule seven, the slot test),
+reached through a **string** slot: slot 6 is written by a *behaviour*
+(`PSF 6 ; CALLSYS string::_beh_0_`), which `slot_writes` cannot see, and
+rule ten closed that hole only for a value that IS a slot. The value here
+is `improve_map_name(local_6)`, a computed one, which rule ten excluded --
+measured, because counting behaviour writes for computed values made every
+string literal's scratch slot a write and cost Paladin's `map::deserialize`
+56 lines. So the exclusion has a price and this is it. Not fixed here; the
+narrowing to try is a behaviour construction into a **named** slot only,
+since the literal scratch slots that caused the 56 lines are unnamed temps.
+
+**It is pre-existing, and the dead code was MASKING it.** The same two
+assignments and the same two reads are in the recovery at the commit
+before, and `bgt signatures` did not report them, because
+`@local_13 = world;` sat between the two assignments and its
+`double_assign` pattern wants a name assigned twice *in a row*. Removing
+353 dead statements is what let the sweep see it -- so Paladin's
+`double_assign` row count going 5 -> 6 and Psycho Strike's 11 -> 12 is the
+instrument getting sharper, not the recovery getting worse. **A signature
+count rising is not automatically a regression**, which is the opposite of
+how this file has read that number until now, and the way to tell is to
+diff the two trees at the row rather than trust the count.
+
+**And a substituted stock file can add declarations the game never had.**
+The round trip reports `number_speaker::set_sound_object` and
+`number_speaker::stop` as existing only in the REBUILT module. Super Egg
+Hunt's own `number_speaker` declares four bodies -- the constructor,
+`speak`, `speak_next`, `speak_wait` -- and BGT 1.3's shipped
+`number_speaker.bgt` declares those plus those two, so the game was built
+against a different version of that file and the substitution introduced
+two methods the original program did not have.
+
+`_why_not_stock` checks members in **one direction only** -- "the game's
+class has a member the engine's does not" -- while this file's own rule is
+that methods must agree *in both directions*. The two extra are dead code
+and compile, so nothing reports them; they are still two declarations that
+were not in the program. The fix is not simply to decline the substitution:
+those three bodies are the calibration above, byte-identical because they
+ARE the engine's source, and declining would trade them for decompiled ones
+that differ. Taking the engine's file and **dropping the members the game's
+module does not declare** gets both, and stripping is already how `#include`
+and `funcdef` lines are handled there. Recorded, not done.
+
+### ...and a third: a retained range guard is the COMPILER's, not source
+
+`day_to_word` comes back 148 -> 253 instructions, and part of that is the
+string class above. The rest is the range guard, emitted **twice** in the
+rebuild where the original has it once:
+
+```
+original:  CMPIi v0 31 ; JP exit ; CMPIi v0 1 ; JS exit ; CMPIi v0 12 ; JMPP
+rebuilt:   CMPIi v3 31 ; JP exit ; CMPIi v3 1 ; JS exit
+           CMPIi v3 31 ; JP exit ; CMPIi v3 1 ; JS exit     <- again
+           CMPIi v3 12 ; JP ... ; JMPP
+```
+
+because the recovery writes
+
+```
+if (arg0 <= 31) { if (arg0 >= 1) { switch (arg0) { case 1: ... } } }
+```
+
+and the compiler then emits the switch's OWN prologue bound on top of the
+two `if`s. This file records why one guard is kept -- *"One table keeps
+its guard, because then the guard's target IS the switch's exit and the
+`if` is a redundant bound rather than a wrong one"* -- and that reasoning
+stands: dropping every guard is what made a merged chain's later cases
+unreachable.
+
+What the round trip adds is that **the guard is not in the source at
+all.** The original's two compares are the compiler's own switch prologue,
+so the author wrote a bare `switch` and the recovery has reconstructed
+the prologue as an `if`. Behaviour-identical, and unfaithful. The shape to
+look for is a retained guard whose bounds are exactly the switch's own
+case range -- that one is the prologue and can go, where a guard that
+bounds something narrower is a chain link and must stay. Recorded, not
+done; it needs the chain cases measured, which is what broke the last two
+attempts at this.
+
+### What it cannot do
+
+**It needs a build, so it needs the engine**, and a whole-title compile
+puts BGT's modal report on the screen of whoever is at the machine -- the
+cost this file records from three directions. So it is a thing to run
+deliberately: on a title that compiles cleanly the dialog is the success
+one the driver dismisses, and on one with 24,916 errors it is an 8.9 MB
+window. Super Egg Hunt and Paladin are the two that compile cleanly here.
+
+And it cannot be run at all for a title whose own runtime is missing or
+whose fork the installed BGT cannot parse, which is Manamon 1 and Manamon 2
+-- the same restriction as the compiler column of the standings, for the
+same reason. The bytecode audits are what cover those, and they cost
+nothing.
 
 ## Run as a script, a game takes its developer path
 
@@ -5637,6 +6000,173 @@ tutorial_text = arg0.exists("quest_text");  // wrong key
 Narrowing it to a handle whose `FREE` is in the same arm -- a temp's whole
 lifetime is inside the arm where a real variable's is not -- moved -477 to
 -447 and changed nothing else. That is not the separating condition.
+
+##### ...and the window was hiding 353 dead assignments in one title
+
+The window is the right *mechanism* and it is not the whole rule, and the
+round trip is what found that. `sound_pool::verify_slot` is the case, and
+BGT ships the source for it, so there is no arguing about what it should
+say:
+
+```
+sound_pool_item[]@ local_2;
+@local_2 = items;                      // three times, read NEVER
+if (items[arg0].persistent) { return true; }
+```
+
+The alias was emitted as a statement while the index expression re-read
+`items` anyway, so the local is written three times and read nowhere.
+The `FREE` is eight instructions past the bind, so the four-instruction
+window declined -- and a `FREE` that far away is the normal case, not an
+exotic one.
+
+**A slot NOTHING reads is not a variable**, and that is stronger evidence
+than any distance. `objVariableTypes` names every object slot, so the
+decompiler has a declaration for each one, and the engine's record cannot
+say which slots the source NAMED -- the gap this whole file keeps working
+around. A slot read nowhere answers it outright. So that is asked first,
+and the window still decides every bind whose slot IS read somewhere,
+because slots are reused and the whole-body question says no about those.
+
+Two details make it a reading rather than a guess:
+
+- **`FREE` is a write, not a read.** Releasing a slot is not a use of its
+  value, so a slot only ever bound and freed is read nowhere -- which is
+  the entire rule. Counted the other way, which its operand being the
+  slot makes tempting, the rule would never fire at all and nothing would
+  say so. `_read_slots` takes this from **AngelScript's own operand
+  naming** rather than from a list of opcodes: `asBCTYPE_wW_rW_DW_ARG`
+  spells the shape out -- a written slot, a read slot, a dword constant
+  -- and a bare `W` is a plain word (a count, a stack offset) and not a
+  slot at all, so `asBCTYPE_wW_W_ARG` names one slot and not two. Every
+  `bc_type` of the **663,023** instructions in the four titles that can be
+  checked here parses -- 17 distinct shapes, none undescribed -- and each
+  opcode it is relied on for was read out of the build's own table: `PSF`,
+  `VAR`,
+  `PshVPtr`, `LOADOBJ`, `WRTV*` and `CmpPtr` read, while `RefCpyV`,
+  `FREE`, `ClrVPtr` and `STOREOBJ` write.
+- **A `FREE` of the slot must exist somewhere**, because a handle the
+  compiler materialised is always released. A slot with none is not one
+  of these. It changes no output on the four titles it was checked against
+  -- every recovered tree byte-identical with and without it -- so it is a
+  condition rather than a fix, kept because a rule that did not ask would
+  claim the wrong thing the first time a title had one.
+
+**And folding one RESTORES the original's object lifetime rather than
+changing it.** `FREE` runs the destructor, and for a `sound` that is
+observable, so this is only safe because the compiler then materialises
+its own handle for the same expression -- which is what the original did.
+A declared local holds the object to the end of the function, and that is
+the behaviour that was wrong.
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 -> **5,780** | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,257 -> **25,942** | 0 | verified | 6,958 -> 6,952 |
+| Psycho Strike | 27,498 -> **25,870** | 2 | verified | 6,406 |
+| Crazy Party | 192,765 -> **190,735** | **14** | verified | 90,145 |
+| Manamon 1 | 90,925 -> **89,712** | 0 | verified | 26,481 |
+
+**Not one residual goto moves**, every split still verifies, passthrough,
+body errors, unbalanced files and dangling `else` stay 0 everywhere, and
+`bgt oracle` is 51/51. All three `bgt audit` comparisons are identical
+before and after on every title -- Paladin 25 call rows, Psycho Strike 41,
+Manamon 1 697, Egg Hunt 0, each with the same declined count -- which is
+the check that says no call was lost. `bgt libcheck --decompiler` holds at
+39/46, 43/46 and 144/148.
+
+**Paladin's six fewer calls are six fewer DUPLICATED calls**, which is the
+direction this file counts as the result. The bytecode audit is unchanged,
+so nothing went missing; what went is `@local_5 = bag;` and friends, and
+with them gone the structurer can see a loop it could not before:
+
+```
+-        local_4 = 0;
+-        while (local_4 < bag[local_3].items.get_length()) {
+-            @local_5 = bag;
+-            @local_6 = bag[local_3].items;
++        for (local_4 = 0; local_4 < bag[local_3].items.get_length(); local_4++) {
+```
+
+-- the dead statements after the increment were what stopped the `for`
+header being recognised.
+
+**Swept as the output rather than counted as lines**: a declared local
+that is assigned and never read, per title, before and after.
+
+| title | dead assignments | after | such locals |
+|---|---:|---:|---:|
+| Super Egg Hunt | 353 | **2** | 108 -> 2 |
+| Paladin of the Sky | 1,193 | **217** | 525 -> 188 |
+| Psycho Strike | 1,376 | **115** | 427 -> 74 |
+| Manamon 1 | 2,295 | **1,479** | 852 -> 457 |
+
+**3,404 of 5,217 gone**, and the residue is named rather than waved at.
+Manamon 1 keeps most of it, and it is three different shapes: about 250
+more handle aliases, in slots the body DOES read somewhere else -- so the
+whole-body rule correctly declines and the window still cannot reach
+them, which is the next thing a per-bind version of this would get; 99
+`bool` locals, a scalar shape this rule does not touch at all and which
+may well be the original's own dead stores; and 92 `__nvgt_ret_N`, the
+generated holder for a call with an out argument, where nothing reads the
+return value. That last group is the cheap one: the call is the
+initialiser, so dropping the assignment leaves `d.get(k, out);` and loses
+nothing.
+
+Crazy Party is the row that matters, because it is the title every
+over-broad fold change in this file was caught by: **14 residual gotos
+before and after**, the same fourteen labels, with 90,145 calls
+unchanged. 14 -> 30 rejected a call-text threshold, 14 -> 44 dropping
+the declaration-order rule, 14 -> 90 forcing on the copy idiom.
+
+##### The hazard, scanned rather than argued -- and one real gap
+
+`RefCpyV` *peeks*, so the instruction after it reads the stack copy and
+the folded expression is rendered into whatever consumes it. That is the
+argument for folding being safe, and it is checkable: at each of the
+**2,903** binds this newly folds across four titles, what is the next
+instruction?
+
+| title | `RefCpyV` | newly folded | next instruction |
+|---|---:|---:|---|
+| Super Egg Hunt | 493 | 395 | a call, every one |
+| Paladin of the Sky | 2,019 | 1,174 | a call, bar **2** `PopPtr` |
+| Psycho Strike | 605 | 350 | a call, every one |
+| Manamon 1 | 3,807 | 984 | a call, bar **1** `FREE` |
+
+So 2,899 of 2,903 are consumed by a call, which renders them. The three
+exceptions were read, and two of them are a defect in the test rather
+than in the fold:
+
+- **`CallPtr` is the one opcode whose operands are not where its
+  `bc_type` says.** BGT's generation gives it a single word operand, and
+  `asreader` normalises that into `w_arg2` with `w_arg` zeroed so one
+  rule downstream reads both engine generations -- which is right, and
+  leaves the shape disagreeing with the name. Parsed generically,
+  `_read_slots` marked slot 0 as read (usually `this`, so harmless) and
+  **missed the funcdef-holding slot**, which is the half that matters: a
+  bind to it looks unread and folds. Paladin's `final_heaven_scene` and
+  `father_hologram` are the two sites, both `@slot = character.affect`
+  feeding a `CallPtr`.
+
+  **The output was right anyway, and that is the part worth recording.**
+  Both bodies render `local_9.affect(local_8);` with the fold and
+  without it, so the guard was wrong while the result was correct for a
+  reason nothing had checked. Fixed, **all five recovered trees are
+  byte-identical with it and without it**, Crazy Party included -- so the
+  fix is a condition rather than a change, and it is in because relying on
+  that accident is how the next title pays for it.
+- **Manamon 1's `store_manamon` is a dead handle copy and folding it is
+  right.** `@local_23 = local_9;` with nothing reading `local_23`; the
+  object is `manamon_storage.lists[n].manamon_list`, which the container
+  holds, and `local_9` is still a function-scope handle in the recovery.
+  So nothing is released early -- the lifetime question this rule raises
+  does not bite here, and it was checked rather than assumed.
+
+The three dropped lines in that body are `@local_24 = manamon_storage.lists;`
+three times and that copy, and the diff of the whole function is those
+four lines and the two declarations. That is what a correctly scoped
+fold change looks like at the level of one body.
 
 **And libcheck did not see any of it**, which is the part worth keeping.
 `bgt libcheck --decompiler` scored **144/149 call sequences and 148/149

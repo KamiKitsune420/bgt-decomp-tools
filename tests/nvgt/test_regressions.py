@@ -1348,15 +1348,40 @@ class BorrowedHandleTests(unittest.TestCase):
     CLAUDE.md. What works is local to the instruction stream.
     """
 
-    @staticmethod
-    def _op(name, pos, w_arg=0):
-        return Instr(pos=pos, op=0, name=name, bc_type="", size=1, w_arg=w_arg)
+    #: What each opcode's operands are, in AngelScript's own naming, so the
+    #: fixtures feed the production read-set computation rather than a stub
+    #: of it. `wW` is a WRITTEN slot and `rW` a read one, which is the whole
+    #: distinction the whole-body rule below turns on -- `FREE` releases a
+    #: slot and so writes it, while `PshVPtr` and `PSF` read it.
+    _SHAPES = {
+        "RefCpyV": "asBCTYPE_wW_QW_ARG", "FREE": "asBCTYPE_wW_QW_ARG",
+        "RDR4": "asBCTYPE_wW_ARG", "STOREOBJ": "asBCTYPE_wW_ARG",
+        "PshVPtr": "asBCTYPE_rW_ARG", "PSF": "asBCTYPE_rW_ARG",
+        "VAR": "asBCTYPE_rW_ARG", "LOADOBJ": "asBCTYPE_rW_ARG",
+        "CpyVtoV4": "asBCTYPE_wW_rW_ARG",
+        # BGT's `CallPtr` takes one word operand, which the reader normalises
+        # into `w_arg2` with `w_arg` zeroed so one rule reads both engine
+        # generations. So its shape disagrees with where its slot IS.
+        "CallPtr": "asBCTYPE_rW_ARG",
+        "CALLSYS": "asBCTYPE_DW_ARG", "JZ": "asBCTYPE_DW_ARG",
+        "JMP": "asBCTYPE_DW_ARG", "SUSPEND": "asBCTYPE_NO_ARG",
+    }
+
+    @classmethod
+    def _op(cls, name, pos, w_arg=0, w_arg2=0):
+        return Instr(pos=pos, op=0, name=name, size=1, w_arg=w_arg,
+                     w_arg2=w_arg2,
+                     bc_type=cls._SHAPES.get(name, "asBCTYPE_NO_ARG"))
 
     def _sim(self, ops, k=0, window=None):
-        from decompile import FuncDecompiler
+        from decompile import FuncDecompiler, _read_slots
         sim = object.__new__(FuncDecompiler)
         sim.instrs = ops
         sim.k = k
+        # Exactly what `__init__` computes, through the real helper: a stub
+        # read-set would agree with a wrong one.
+        sim.read_slots = _read_slots(ops)
+        sim.freed_slots = {i.w_arg for i in ops if i.name == "FREE"}
         if window is not None:
             sim.BORROW_WINDOW = window
         return sim
@@ -1373,10 +1398,89 @@ class BorrowedHandleTests(unittest.TestCase):
         self.assertFalse(self._sim(ops)._borrowed_handle(11))
 
     def test_a_borrow_may_not_straddle_a_branch(self):
-        """Otherwise it could reach a `FREE` belonging to another path."""
+        """Otherwise it could reach a `FREE` belonging to another path.
+
+        The slot has to be read SOMEWHERE for this to be the question: a
+        slot nothing reads is not a variable on any path, so the whole-body
+        rule answers first and the branch cannot matter. That read is what
+        makes the fixture a straddling borrow rather than a dead one -- it
+        sits past the window, so only the straddle condition is left to
+        decide, which is what this pins.
+        """
         ops = [self._op("RefCpyV", 0, 11), self._op("JZ", 1),
-               self._op("FREE", 2, 11)]
-        self.assertFalse(self._sim(ops)._borrowed_handle(11))
+               self._op("FREE", 2, 11)] + [
+            self._op("SUSPEND", i) for i in range(3, 9)] + [
+            self._op("PshVPtr", 9, 11)]
+        sim = self._sim(ops)
+        self.assertIn(11, sim.read_slots)
+        self.assertFalse(sim._borrowed_handle(11))
+
+    def test_a_slot_nothing_reads_is_not_a_variable(self):
+        """The whole-body rule, which the window alone could not reach.
+
+        `sound_pool::verify_slot` is the case: BGT's own source indexes
+        `items` three times, and the recovery declared a handle for the
+        array and emitted `@local_2 = items;` three times while the index
+        expression re-read `items` anyway -- 353 such dead assignments in
+        50 of Super Egg Hunt's bodies. The `FREE` is eight instructions
+        past the bind, so the window declined; nothing reads the slot, so
+        this does not.
+        """
+        ops = [self._op("RefCpyV", 0, 2), self._op("CALLSYS", 1)] + [
+            self._op("SUSPEND", i) for i in range(2, 9)] + [
+            self._op("FREE", 9, 2)]
+        sim = self._sim(ops)
+        self.assertNotIn(2, sim.read_slots)
+        self.assertTrue(sim._borrowed_handle(2))
+
+    def test_a_slot_read_anywhere_still_goes_to_the_window(self):
+        """Slots are REUSED, so "read nowhere" is a whole-body property.
+
+        A slot the source does name elsewhere is read, so the whole-body
+        rule says no about it -- and the window then decides this bind on
+        its own, which is what keeps the measured narrowness.
+        """
+        ops = [self._op("RefCpyV", 0, 2), self._op("CALLSYS", 1)] + [
+            self._op("SUSPEND", i) for i in range(2, 9)] + [
+            self._op("FREE", 9, 2), self._op("PshVPtr", 10, 2)]
+        self.assertFalse(self._sim(ops)._borrowed_handle(2))
+
+    def test_a_slot_nothing_frees_is_not_a_borrow_either(self):
+        """A handle the compiler materialised is always released."""
+        ops = [self._op("RefCpyV", 0, 2)] + [
+            self._op("SUSPEND", i) for i in range(1, 12)]
+        sim = self._sim(ops)
+        self.assertNotIn(2, sim.read_slots)
+        self.assertFalse(sim._borrowed_handle(2))
+
+    def test_FREE_is_a_write_and_PshVPtr_a_read(self):
+        """The one distinction the whole-body rule turns on, pinned.
+
+        Releasing a slot is not a use of its value, so a slot that is only
+        ever bound and freed is read nowhere. Were `FREE` counted as a read
+        -- which its operand being the slot makes tempting -- the rule
+        would never fire at all, silently.
+        """
+        from decompile import _read_slots
+        self.assertEqual(_read_slots([self._op("FREE", 0, 7)]), set())
+        self.assertEqual(_read_slots([self._op("RefCpyV", 0, 7)]), set())
+        self.assertEqual(_read_slots([self._op("PshVPtr", 0, 7)]), {7})
+        self.assertEqual(_read_slots([self._op("CpyVtoV4", 0, 3, 7)]), {7})
+
+    def test_CallPtr_reads_the_slot_the_READER_put_it_in(self):
+        """The one opcode whose operands are not where `bc_type` says.
+
+        BGT gives `CallPtr` a single word operand and the reader normalises
+        it into `w_arg2`, zeroing `w_arg`, so one rule downstream can read
+        both engine generations. Parsed generically that marks slot 0 as
+        read -- usually `this`, so harmless -- and MISSES the funcdef slot,
+        which is the half that matters: a bind to it would look unread and
+        be folded away. Paladin's `final_heaven_scene` and `father_hologram`
+        are the two sites in the corpus.
+        """
+        from decompile import _read_slots
+        call = self._op("CallPtr", 0, w_arg=0, w_arg2=10)
+        self.assertEqual(_read_slots([call]), {10})
 
     def test_a_slot_never_freed_nearby_is_a_real_assignment(self):
         ops = [self._op("RefCpyV", 0, 11)] + [

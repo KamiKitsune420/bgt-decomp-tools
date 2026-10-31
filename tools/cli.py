@@ -28,6 +28,9 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
                [--against OTHER]            author would write? a shape per bug
                                             class, swept, and the delta to a
                                             previous tree
+    bgt roundtrip game.exe recovered/game.exe      ...and does it COMPILE BACK to the
+                                                    same bytecode? body by body, the
+                                                    only check against the WHOLE original
     bgt libcheck work/game_bytecode.bin game.exe   recovered code vs BGT's own library
                [--decompiler]                       source: the lifter, or `bgt recover`
     bgt files work/game_bytecode.bin game.exe      which source files it was built from
@@ -59,7 +62,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
-                   bgt_signatures,
+                   bgt_roundtrip, bgt_signatures,
                    bgt_ghidra, bgt_oracle,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_unpack, bgt_validate,
@@ -73,6 +76,7 @@ except ImportError:       # run directly from a checkout
     import bgt_api
     import bgt_apicheck
     import bgt_audit
+    import bgt_roundtrip
     import bgt_signatures
     import bgt_oracle
     import bgt_compile
@@ -336,6 +340,22 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if args.json:
         argv += ["--json", args.json]
     return _run(bgt_audit.main, argv, prog="bgt audit")
+
+
+def cmd_roundtrip(args: argparse.Namespace) -> int:
+    """`bgt roundtrip` compares a rebuilt module against the original's,
+    body by body. The only check here that asks whether the recovered
+    source MEANS what the original meant -- and the edit distance, not the
+    exact-match count, is the measurement."""
+    argv = [args.original, args.rebuilt]
+    if args.detail:
+        argv += ["--detail", args.detail]
+    argv += ["--limit", str(args.limit), "--context", str(args.context)]
+    if args.json:
+        argv += ["--json", args.json]
+    if args.scratch:
+        argv += ["--scratch", args.scratch]
+    return _run(bgt_roundtrip.main, argv, prog="bgt roundtrip")
 
 
 def cmd_signatures(args: argparse.Namespace) -> int:
@@ -786,6 +806,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strict", action="store_true",
                    help="exit 1 if any row is reported")
     p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("roundtrip",
+                       help="the original bytecode against the "
+                            "RECOMPILED bytecode, body by body")
+    p.add_argument("original", help="the original executable or its module")
+    p.add_argument("rebuilt", help="the rebuilt executable or its module")
+    p.add_argument("--detail", metavar="OWNER::NAME",
+                   help="one body's instruction diff")
+    p.add_argument("--limit", type=int, default=25,
+                   help="worst bodies listed (0 = all)")
+    p.add_argument("--context", type=int, default=3)
+    p.add_argument("--json", metavar="FILE")
+    p.add_argument("--scratch", metavar="DIR",
+                   help="where to write a module unpacked from an exe")
+    p.set_defaults(func=cmd_roundtrip)
 
     p = sub.add_parser("signatures",
                        help="shapes in recovered text that no author "

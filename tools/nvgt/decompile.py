@@ -92,6 +92,61 @@ _SLOT_WRITE_OPS = (
     | set(BINARY) | set(IMM_BINARY) | CONV_OPS
 )
 
+
+def _read_slots(instrs: list[Instr]) -> set[int]:
+    """Every frame slot some instruction in this body READS.
+
+    Taken from AngelScript's own operand naming rather than from a list of
+    opcodes, which is what makes it complete: `asBCTYPE_wW_rW_DW_ARG` spells
+    the shape out -- a written slot, a read slot, a dword constant -- and a
+    bare `W` is a plain word (a count, a stack offset, a size) and not a slot
+    at all, so `asBCTYPE_wW_W_ARG` names one slot and not two. The word
+    operands appear in order in `w_arg`, `w_arg2` and, for the one
+    three-operand shape, the low half of `qw_arg`, exactly as the reader
+    fills them.
+
+    Every `bc_type` of the 663,023 instructions in the four titles that can
+    be checked here parses -- 17 distinct shapes, none undescribed -- and the
+    opcodes this is relied on for were each read out of the build's own table:
+    `PSF`, `VAR`, `PshVPtr`, `LOADOBJ`, `WRTV*` and `CmpPtr` are reads, while
+    `RefCpyV`, `FREE`, `ClrVPtr` and `STOREOBJ` write. `FREE` writing rather
+    than reading is the one that matters: releasing a slot is not a use of
+    its value, so a slot that is only ever bound and freed is read NOWHERE.
+    """
+    reads: set[int] = set()
+    for ins in instrs:
+        if ins.name == "CallPtr":
+            # **The one opcode whose operands are not where `bc_type` says.**
+            # BGT's generation gives `CallPtr` a single word operand, and the
+            # reader normalises it into `w_arg2` with `w_arg` zeroed so that
+            # both engine generations can be read by one rule downstream --
+            # which is right, and leaves the shape disagreeing with the name.
+            # Parsed generically this marks slot 0 as read (usually `this`,
+            # so harmless) and MISSES the funcdef-holding slot, which is the
+            # half that matters: a bind to it would look unread and fold.
+            # Paladin's `final_heaven_scene` and `father_hologram` are the
+            # two sites, both `@slot = character.affect` feeding a `CallPtr`.
+            reads.add(_s16(ins.w_arg2))
+            continue
+        parts = ins.bc_type[len("asBCTYPE_"):].split("_")
+        if parts and parts[-1] == "ARG":
+            parts = parts[:-1]
+        nth = 0
+        for part in parts:
+            if part not in ("wW", "rW", "W"):
+                continue
+            if nth == 0:
+                raw = ins.w_arg
+            elif nth == 1:
+                raw = ins.w_arg2
+            else:
+                raw = ins.qw_arg & 0xFFFF
+            nth += 1
+            if part == "rW":
+                reads.add(_s16(raw))
+    return reads
+
+
 # Jump name -> comparison operator of the taken path.  The T* instructions
 # are value-register tests, not branches (see as_context.cpp).
 JUMP_OPS = {"JS": "<", "JNS": ">=", "JP": ">", "JNP": "<=",
@@ -937,6 +992,16 @@ class FuncDecompiler:
         self.comments = comments
         self.instrs = fn.bytecode
         self.pos_of = {i.pos: k for k, i in enumerate(self.instrs)}
+        #: Every slot some instruction reads. A slot NOTHING reads is not a
+        #: variable, whatever `objVariableTypes` says about it -- see
+        #: `_borrowed_handle`, which asks this before its window.
+        self.read_slots = _read_slots(self.instrs)
+        #: Every slot a `FREE` releases. A handle the compiler materialised
+        #: to keep an object alive is always released; a slot with no `FREE`
+        #: anywhere is not one of those, so the whole-body rule in
+        #: `_borrowed_handle` requires this as well as the slot being unread.
+        self.freed_slots = {_s16(i.w_arg) for i in self.instrs
+                            if i.name == "FREE"}
         #: (branch position, join position) for every forward conditional
         #: jump. A value computed between the two is computed on only one
         #: path, so once the join is passed it can no longer be folded into a
@@ -3255,12 +3320,55 @@ class FuncDecompiler:
     def _borrowed_handle(self, off: int) -> bool:
         """Is this `RefCpyV` only keeping an object alive for one expression?
 
-        Three things, all local to the instruction stream: the slot is
+        Either of two things says yes, and the first is the stronger.
+
+        **Nothing in the whole body reads the slot, and a `FREE` releases
+        it.** Then it is not a variable at all: `objVariableTypes` names
+        every object slot, so the decompiler has a declaration for it, and
+        the engine's record cannot say which slots the source NAMED -- that
+        is the gap this whole file keeps working around. A slot read nowhere
+        answers it outright. `FREE` is a write rather than a read (releasing
+        a slot is not a use of its value), so a slot that is only ever bound
+        and freed lands here, and that is exactly the compiler's own
+        lifetime handle. The `FREE` is required because such a handle is
+        always released: a slot with none anywhere is not one of these, and
+        a rule that did not ask would claim it.
+
+        **Folding one restores the original's object lifetime rather than
+        changing it.** `FREE` runs the destructor, which for a `sound` is
+        observable, so dropping the slot is only safe because the compiler
+        then materialises its own handle for the same expression -- which
+        is what the original did. A declared local, by contrast, holds the
+        object to the end of the function, which is the behaviour that was
+        wrong.
+
+        Otherwise, three things local to the instruction stream: the slot is
         released by `FREE` within a few instructions, nothing in between
         names the slot -- the following instruction reads the stack copy --
         and nothing in between is a jump, so the borrow cannot straddle a
-        branch and reach a `FREE` that belongs to another path.
+        branch and reach a `FREE` that belongs to another path. The window
+        is still needed because slots are REUSED: a slot the source does
+        name elsewhere is read, so the whole-body question says no about it
+        while this bind is still a borrow.
+
+        `sound_pool::verify_slot` is what the window alone was costing, and
+        the round trip is what found it. BGT's own source indexes `items`
+        three times; the recovery declared a handle for the array and wrote
+
+            sound_pool_item[]@ local_2;
+            @local_2 = items;          // three times, read NEVER
+            if (items[arg0].persistent) { return true; }
+
+        -- the alias emitted as a statement while the index expression
+        re-read `items` anyway. The `FREE` is eight instructions past the
+        bind, so the window declined; nothing reads slot 2 in the body, so
+        this does not. Across Super Egg Hunt that shape is **353 dead
+        assignments in 50 bodies**, and each one also costs a `FREE` on
+        every return path, which is why the rebuilt body was 121
+        instructions against the original's 79.
         """
+        if off not in self.read_slots and off in self.freed_slots:
+            return True
         for ins in self.instrs[self.k + 1:self.k + 1 + self.BORROW_WINDOW]:
             if ins.name == "FREE" and _s16(ins.w_arg) == off:
                 return True
