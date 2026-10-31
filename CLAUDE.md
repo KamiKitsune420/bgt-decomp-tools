@@ -1897,10 +1897,10 @@ checks say:
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | compiled cleanly, not re-run |
-| Paladin of the Sky | 27,256 | 0 | 0 | yes | 6,957 | compiled cleanly, not re-run |
-| Psycho Strike | 27,495 | 2 | 0 | yes | 6,403 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,725 | 14 | 0 | yes | 90,105 | 14, every one a residual `goto` |
-| Manamon 1 | 90,919 | 0 | 0 | yes | 26,476 | **not measured -- wrong engine** |
+| Paladin of the Sky | 27,257 | 0 | 0 | yes | 6,958 | compiled cleanly, not re-run |
+| Psycho Strike | 27,498 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,765 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
+| Manamon 1 | 90,925 | 0 | 0 | yes | 26,481 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **All five rows are from one run of the code as it stands**, which this
@@ -2897,6 +2897,33 @@ found by reading what it said rather than by inspection:
   idiom is skipped now, and it is identified by the member being declared *by
   value* — the same shape with a handle member is a real assignment.
 
+  **And there is exactly one member in the corpus where that is wrong.**
+  Manamon 1's `piano::piano_pool` is declared by value and constructed
+  with an argument:
+
+  ```
+  PshC4 500 ; CALL <global>::sound_pool ; STOREOBJ 3
+  PshVPtr 3 ; PshVPtr 0 ; ADDSi piano::piano_pool ; REFCPY ; FREE 3
+  ```
+
+  The whole constructor recovers as `filepath = string(); this.reset();`,
+  so **the 500-slot sound pool is never created** and the 500 survives
+  nowhere. The lost-call mechanism cannot help: putting
+  `sound_pool(500);` back as a statement hands the pool to nobody. The
+  number has to go on the member's *declaration*, exactly as the sized
+  array factory's length does one entry below.
+
+  **Swept across all five titles**, constructor bodies where a `CALL`
+  with at least one argument is followed by `STOREOBJ` and a `REFCPY`
+  into a member: Super Egg Hunt 0, Psycho Strike 0, Paladin 2, Crazy
+  Party 35, Manamon 1 1 -- and **only the Manamon 1 one loses its
+  argument**. Paladin's two are the sized-array shape, whose length is
+  on the declaration; all six of Crazy Party's non-array ones
+  (`Plateau::tileDeBase <- Tile(6)` among them) are **handle** members,
+  and every one of those is rendered. So the by-value/handle test this
+  entry already turns on is what keeps thirty-seven of thirty-eight safe,
+  and one by-value member with a constructor argument is the hole.
+
 - **`CallPtr` names its variable in the other operand.** It takes one operand
   here and two there, and the funcdef-holding variable is the *second* one --
   which is where everything downstream looks. Left in the first, the call read
@@ -3472,10 +3499,35 @@ it, so the statement has no effect -- the original wrote `==` where it meant
 whose value nothing reads changes nothing, so it stays dropped and is recorded
 here instead.
 
-The call audit's 26 are all explained and none is a defect: `super()` where
-the bytecode names the base constructor, a member's generated construction
-(`rec_timer` in `puck::puck`), and `steel_wall::act`, where two `dragon_strike`
-call sites in the bytecode are the two arms of one source call.
+The call audit's 26 are explained: `super()` where the bytecode names the
+base constructor, and a member's generated construction (`rec_timer` in
+`puck::puck`).
+
+**One of them is a defect, and this file said it was not.** It read:
+*"and `steel_wall::act`, where two `dragon_strike` call sites in the
+bytecode are the two arms of one source call."* They are two arms, and
+they are **two different calls** -- they differ in the third argument:
+
+```
+ 59  CMPIi 8 2 ; JNZ -> L0            ; multiple_choice() == 2 ?
+ 61  SetV1 4 0 ; PshC4 10 ; <combo>
+ 73  CALL dragon_strike               ; (combo, 10, FALSE, false)
+ 74  CpyRtoV4 12 ; CpyVtoV4 11 12     ; into slot 11, never read on this path
+ 76  pool.resume_all() ; JMP -> exit
+ 82  L0: SetV1 4 1 ; PshC4 10 ; <combo>
+ 94  CALL dragon_strike               ; (combo, 10, TRUE,  false)
+ 95  CpyRtoV4 3 ; CpyVtoV4 11 3 ; CMPIi 11 10   ; ...and READ
+```
+
+The menu is `"Try scroll[nc]Listen to scroll"`, and choice 2 takes the
+fall-through arm, whose result is stored and never read before the
+`return` -- so the store was dropped and the call went with it. **Listening
+to a scroll at a steel wall did nothing at all.** The other arm survives
+because its result is compared against 10.
+
+Two arms of one source call would have been benign, which is why the
+wrong reading was comfortable. Reading the third operand is what
+separates them, and it takes one look at the disassembly.
 
 **And the audits cleared the thing they were built to investigate.** The report
 was that music does not play on some maps, and the map-music path is faithful
@@ -3827,7 +3879,7 @@ findings cannot. The fixture is generated from a string in `bgt_oracle.py`
 rather than shipped as data, so this folder still holds only the document and
 the Python tools.
 
-Each of the 31 values is chosen because getting it wrong is *silent*. The
+Each of the 51 values is chosen because getting it wrong is *silent*. The
 `declared_*` family calls a `bump()` that returns a different number every
 call, so a fold that duplicates it computes something the source never did;
 `counter` is the module's duplication detector, and any duplicated or dropped
@@ -4138,6 +4190,24 @@ The duplications worth catching are far worse than doubled anyway:
 `file_menu` reads one result 4 times and `play_extended_1d` read one
 `reserve_slot()` 45 times. A two-read duplication is left folded and
 `bgt libcheck` still counts it.
+
+**A fresh instance of exactly that, found while triaging the lost
+calls.** Crazy Party's `VanneAFermer::placeZone` opens
+`PshC4 140 ; PshC4 120 ; CALLSYS random ; CpyRtoV4 4 ; ADDIi 1 4 12`,
+so slot 1 holds `random(120, 140) + 12` -- and it is read exactly
+twice, once as the terrain's width and once as the loop bound that
+places the valves. It recovers as
+
+```
+@local_12 = Terrain((random(120, 140) + 12), 1, ...);
+local_15 = ((random(120, 140) + 12) - 1);
+```
+
+**two rolls, so the map is one width and the loop fills another.** The
+bind arrives through `ADDIi` rather than `CpyVtoV4`, so `copy_binds`
+does not lower the threshold for it and two reads fold. One more
+datum for "the threshold is the wrong lever", and the first instance
+of it where the value is a *roll* rather than a menu result.
 
 **And lowering it only for a value that CALLS something is not the narrowing
 it looks like.** `_is_repeatable` rejects any text with a bracket in it, so
@@ -4637,14 +4707,23 @@ pure, and the rule does not distinguish them.
 The first `bgt audit` ever run on Manamon 1 is what found it. 701 of its
 bodies are missing a call, and 695 of those are a base constructor the
 text writes `super()` -- the benign kind this file already records, in a
-title with 783 classes. **Six are not**, and four of the six are real:
+title with 783 classes. The decompiler-side census that superseded it
+finds **six real losses in five bodies**:
 
 | body | lost | what it does |
 |---|---|---|
 | `sound_pool_item::load_sound` | `load`, `stream` | the sound pool never loads or streams a file |
-| `berserk::act` | `random` | a roll the confusion attack turns on |
-| `coin::act` | `update_sound_2d` | a coin's position never updates |
-| `pause_menu` | `menu_add_item` | an item never added to the menu |
+| `::confirm_entering_cindar_f4` | `enter_confirmation` | the call is the WHOLE function: no confirmation prompt |
+| `::confirm_entering_kingdom_f6` | `enter_confirmation` | the same, at the other dungeon |
+| `berserk::act` | `random(1, 100)` | the original's own dead roll -- and the next draw picks the confusion target |
+| `character::calculate_score` | `local_25(local_13, true)` | a call through a funcdef-typed local, in the high-intellect AI path |
+
+`calculate_score`'s is the subtle one and it needed the bindings read:
+`skill::effect_points_formula` is bound at two sites, and one of them,
+`sound_wave_formula`, spins a `roulette_wheel_selector` -- which calls
+`random`. The original discards the formula's value too, so the only
+observable difference is the RNG stream; narrower than `load_sound`, and
+real.
 
 `load_sound` is the whole defect in eleven instructions:
 
@@ -4670,49 +4749,161 @@ triaged as benign on the grounds that `enemy_count` is pure -- which is
 true, and is exactly why the shape went unnoticed: the first four
 instances anyone looked at were harmless.
 
+**And do not size this defect by counting unread results**, in either
+direction. A forward slice over Crazy Party finds **519** `random` call
+sites whose value is never observed, and **12** of them are lost; the
+other 507 are emitted as an assignment to a slot that got declared or
+promoted. "Nothing reads the result" is necessary and nowhere near
+sufficient, so the census -- which asks what reached the output -- is
+the authority on what is lost, and a result-liveness count is not even
+an upper bound worth quoting.
+
+#### Two more are real and the census cannot see either -- one each way
+
+The audit's original six included `coin::act` losing `update_sound_2d`
+and `pause_menu` losing a `menu_add_item`, and the census reports
+neither. I was about to drop both rows as the audit over-reporting.
+**Both are real**, and checking them is what found the instrument's two
+blind spots:
+
+- **`coin::act`: the call never reaches a slot at all.** Its
+  `sound_pool::update_sound_2d` leaves its result in the value register
+  and the next thing to touch that register is a `Cast`, whose handler
+  overwrites it without flushing. `CpyVtoR4`'s handler *does* flush
+  first -- its comment says why, "preserve its side effect before the
+  register is reused" -- so the rule exists, and the twenty-seven
+  sites that overwrite `value_reg` are served by twelve flushes
+  scattered across the handlers rather than by one place that owns the
+  question. `Cast` is one that is not served; how many of the other
+  twenty-five are is not established, and enumerating them is the
+  first thing the next attempt should do. The census is built on slot
+  binds, so it cannot see
+  this half: a coin's 2D position is never updated as it moves.
+- **`pause_menu`: seven call sites, one text.** All six surviving
+  `menu_add_item(local_5, local_4, false)` lines read identically, and
+  the seventh -- the only one whose result is bound to a slot -- is
+  lost. `_lost_calls` tests whether the text is in the output, so six
+  identical survivors mask it. That is the under-report its own
+  docstring claims, now with an instance: an item missing from the
+  pause menu.
+
+**And the fix for both is the same signal, one step up.** Compare the
+number of call *sites* the simulation rendered for a text against the
+number of occurrences of that text in the output -- which is `bgt
+audit --calls`'s own comparison, done per body inside the decompiler so
+the answer carries a position. It subsumes the bind-based signal, it
+reaches the value-register half for free, and it has a hazard the
+bind-based one does not: a call the renderer spells as *syntax* rather
+than as a call would never match its own text. `opCmp` is exactly that
+-- `cmp_pair` lets the following jump render it as `a < b` -- so it
+would be reported lost on every title.
+
+That is the next attempt, and it is deliberately not this one. The
+change here is measured on five titles; widening the signal in the
+middle of that measurement is how the previous attempt came to change
+7,627 lines.
+
 #### Sized, by the first call audit ever run on Crazy Party
 
 751 of that title's bodies are missing a call and 529 are a base
-constructor. Of the 222 that are not, **200 are `round` and are NOT
-TRIAGED.** That number is written here untriaged on purpose, because the
-first thing I did with it was generalise from one body and get it wrong.
+constructor. Of the 222 that are not, **200 bodies are `round`** -- and
+that class went into this file untriaged, because the first thing I did
+with it was generalise from one body and get it wrong. It is triaged
+now.
 
 `MenuMap::placeZone` loses two, and in that body the bytecode is
-`iTOd ; CALLSYS round ; dTOi` -- `int(round(double(i)))`, which is `i`,
-so dropping the whole round trip is behaviour-preserving and the file
-contains no `round(` at all. From that I wrote that all 200 were the
-same identity. The next body I opened refutes it:
-`PechePerle::placeZone` renders `int(round(double((local_6 / 2)), 0))`
-exactly, so `round` is not dropped as a class -- that body is reported
-only because it has one more `round` in the bytecode than in the text,
-and which one is missing is not established.
+`iTOd ; CALLSYS round ; dTOi`. From that I wrote that all 200 were an
+identity the conversion folder removes. **The mechanism was wrong and
+the verdict was right**, which is the least useful way to be half
+correct, and it took a sweep of all 612 `round` sites in the title to
+say so:
 
-What is needed is the count of `round` calls in the module whose
-operand arrives by `iTOd` and whose result leaves by `dTOi`, against the
-200. Until someone has that, the honest statement is that **one site's
-two rows are benign and 198 are unread**, and the paragraph below -- the
-17 that are real -- stands on its own evidence rather than on this
-one's.
+| the result of a `round` call is | sites |
+|---|---:|
+| read | 316 |
+| in a slot the body never mentions again | 292 |
+| unread within its own live range | 4 |
 
-**The other 17 are real, and they are worse than Manamon 1's four:**
+`round` is **pure** -- `double round(double, int)`, and the module's own
+`usedFunctions` record gives its origin as `application` -- so a dropped
+`round` costs nothing unless its argument is impure or its result is
+observed. It is not an identity being folded; it is a pure call whose
+result the ORIGINAL never reads. Two centre coordinates per minigame,
+computed and discarded, which the author presumably stopped using.
 
-| lost | sites | what it costs |
-|---|---|---|
-| `random` | 12 | nine minigames' `placeZone`, which picks where a zone goes |
-| `joueSon` | 2 | `Jeu::termine` and `Monde::transitionJeu` -- two sounds |
-| `bouge` | 1 | `VaisseauEnnemi::suisPattern` -- an enemy ship never moves |
-| `getVariable` | 1 | `ReservePlanche::valide` |
+Two corrections of detail. **The 200 is bodies, not rows**: 302 rows in
+200 bodies. And `PechePerle::placeZone`, the body I said refuted the
+class, renders its `round` perfectly and is reported for a different
+callee entirely -- a `random(8, 15)`. So that body was evidence against
+my *mechanism* and never against the verdict.
 
-`placeZone` is the same family this file records for residual gotos --
-"almost all fifteen were a minigame's `placeZone` picking a spot far
-enough from something" -- so the roll that picks the spot is the one
-being dropped.
+#### One `round` row is real, and it is a different defect
 
-So the defect is **21 real sites over five titles**: 17 on Crazy Party, 4
-on Manamon 1, 3 pure ones on Psycho Strike, and none at all on Paladin or
-Super Egg Hunt. That spread is itself worth knowing -- the two titles
-this project reads most are the two that do not have it, which is why it
-survived every earlier triage.
+Of the 302, exactly one lands in a slot the body reads:
+`TapisRoulantBonus::placeZone`, where the result is element 1 of
+`int[] local_28 = {0, centreX, maxX}`. The list is **refused** -- this
+file records the guard, *"an element that names a frame slot is
+refused"*, because the declaration is hoisted above the slot's write --
+so the array comes out `array<int>()`, empty; the loop over it runs zero
+times and **no escalators are placed on that minigame's map**, and
+`random(0, local_28.length())` becomes `random(0, 0)`. Nothing then
+reads the slot, so the `round` that filled it looks dead and goes too.
+
+Putting the call back does **not** fix this one: the array is still
+empty. It is the initialiser-list guard needing a way to emit the
+declaration where the elements are already computed, and it is recorded
+here as its own open defect rather than counted with the lost calls.
+
+**Fifteen rows are real, standing for sixteen calls:**
+
+| lost | rows | what it costs |
+|---|---:|---|
+| `random` | 12 | **13** rolls -- the RNG advances, so every later draw changes |
+| `Jeu::joueSon` | 2 | no win/lose jingle at the end of a minigame, no stage-cleared sound |
+| `JoueurTerrain::bouge` | 1 | `VaisseauEnnemi::suisPattern` -- the enemy ship never moves |
+
+**The worst of them is not a minigame.** `Partie::synchroRandom` exists
+to burn draws so a networked client's RNG stream lines up with the
+host's, and its whole loop body was the one `random(0, 9)` inside it:
+
+```
+if (!random_set_state(graineRandom)) { dis("Erreur sur le settage ..."); }
+for (local_7 = 0; local_7 <= numRandom; local_7++) {
+}
+```
+
+An empty loop. The generator is never advanced, so every client
+desynchronises from the host from that point on -- in a title that
+explicitly synchronises its RNG. One dropped call, and it breaks
+multiplayer.
+
+Three corrections to what this file said about the `random` class. It is
+**not** "nine minigames' `placeZone`": eight `placeZone` bodies, plus
+`Jeu::addBebeDragon`, `CombattantSauvage::lanceCombat` and
+`synchroRandom`. It is **13 rolls against 12 rows**, because
+`ZrCourChateau::placeZone` loses two `random(55, 60)` with the same text
+and `_lost_calls` deduplicates a shared text in the under-reporting
+direction by design. And `BateauVolant::placeZone`'s row is benign: the
+roll inside the lost `round` is the same one the surviving `Terrain(...)`
+carries, 20 sites against 20 occurrences.
+
+**And `getVariable` was never real.** `Basique::getVariable` is
+`dictionary::get` on a member -- a pure read -- and the body's one impure
+call, `modVariable(1.0)`, survives. It was in the table above because I
+had not read it. The same goes for every `Terrain::getCentreX/Y`,
+`getMaxX/Y`, `array<T>::get_length` and `Joueur::getNbPiece` row: pure
+member reads plus arithmetic, read out of their own bodies.
+
+So the defect is **22 CENSUS rows over five titles, standing for 23
+calls**: Crazy Party 15, Manamon 1 6, Paladin 1, and none at all on
+Psycho Strike or Super Egg Hunt -- plus two the census cannot see at
+all, both on Manamon 1, which is its own finding and is below.
+Every figure in the sentence this replaces was wrong:
+it said 17, 4, and 3 pure ones on Psycho Strike, with Paladin clear.
+Psycho Strike's four really are all pure -- `character::enemy_count` is
+63 instructions that read the `fighters` array and increment a local, and
+its `calendar()` is a generated return temporary -- and Paladin's one is
+the `steel_wall` scroll above.
 
 #### Why the existing flush does not reach it, and why the obvious fix
 
@@ -4766,18 +4957,194 @@ stack as an argument never touches it. So **"no entry" is not "never
 read"**; it is "not read through that one path", which is most of the
 call binds in a body.
 
-So the next attempt starts by making the read count complete -- a bind
-is read wherever its atom is handed out, which means every read path
-marking it, or the `Atom` carrying its own bind key and being marked
-when consumed. Only then is the two-pass carrying worth repeating. The
-`FREE` flush is the existing proof that the shape is recoverable; what
-it has that this lacked is a real end-of-life signal rather than an
-inferred one.
+#### Fixed, by asking the OUTPUT instead of a read counter
 
-That is the next thing to do, and the reason for writing this down
-rather than pushing on is the reason this section exists at all: the
-last fold-adjacent change measured clean on three titles, and the fourth
-is where every one of them has been caught.
+The last entry said the next attempt starts by making the read count
+complete -- every read path marking the bind. It does not, and that is
+the whole of what was wrong. **A read counter is a proxy; whether the
+call's text reached a statement is the thing itself**, and it cannot be
+incomplete for the same reason a tail that lands exactly on EOF cannot
+be nearly right. So `_lost_calls` collects the text of every statement
+the simulation emitted and asks, of each call parked in a slot, whether
+its text is in any of them. No new bookkeeping in any read path, and
+nothing to keep in step.
+
+Three things then had to be right, and each one was wrong first.
+
+**One: `Atom("call", ...)` is the kind for any computed expression.**
+A negation, a comparison, an addition -- so the atom cannot say whether
+a value was produced by *calling* something. Asked of the atom, the
+first census reported `!use_hyper`, `false`, `(local_6 == "")` and
+`(count - 6)`: **115 rows on Super Egg Hunt**, a title with no lost
+call at all. What answers it is the four sites that set
+`pending_value_call`, because those are the ones that really did render
+a call instruction.
+
+**Two: a construction is not a call.** Two of those four sites render
+one -- an engine behaviour (`$beh0`, `$fact`, `$list`) and the generated
+factory a script class gets, whose name is the class's own and whose
+return type is that class. A constructed object nothing keeps is the
+compiler's generated member initialisation, which this file already
+records as not source and which `_refcpy` already drops, so emitting it
+would add a statement that hands the new object to nobody.
+
+**Three: dropping a value nothing reads is faithful only if computing
+it is PURE**, and that is the half the first attempt never had. It is
+also the half that is computable -- see **Purity, computed** below.
+
+One detail is not a principle and cost a measurement: the
+deduplication is by the **call's own position**, not by its text. One
+call copied from the slot the register left it in to the slot a dead
+local owns is two binds of one call, and emitting both is the
+duplication this file counts as a correctness defect -- while two
+separate calls that happen to read alike are two calls, and
+`load_sound` is exactly that shape with one in each arm of an `if`.
+
+#### Purity, computed -- and the direction its errors run
+
+`tools/nvgt/purity.py` answers "may a call to this be dropped?" from
+two sources, because the module answers one half and not the other:
+
+- **A script function's purity is a fixpoint over the module.** Assume
+  every body pure, then mark impure any that writes a global (`SetG4`,
+  `CpyVtoG4`), writes through the reference register (`WRTV1/2/4/8`,
+  `REFCPY`, `RefCpyV`, `COPY`, and the twelve `INC`/`DEC` opcodes, which
+  this file already records as acting through that register), or calls
+  something not yet known pure; repeat until nothing changes. Paladin
+  clears 27 of its 926 bodies and Manamon 1 247 of 4,909, which is the
+  measure of how conservative it is.
+- **A registered function has no body, so it needs a list**, and the
+  list is 61 names each checked against the engine's own declaration
+  with `bgt api`. Two mechanical membership rules rather than a
+  judgement: a *method* is listed only if **every** registered overload
+  of that name is marked `const`, which is the engine saying it does not
+  modify the object; a *global* only if its signature takes its inputs
+  and returns a value.
+
+**`find` is the name that shows why a spelling is not evidence.** All
+three of its registered overloads are `const`, and one of them is
+`vector[]@ find(int&in, int&in, int&in, int&in, string) const` -- which
+is `pathfinder::find`, a search that **calls back into script** through
+`pathfinder_callback`. The `const` marker says nothing there, and the
+name would have been a lost call never reported again. `opIndex` and
+`opCmp` are out by the const rule as well (each has a non-const
+overload), and `maximum`/`minimum` are out because **this engine neither
+documents nor registers either one** -- two names I asked for from
+memory and the engine does not have.
+
+**The errors run one way and the file says which.** A name wrongly in
+the pure list is a lost call that will never be reported again; a name
+missing from it costs one statement in the recovered source. So the set
+grows one checked name at a time, and `bgt audit --calls` stays the
+independent check on it -- nothing in that file is evidence about
+itself.
+
+Three conservatisms are deliberate, and each has a price worth knowing:
+
+- **A virtual dispatch is never pure.** The function the module records
+  for a `CALLINTF` is the class that *declared* the method, not the
+  override that will run -- this file derives that from Paladin's
+  `person::reset`, where the unqualified call recursed forever. So the
+  resolved callee's purity says nothing, and the opcode is part of the
+  answer rather than the callee alone.
+- **`WRTV4` writes wherever the register points and the bytecode does
+  not say**, so a function that writes one of its own *locals* through a
+  reference is reported impure too. Psycho Strike's `enemy_count` is
+  exactly that: 63 instructions that read the `fighters` array and
+  increment a counter -- pure -- whose body uses `RefCpyV` for the
+  borrowed-handle alias this file records as the compiler's own. So its
+  three dropped calls come back as three statements that do nothing.
+- **A call operand is a signature stub, not a body.** `asreader` builds
+  a fresh `Function` for a `usedFunctions` entry and reads only its
+  signature, so `instr.func_ref` for a call of a script function carries
+  no bytecode at all -- the brief for this work asserted the opposite and
+  was wrong. The stub is resolved to its body by the signature both
+  paths build from the one `_read_function_signature`, with parameter
+  names excluded, because those live only in debug info: a body from a
+  debug build has them and a stub never does. Exact match or nothing --
+  a looser key could only turn an *unresolved* callee, reported impure,
+  into a resolved one that might be reported pure, which is the unsafe
+  direction. On real modules 2,155 of Paladin's 2,350 script-call
+  operands resolve, and the analysis sees 926 of 926 bodies and 4,909 of
+  4,909.
+
+#### What the fix cost, measured on all five
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,256 -> 27,257 | 0 | verified | 6,957 -> **6,958** |
+| Psycho Strike | 27,495 -> 27,498 | 2 | verified | 6,403 -> **6,406** |
+| Crazy Party | 192,725 -> 192,765 | **14** | verified | 90,105 -> **90,145** |
+| Manamon 1 | 90,919 -> 90,925 | **0** | verified | 26,476 -> **26,481** |
+
+Super Egg Hunt is byte-identical, every split still verifies, and
+passthrough, body errors, unbalanced files and dangling `else` are 0 on
+every title. **Not one residual goto moves** -- Crazy Party's fourteen
+are the same fourteen -- which is the number this file records every
+over-broad fold change being caught by, and it is the whole difference
+from the first attempt: that one changed **7,627** lines on Paladin and
+took Psycho Strike from 2 residual gotos to 4.
+
+Both baselines were taken from a frozen copy of the committed `tools/`
+and reproduce the standings exactly -- 192,725 / 14 / 90,105 and
+90,919 / 0 / 26,476 -- which is what says the two columns are
+comparable rather than merely adjacent.
+
+**The call count rising is the result, not a side effect**, exactly as
+it was for the duplication work: a call read back is a call the program
+makes. And not one text signature moves on any title -- `bgt signatures`
+is identical before and after on all eight shapes -- which is the point
+rather than a disappointment. **A lost call leaves nothing in the text
+to sweep for**, which is why it took a bytecode audit to find it and why
+that audit exists. Counting entirely empty recovered bodies was tried as
+a cheaper signature and does not move either (Egg Hunt 3, Paladin 7,
+Psycho Strike 35, before and after), so it is not one.
+
+#### The oracle shape, and the two inert ones that came first
+
+`bgt oracle` has a shape for this now, and writing it is the part worth
+recording, because **the first two I wrote passed at the commit that has
+the defect**. A check that cannot fail is the trap that whole command is
+organised against, and I nearly padded it with two of them.
+
+| shape | what came back |
+|---|---|
+| `bool ignored = (bump() > 0);` | kept -- a bool slot typed numeric is read back as `(call() ? 1 : 0)`, and that conversion IS a read |
+| `int ignored; if (w) ignored = bump();` | kept -- an uninitialised local is promoted to a variable by the write itself |
+| `int ignored = 0; ignored = bump();` | **lost**, which is `load_sound`'s own shape |
+
+So the local has to be an `int` and it has to be initialised, and the
+way to find that out was to compile all five candidates in one probe and
+read what the recovery made of each -- one compile, and no argument.
+`bgt oracle` is **51/51** with the fix and **49/51** without it,
+`dead_local_other` 1 -> 0 and `counter` 13 -> 11.
+
+Two things about that probe are worth keeping. A module of nothing but
+an enum and global functions fails dialect detection ("neither dialect
+parses a coherent module head"), so a probe needs a class in it -- the
+same hole the Super Egg Hunt header peek found, one level down. And a
+scratch file named after a stdlib module is a trap this project has now
+paid for twice: a `dis.py` in the instrument directory shadowed the
+`dis` that `inspect` imports, so it ran itself on import and printed a
+disassembly where a decompiled body belonged.
+
+#### What came back, per title
+
+| title | lines added | of which a real loss |
+|---|---:|---:|
+| Super Egg Hunt | 0 | 0 |
+| Paladin of the Sky | 1 | **1** -- the `steel_wall` scroll |
+| Psycho Strike | 3 | 0 -- the `enemy_count` conservatism above |
+| Crazy Party | 40 | **16** |
+| Manamon 1 | 6 | **6** |
+
+Each line is one carried call, so the first column is the line delta
+measured above and the second is the triage. The gap between them is
+the purity analysis declining to
+claim something it cannot prove, and it is the right side of that trade:
+a statement that does nothing costs a line, and a lost call costs a
+feature.
 
 ### Eleven: a snapshot of a MEMBER is stale once that member is assigned
 

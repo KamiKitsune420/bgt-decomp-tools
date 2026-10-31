@@ -38,9 +38,11 @@ from dataclasses import dataclass, field
 try:                      # installed as a package
     from .asreader import DataType, Function, Instr, Module, TypeInfo, read_module, unwrap_bytecode
     from .signatures import function_signature, format_parameters, funcdef_declaration, class_header, namespace_block
+    from .purity import Purity
 except ImportError:       # run directly from a checkout
     from asreader import DataType, Function, Instr, Module, TypeInfo, read_module, unwrap_bytecode
     from signatures import function_signature, format_parameters, funcdef_declaration, class_header, namespace_block
+    from purity import Purity
 
 # --------------------------------------------------------------------------
 # opcode tables
@@ -556,6 +558,75 @@ DUPLICATE_COPY_FOLDS = 2
 def _fold_limit(fd: "FuncDecompiler", key: tuple) -> int:
     """How many folds of this bind are too many."""
     return (DUPLICATE_COPY_FOLDS if key in fd.copy_binds else DUPLICATE_FOLDS)
+
+
+def _purity_for(module):
+    """One purity analysis per module, because the fixpoint is module-wide.
+
+    Built on the module rather than on the function: it answers "may a call
+    to this be dropped?" over the whole call graph, and a body is simulated
+    several times (see `_body`), so building it per simulation would run the
+    fixpoint thousands of times for one answer.
+    """
+    cached = getattr(module, "_purity_cache", None)
+    if cached is None:
+        cached = Purity(module)
+        try:
+            module._purity_cache = cached
+        except Exception:                                    # noqa: BLE001
+            pass                                             # a frozen module
+    return cached
+
+
+def _lost_calls(fd: "FuncDecompiler", events: list) -> list:
+    """Calls parked in a slot whose text reached no statement at all.
+
+    Dropping an expression nothing reads is behaviour-preserving only while
+    the expression is PURE, and a call is not. `sound_pool_item::load_sound`
+    writes a `bool ok` the original never reads, so the store is dropped --
+    and `handle.load(filename)` goes with it, which is a recovered Manamon 1
+    whose sound pool loads nothing at all.
+
+    The question is asked of the RENDERED BODY rather than of a read counter.
+    The first attempt at this asked `fold_reads`, which is incremented in one
+    read path of several, so "no entry" meant "not read through that path"
+    and most of a body's call binds qualified: 7,627 changed lines on Paladin
+    and two new residual gotos on Psycho Strike. Whether a call's text is in
+    the output is the thing itself, and it cannot be incomplete.
+
+    Deduplicated by the CALL's own position, not by its text: one call copied
+    from the slot the register left it in to the slot a dead local owns is two
+    binds of **one** call, and emitting both would be the duplication this
+    file counts as a correctness defect -- while two separate calls that
+    happen to read alike are two calls, and `load_sound` is exactly that
+    shape with one in each arm of an `if`.
+
+    The text test is a substring test over the whole body, so it is
+    deliberately weaker in one direction: where two calls share a text and
+    only one of them reached a statement, the other is not reported. That
+    under-reports, which is the safe way round -- a call wrongly reported
+    would be emitted twice. Manamon 1's `pause_menu` is the real instance:
+    seven `menu_add_item(local_5, local_4, false)` sites, six of them
+    emitted, and the seventh masked by its own identical siblings.
+
+    **And it sees only calls that reach a slot**, so the other half of this
+    defect is invisible to it: `coin::act`'s `update_sound_2d` leaves its
+    result in the value register and a `Cast` overwrites it without
+    flushing. Both blind spots want the same wider signal -- call SITES
+    against text occurrences, which is `bgt audit --calls`'s comparison done
+    per body -- and that has a hazard this does not, since a call the
+    renderer spells as syntax (`opCmp` under `cmp_pair`) would never match
+    its own text.
+    """
+    emitted = [part for e in events if isinstance(e.data, tuple)
+               for part in e.data if isinstance(part, str)]
+    lost, seen = [], set()
+    for pos, text in fd.call_binds:
+        if pos in seen or any(text in part for part in emitted):
+            continue
+        seen.add(pos)
+        lost.append((pos, text))
+    return lost
 
 
 def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
@@ -1119,10 +1190,27 @@ class FuncDecompiler:
         #: (slot, bind position) for every bind that arrived through
         #: `CpyVtoV4`/`CpyVtoV8` -- the compiler's own declaration idiom.
         self.copy_binds: set[tuple[int, int]] = set()
+        #: {call text: bytecode position} for every IMPURE call the
+        #: simulation rendered. `Atom("call", ...)` is the kind for any
+        #: computed expression -- `!active`, `(count - 6)` -- so the atom
+        #: cannot say whether a value was produced by calling something, and
+        #: only an impure call has to survive into the output. See
+        #: `_record_call` and `_lost_calls`.
+        self.invocations: dict[str, int] = {}
+        #: May a call to this be dropped? Module-wide, so it is built once.
+        self.purity = _purity_for(module)
         #: (slot, bind position) pairs a previous pass found folded more than
         #: once. Promoted on sight here, which is the only way to get the
         #: assignment in before the first read rather than after it.
         self.duplicate_binds: set[tuple[int, int]] = set()
+        #: [(bind position, call text)] for every call parked in a slot.
+        #: A call is not a value, it is something the program did, so one
+        #: whose text reaches no statement was not simplified away -- it was
+        #: LOST. Asked of the rendered body rather than of a read counter,
+        #: because `fold_reads` is incremented in one read path of several
+        #: and "no entry" there is not "never read" -- the measurement that
+        #: rejected the first attempt at this.
+        self.call_binds: list[tuple[int, str]] = []
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -1246,6 +1334,46 @@ class FuncDecompiler:
             return value
         return a
 
+    def _record_call(self, ins: Instr, calltxt: str, fr, ret) -> None:
+        """Remember that the program called something IMPURE here.
+
+        `Atom("call", ...)` is the kind for any computed expression -- a
+        negation, a comparison, an addition -- so an atom cannot say whether
+        a value was produced by calling something, and only a call that can
+        affect something has to survive into the output. See `_lost_calls`.
+
+        **Dropping a value nothing reads is faithful only if computing it is
+        pure**, and `purity.py` is what answers that: an engine function from
+        a checked list, or a script function whose body writes nothing and
+        calls nothing impure. It answers conservatively -- a virtual dispatch
+        is never pure, because the owner the module records is the class that
+        *declared* the method rather than the one that runs -- so the cost of
+        being wrong is a statement in the output and never a lost call.
+
+        Crazy Party is what makes the gate necessary rather than tidy. Its
+        minigames compute two centre coordinates with
+        `int(round(double((w - 1) / 2), 0))` and never read either, in 100
+        bodies: `round` is pure and those are the original's own dead locals,
+        so putting the call back would add two hundred statements that do
+        nothing. The same body's `random(8, 15)` is a roll that must come
+        back, because the RNG it advances is read by every later roll.
+
+        **A class factory is a construction, not a call.** A member declared
+        by value but held by reference is created by code the compiler puts
+        at the top of every constructor, through the generated
+        `<global>::<class>` factory, and `_refcpy` already drops the store
+        for exactly that reason. Emitting the construction on its own would
+        add a statement that hands the new object to nobody. The factory is
+        identified by its own declaration rather than by its spelling: a
+        global function whose name is its return type's.
+        """
+        if (fr is not None and ret is not None and ret.obj_type is not None
+                and fr.name == ret.obj_type.name):
+            return
+        if self.purity.is_pure_call(ins):
+            return
+        self.invocations[calltxt] = self._pos()
+
     def _discarded_call(self, off: int) -> None:
         """A call whose result nothing reads still ran: emit it where it ran.
 
@@ -1330,6 +1458,8 @@ class FuncDecompiler:
             # then. A fold is only safe while nothing has run in between --
             # see `_stale_fold`.
             self.temp_bound[off] = (self._pos(), self.stmt_count)
+            if a.text in self.invocations:
+                self.call_binds.append((self.invocations[a.text], a.text))
 
     def _emit_declare(self, off: int) -> None:
         """Emit a bare declaration for a named variable (default-constructed)."""
@@ -3658,6 +3788,7 @@ class FuncDecompiler:
                 self.value_reg = Atom("call", calltxt)
                 self.pending_value_call = calltxt
                 self.pending_value_call_pos = self._pos()
+                self._record_call(ins, calltxt, fr, ret)
                 return
             if result is not None:
                 if ret is not None:
@@ -3725,6 +3856,7 @@ class FuncDecompiler:
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)
             self.pending_value_call = calltxt
             self.pending_value_call_pos = self._pos()
+            self._record_call(ins, calltxt, fr, ret)
             if out_locals:
                 self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         else:
@@ -3920,6 +4052,7 @@ class FuncDecompiler:
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)
             self.pending_value_call = calltxt
             self.pending_value_call_pos = self._pos()
+            self._record_call(ins, calltxt, fr, ret)
         else:
             self._stmt(f"{calltxt};")
 
@@ -5649,6 +5782,15 @@ class ModuleDecompiler:
                 duplicates = {key for key, n in fd.fold_reads.items()
                               if n >= _fold_limit(fd, key)
                               and key not in carried}
+            lost = _lost_calls(fd, ev)
+            if lost:
+                # Put each one back where the bytecode ran it. Events are
+                # sorted by position rather than kept in append order, which
+                # is what lands the statement inside the arm it belongs to --
+                # `load_sound`'s two calls are in opposite arms of one `if`.
+                ev = sorted(ev + [Event("stmt", pos, ("", text + ";"))
+                                  for pos, text in lost],
+                            key=lambda event: event.pos)
             # Stripped metadata reuses scalar slots across sibling blocks.
             # Keep one declaration in the function and initialization at its
             # original position, rather than declaring in just the first arm.

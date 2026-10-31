@@ -34,6 +34,13 @@ What each shape is for:
   promoted to a statement before a jump stops being a loop condition, and
   Super Egg Hunt went from 0 residual gotos to 182 that way -- which is 187
   compiler errors, since AngelScript has no `goto`.
+* `dead_local_other`, with `counter`, is the dropped call: a call whose result
+  is stored in a local the original never reads. Dropping an expression
+  nothing reads is behaviour-preserving only while the expression is PURE,
+  and a call is not -- Manamon 1's `sound_pool_item::load_sound` lost both
+  its `load` and its `stream` that way, so a recovered sound pool loads
+  nothing. The per-arm shape is the one that rules out an end-of-body sweep:
+  by `RET` the slot holds whichever arm ran last.
 * `snapshot_across_mutation` is Paladin's `calculate_experience`: snapshots
   taken before a mutating call and reported after it. Folded, the comparison
   reads `if (level == level)`, so a level-up is silent and reports `+0`.
@@ -81,6 +88,46 @@ int bump()
 {
     counter += 1;
     return counter;
+}
+
+// A second impure counter, so a shape can put a DIFFERENT call in each arm
+// of a branch. One call per arm is what rules out an end-of-body sweep: by
+// `RET` the slot holds whichever arm ran last, and the other arm's call has
+// already gone.
+int other_counter = 0;
+
+int bump_other()
+{
+    other_counter += 1;
+    return other_counter;
+}
+
+// `sound_pool_item::load_sound` in Manamon 1. The original declares a local
+// it never reads, so the store is dropped -- and the CALL goes with it,
+// which is a recovered sound pool that loads nothing at all. Nothing
+// reports it: the body still compiles and still runs.
+//
+// **The local has to be an `int` and it has to be initialised**, and both
+// halves were found by writing the other shapes first and looking at what
+// came back. A `bool` is accidentally safe, because a bool slot typed
+// numeric is read back as `(call() ? 1 : 0)` and that conversion IS a read;
+// and an uninitialised local is promoted to a variable by the write itself,
+// so the store survives. Written the wrong way these two shapes passed at
+// the commit that has the defect -- a check that cannot fail, which is the
+// trap this whole command is organised against.
+void call_into_a_dead_local()
+{
+    int ignored = 0;
+    ignored = bump();
+}
+
+// The same with a different call in each arm, which is `load_sound`'s own
+// shape.
+void call_into_a_dead_local_per_arm(bool which)
+{
+    int ignored = 0;
+    if (which) ignored = bump();
+    else ignored = bump_other();
 }
 
 class holder
@@ -608,6 +655,10 @@ void main()
     report += "list_of_strings=" + list_of_strings() + "|";
     report += "list_of_ints=" + list_of_ints() + "|";
     report += "list_in_a_global=" + list_in_a_global() + "|";
+    call_into_a_dead_local();
+    call_into_a_dead_local_per_arm(true);
+    call_into_a_dead_local_per_arm(false);
+    report += "dead_local_other=" + other_counter + "|";
     report += "counter=" + counter + "|";
     file f;
     f.open("REPORT_NAME", "wb");

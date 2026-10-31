@@ -1516,3 +1516,131 @@ class BoolSlotIntegerConstantTests(unittest.TestCase):
         from decompile import DataType
         sim = self._sim(DataType(token_type=67), DataType(token_type=67))
         self.assertEqual(sim._stored_constant_types(), {})
+
+class LostCallTests(unittest.TestCase):
+    """A call whose result nothing reads is still something the program did.
+
+    Dropping an expression nothing reads is behaviour-preserving only while
+    the expression is PURE. Manamon 1's `sound_pool_item::load_sound` writes
+    a `bool` the original never reads, so the store was dropped -- and
+    `handle.load(filename)` went with it, which is a recovered sound pool
+    that loads nothing at all. It compiles, it runs, and no count moves.
+
+    The first attempt asked `fold_reads` whether the bind had been read.
+    That counter is incremented in one read path of several, so "no entry"
+    meant "not read through that path" and most of a body's call binds
+    qualified: 7,627 changed lines on Paladin and Psycho Strike's residual
+    gotos 2 -> 4. What is asked instead is whether the call's text reached
+    any statement, which is the thing itself and cannot be incomplete.
+    """
+
+    class _Ev:
+        def __init__(self, text):
+            self.data = ("", text)
+
+    def _fd(self, binds):
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.call_binds = binds
+        return fd
+
+    def test_a_call_whose_text_reaches_no_statement_is_lost(self):
+        from decompile import _lost_calls
+        fd = self._fd([(23, "handle.load(local_3)")])
+        lost = _lost_calls(fd, [self._Ev("local_3 = filename;")])
+        self.assertEqual(lost, [(23, "handle.load(local_3)")])
+
+    def test_a_call_folded_into_a_statement_is_not_lost(self):
+        """The fold is the normal case and must not be reported: the call is
+        in the output, inside the expression that reads it."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "handle.load(local_3)")])
+        lost = _lost_calls(fd, [self._Ev("local_1 = handle.load(local_3);")])
+        self.assertEqual(lost, [])
+
+    def test_two_binds_of_ONE_call_are_reported_once(self):
+        """`CpyRtoV4` parks the result in the slot the register left it in and
+        `CpyVtoV4` copies it into the slot a dead local owns. That is two
+        binds of one call, and emitting both would be the duplication this
+        project counts as a correctness defect."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "bump()"), (23, "bump()")])
+        self.assertEqual(_lost_calls(fd, []), [(23, "bump()")])
+
+    def test_two_calls_that_READ_ALIKE_are_two_calls(self):
+        """Deduplicating by text instead would collapse them -- and
+        `load_sound` is exactly this shape, one call in each arm of an `if`,
+        which is also why an end-of-body sweep cannot find them: by `RET` the
+        slot holds whichever arm ran last."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "bump()"), (46, "bump()")])
+        self.assertEqual(_lost_calls(fd, []),
+                         [(23, "bump()"), (46, "bump()")])
+
+    def test_a_shared_text_under_reports_rather_than_over_reports(self):
+        """Where two calls read alike and only one reached a statement, the
+        other is not reported. The test is a substring test over the body, so
+        it cannot tell them apart -- and a call wrongly reported would be
+        emitted twice, so this is the safe way round."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "bump()"), (46, "bump()")])
+        self.assertEqual(_lost_calls(fd, [self._Ev("x = bump();")]), [])
+
+
+class RecordedCallTests(unittest.TestCase):
+    """Which calls are watched for being lost, and which are not.
+
+    `Atom("call", ...)` is the kind for any computed expression, so the atom
+    cannot answer this: asked of the atom, the census reported `!use_hyper`,
+    `false` and `(count - 6)` alongside `handle.load(local_3)` -- 115 rows on
+    Super Egg Hunt, which has no lost call at all.
+    """
+
+    def _fd(self, pure):
+        from decompile import FuncDecompiler
+
+        class _Purity:
+            def is_pure_call(self, instr):
+                return pure
+
+        fd = object.__new__(FuncDecompiler)
+        fd.invocations = {}
+        fd.purity = _Purity()
+        fd.k, fd.instrs = 0, [None]
+        fd._pos = lambda: 7
+        return fd
+
+    class _Ret:
+        def __init__(self, owner):
+            self.obj_type = owner
+
+    class _Named:
+        def __init__(self, name):
+            self.name = name
+
+    def test_an_impure_call_is_recorded(self):
+        fd = self._fd(pure=False)
+        fd._record_call(None, "handle.load(local_3)",
+                        self._Named("load"), self._Ret(self._Named("bool")))
+        self.assertEqual(fd.invocations, {"handle.load(local_3)": 7})
+
+    def test_a_PURE_call_is_not_recorded(self):
+        """Crazy Party computes `int(round(double((w - 1) / 2), 0))` twice per
+        minigame and reads neither result: `round` is pure and those are the
+        original's own dead locals, so putting the call back would add two
+        hundred statements that do nothing."""
+        fd = self._fd(pure=True)
+        fd._record_call(None, "round(double((local_6 / 2)), 0)",
+                        self._Named("round"),
+                        self._Ret(None))
+        self.assertEqual(fd.invocations, {})
+
+    def test_a_class_FACTORY_is_a_construction_not_a_call(self):
+        """A member declared by value but held by reference is created by the
+        generated `<global>::<class>` factory at the top of every constructor,
+        and `_refcpy` already drops the store. Emitting the construction alone
+        would hand the new object to nobody."""
+        fd = self._fd(pure=False)
+        fd._record_call(None, "sound_pool(500)", self._Named("sound_pool"),
+                        self._Ret(self._Named("sound_pool")))
+        self.assertEqual(fd.invocations, {})
