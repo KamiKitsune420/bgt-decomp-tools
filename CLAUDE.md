@@ -4880,11 +4880,15 @@ multiplayer.
 Three corrections to what this file said about the `random` class. It is
 **not** "nine minigames' `placeZone`": eight `placeZone` bodies, plus
 `Jeu::addBebeDragon`, `CombattantSauvage::lanceCombat` and
-`synchroRandom`. It is **13 rolls against 12 rows**, because
-`ZrCourChateau::placeZone` loses two `random(55, 60)` with the same text
-and `_lost_calls` deduplicates a shared text in the under-reporting
-direction by design. And `BateauVolant::placeZone`'s row is benign: the
-roll inside the lost `round` is the same one the surviving `Terrain(...)`
+`synchroRandom`. It is **13 rolls in 13 rows**, and the thirteenth is
+worth a sentence: `ZrCourChateau::placeZone` loses two `random(55, 60)`
+whose texts are identical, the first census reported one of them, and
+the position deduplication reports both. So that pair is **not** an
+instance of the shared-text under-report after all -- deduplicating by
+the call's own position rather than by its text is what fixed it, and
+the one surviving instance is `pause_menu`, where the text really is in
+the output. And `BateauVolant::placeZone`'s row is benign: the roll
+inside the lost `round` is the same one the surviving `Terrain(...)`
 carries, 20 sites against 20 occurrences.
 
 **And `getVariable` was never real.** `Basique::getVariable` is
@@ -5139,9 +5143,15 @@ disassembly where a decompiled body belonged.
 | Crazy Party | 40 | **16** |
 | Manamon 1 | 6 | **6** |
 
-Each line is one carried call, so the first column is the line delta
-measured above and the second is the triage. The gap between them is
-the purity analysis declining to
+Each line is one carried call, and the census agrees with the line
+delta exactly: Crazy Party's 40 are **13 `random` + 2 `joueSon` + 1
+`bouge`**, which are the 16 real ones, and **24 pure getters the
+analysis cannot clear** -- 20 `Terrain::getCentre*`/`getMax*`, plus
+`getVariable` and `getNbPiece`. Every one of those 24 is a `CALLINTF`,
+which is the virtual-dispatch conservatism above, so the whole gap
+between the two columns is that one rule. It is the right side of the
+trade: a statement that does nothing costs a line, and a lost call
+costs a feature. The gap is also the purity analysis declining to
 claim something it cannot prove, and it is the right side of that trade:
 a statement that does nothing costs a line, and a lost call costs a
 feature.
