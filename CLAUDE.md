@@ -1726,11 +1726,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,247 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
-| Paladin of the Sky | 27,343 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
-| Psycho Strike | 27,469 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,603 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
-| Manamon 1 | 90,314 | 0 | 0 | yes | 26,548 | **not measured -- wrong engine** |
+| Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
+| Paladin of the Sky | 27,335 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
+| Psycho Strike | 27,446 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,584 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
+| Manamon 1 | 90,848 | 0 | 0 | yes | 26,568 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
@@ -1745,14 +1745,16 @@ a baseline. Re-derive before quoting.
 this project was started against: 784 classes and 332 globals, reached here
 by a different reader from the same bytes, and 4,909 bodies, which is the
 number that benchmark reported as "script functions". It recovers to 806
-files with **0 residual gotos**, a verified split, 0 unmodelled opcodes and
-26,548 calls read back against its own runtime. **2 bodies are given up on
-and counted**, and they are the two switch shapes named under **The tables
-nothing claims** -- the same two functions Manamon 2 gives up on, by name.
+files with **0 residual gotos**, a verified split, 0 unmodelled opcodes,
+**0 bodies given up on** and 26,568 calls read back against its own
+runtime. The two it used to give up on were `number_key_pressed` and
+`type_effectiveness` -- the same two functions Manamon 2 gives up on, by
+name -- and both are fixed under **The tables nothing claims**.
 
 Its line count moved from 91,310 to 90,314 when the global-pointer encoding
-was corrected, and the five `__nvgt_global_init_N` callees this file used to
-list as declared nowhere were a defect in the checker: see below.
+was corrected and to 90,848 when those two bodies came back, and the five
+`__nvgt_global_init_N` callees this file used to list as declared nowhere
+were a defect in the checker: see below.
 
 Its compiler column is empty on purpose: the only engine installed here is
 BGT 1.3, which is not the fork that built it. See **The string factory has
@@ -4594,17 +4596,76 @@ ordinary one being mis-measured.
   comparison is `<=`. Not re-derived, because Manamon 2 is not on this
   machine any more; it may well be the same over-reach one step smaller.
 
-Each wants a different relaxation and each relaxation is the kind this
-file keeps recording as expensive -- "generalising the existing do-while
-handler took Crazy Party from 17 gotos to 55". So they stay counted until
-one is measured on all four titles that can be measured here.
+#### Both are fixed, and the join set was computed in THREE places
 
-What is new is that neither is a mystery and neither is what it was
-written down as. One is a `return` miscounted as an exit; the other is a
-merge crossing nineteen switch boundaries. Both diagnoses came from
-reading the compiler and the bytecode after reading the output had
-produced a confident wrong answer twice -- which is this document's first
-rule, arrived at one level up from the format.
+Neither relaxation is the broad kind this file records as expensive --
+"generalising the existing do-while handler took Crazy Party from 17 gotos
+to 55" -- because the compiler says exactly where each boundary is:
+
+- **A jump to the function's `RET` is a `return`, not a join.** Every
+  `return` is emitted as a jump to the single function exit.
+- **A switch whose every arm returns has no join, and its end is the
+  default** -- because with no `default:` written, the compiler emits the
+  default label and the break label as one. Where the source *does* write
+  a `default:`, that label is an arm and the case is refused instead.
+- **The chain-merger stops at a switch boundary.** One switch's tables are
+  separated by the next range's guard and nothing else, so anything
+  statement-shaped in the gap means the next table is a different switch.
+
+**And finding that exposed the real problem: the join set was computed in
+three places** -- the sparse matcher, the dense pattern and the jump-table
+matcher -- identically, and the first of those rules went into one of them.
+Two places answering one question is the failure this document keeps
+recording; three is the same failure with more copies. `_switch_join` is
+the one answer now, and all three matchers ask it.
+
+A fourth change came out of the same reading, and it is the one that
+touches every title: **an arm with no statements under `default:` is a
+label the source never wrote.** Where the default label is the break
+label, the default's position is the end of the switch and its span is
+empty, so the code that looked like its body belongs after the switch.
+`day_to_word` is the case -- `case 1 .. case 31` and then
+`return number_to_words(arg0, false) + "th";` -- and it had been
+recovering with that fallback inside a `default:` arm.
+
+| title | lines | goto | split | bodies given up | calls |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 6,247 -> 6,240 | 0 | verified | 0 | 1,608 |
+| Paladin of the Sky | 27,343 -> 27,335 | 0 | verified | 0 | 7,110 |
+| Psycho Strike | 27,469 -> 27,446 | 2 | verified | 0 | 6,443 |
+| Crazy Party | 192,603 -> 192,584 | 14 | verified | 0 | 90,118 |
+| Manamon 1 | 90,314 -> 90,848 | 0 | verified | **2 -> 0** | 26,548 -> 26,568 |
+
+**Not one goto count moved**, every split still verifies, passthrough and
+unbalanced files stay 0, and `bgt oracle` is 50/50. The four titles lose a
+few lines each -- the empty `default:` labels -- and Manamon 1 gains 534
+for the two bodies it no longer gives up on, whose calls are now read back
+as well.
+
+#### What the symptom actually was, which is not what it looked like
+
+Worth recording, because it decides how hard to look for the next one.
+Two oracle shapes were written for these rules and **both turned out
+inert**: a switch whose every arm returns is claimed either way, and two
+consecutive switches on one selector, merged, come out with the second
+*nested in the first's `default:` arm* -- which is reached under exactly
+the condition "nothing matched", so it computes the same answers. A
+statement placed between the two switches does not change that: it lands
+in the default arm and still runs.
+
+So **the merge over-reach was never a silent wrong answer.** At small
+scale it produces structure that is wrong and equivalent; at twenty-three
+tables it makes the matcher decline, and a decline is *counted*. That is
+the opposite of most of what this file records, and it is why the shapes
+were written and then removed rather than kept: padding `bgt oracle` from
+50 to 56 with six shapes that cannot fail would make that number mean
+less, and a metric that cannot fail is the trap this document is
+organised around. The evidence here is `body_errors` going 2 -> 0 and the
+structural diff, not a value.
+
+`artisoul_tutor` is still counted, in Manamon 2, and still not
+re-derived -- that title is not on this machine. It may well be the same
+over-reach one step smaller.
 
 ### Typing the promoted local took three tries, and the declaration wins
 

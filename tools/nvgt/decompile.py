@@ -627,6 +627,24 @@ DELEGATE_FACTORIES = ("$dlgte", "%delegate_factory")
 TERMINATOR = re.compile(r"(return\b|break;|continue;)")
 
 
+#: What may sit between two jump tables of the SAME `switch`.
+#:
+#: The compiler emits all of one switch's guards and tables into one
+#: buffer and then every arm in source order, so between two of its
+#: tables there can only be the next range's bound check and
+#: normalisation -- never arm code. Measured on Manamon 1's
+#: `type_effectiveness`, every real chain gap is exactly
+#: `CMPIi ; JS ; SUBIi` and every boundary gap is that switch's arms
+#: (`SetV8 ; CpyVtoR8 ; JMP`, a `return` each). So this set is the
+#: difference between merging a chain and merging two switches.
+RANGE_GUARD_OPS = frozenset((
+    "CMPi", "CMPu", "CMPIi", "CMPIu", "CMPd", "CMPf",
+    "SUBi", "SUBu", "SUBIi", "SUBIu",
+    "SetV1", "SetV2", "SetV4", "SetV8",
+    "JS", "JNS", "JP", "JNP",
+))
+
+
 class UnstructuredSwitch(Exception):
     """A computed jump whose table neither switch matcher recognised.
 
@@ -3647,14 +3665,57 @@ class FuncDecompiler:
         entries = sorted({target for _, target in cases} | {default})
         if entries[0] <= self.instrs[cursor].pos:
             return None
+        join = self._switch_join(entries, [t for _, t in cases], default)
+        if join is None:
+            return None
+        return cursor + 1, cases, default, join, _s16(high.w_arg)
+
+    def _switch_join(self, entries, targets, default):
+        """Where the arms of a switch rejoin, or None if this is not one.
+
+        `entries` are the arm positions with the default's among them,
+        `targets` every case's target, `default` the default's position. An
+        arm that ends in a forward `JMP` past the last entry is leaving the
+        switch, and they must all leave to the same place -- that place is
+        the switch's end.
+
+        Two of the compiler's own rules decide the awkward cases, and both
+        were costing whole bodies:
+
+        * **A jump to the function's `RET` is a `return`, not a second
+          exit.** Every `return` is emitted as a jump to the function's
+          single exit, which runs only cleanup before `RET`. Counted as a
+          join it gives two where the matcher wants one, and
+          `number_key_pressed` was given up on whole for it, in two titles:
+          the span the default's position closes is the LAST ARM, and that
+          arm ended with the `else`-skip of an `if` inside it
+          (`SetV1 ; CpyVtoR4 ; JMP -> RET`, a `return true;`).
+        * **A switch whose every arm returns has no join at all.** That is
+          ordinary -- `type_effectiveness` is twenty such switches in a row,
+          every arm a `return <double>` -- and its end is the default's
+          position, because with no `default:` written the compiler emits
+          the default label and the break label as one. Where the source
+          *does* write a `default:`, that label is an arm and sits inside
+          the switch rather than after it, so the case is refused instead.
+
+        This used to be computed in three places, and the first of those
+        rules was added to one of them.
+        """
         joins = []
         for begin, end in zip(entries, entries[1:]):
-            body = [op for op in self.instrs if begin <= op.pos < end and op.name not in SKIP_OPS]
-            if body and body[-1].name == "JMP" and _jump_target(body[-1]) >= entries[-1]:
-                joins.append(_jump_target(body[-1]))
-        if not joins or len(set(joins)) != 1:
-            return None
-        return cursor + 1, cases, default, joins[0], _s16(high.w_arg)
+            body = [op for op in self.instrs
+                    if begin <= op.pos < end and op.name not in SKIP_OPS]
+            if not (body and body[-1].name == "JMP"
+                    and _jump_target(body[-1]) >= entries[-1]):
+                continue
+            target = _jump_target(body[-1])
+            landing = self.pos_of.get(target)
+            if landing is not None and self.instrs[landing].name == "RET":
+                continue                      # a `return`, not a join
+            joins.append(target)
+        if not joins:
+            return None if default in set(targets) else default
+        return joins[0] if len(set(joins)) == 1 else None
 
     def _dense_switch_pattern(self, index):
         """Recognize the compiler's jump-table dispatch.
@@ -3717,6 +3778,25 @@ class FuncDecompiler:
                 merged = True
                 cases += [case for case in more_cases if case[1] != default]
                 continue
+            # **Stop at a switch BOUNDARY rather than merging across
+            # it.** The last table of a switch sends out-of-range values
+            # to its own default, which with no `default:` is the break
+            # label -- i.e. straight past the arms to wherever the next
+            # statement begins. When that statement is another `switch`,
+            # `next_range` lands on its prologue and a `JMPP` turns up
+            # within a dozen instructions, so the chain walk reads two
+            # unrelated switches as one. `type_effectiveness` is twenty
+            # consecutive switches and `cursor` grew to instruction 622
+            # of 984 while the entries it is checked against still sat at
+            # 0x42, which is what made the backward-entry guard below
+            # fire -- the guard was right and the merge had over-reached.
+            #
+            # What separates the two is what lies in the gap, and the
+            # compiler decides it: one switch's tables are separated by
+            # the next range's guard and nothing else.
+            if any(op.name not in RANGE_GUARD_OPS
+                   for op in self.instrs[cursor:nxt]):
+                break
             more = self._dense_table(nxt)
             if more is None or more[3] != selector:
                 break
@@ -3735,13 +3815,8 @@ class FuncDecompiler:
         entries = sorted({target for _, target in cases} | {default})
         if entries[0] <= self.instrs[cursor - 1].pos:
             return None                   # a table entry jumping backwards
-        joins = []
-        for begin, end in zip(entries, entries[1:]):
-            body = [op for op in self.instrs
-                    if begin <= op.pos < end and op.name not in SKIP_OPS]
-            if body and body[-1].name == "JMP" and _jump_target(body[-1]) >= entries[-1]:
-                joins.append(_jump_target(body[-1]))
-        if not joins or len(set(joins)) != 1:
+        join = self._switch_join(entries, [t for _, t in cases], default)
+        if join is None:
             return None
         # **A merged chain must lose the first table's own range guard.** The
         # guards before `JMPP` are simulated as ordinary branches -- only the
@@ -3762,7 +3837,7 @@ class FuncDecompiler:
         # switch's exit and the `if` is simply a redundant bound.
         if merged and own_guard is not None:
             self.merged_switch_guards.add(own_guard)
-        return cursor, cases, default, joins[0], selector
+        return cursor, cases, default, join, selector
 
     def _equality_chain(self, index, cursor, selector, default):
         """The tail of a switch chain written as compares rather than a table.
@@ -3905,14 +3980,9 @@ class FuncDecompiler:
         entries = sorted({target for _, target in table} | {default})
         if entries[0] <= self.instrs[table[-1][0]].pos:
             return False
-        joins = []
-        for begin, end in zip(entries, entries[1:]):
-            body = [i for i in self.instrs if begin <= i.pos < end and i.name not in SKIP_OPS]
-            if body and body[-1].name == "JMP" and _jump_target(body[-1]) >= entries[-1]:
-                joins.append(_jump_target(body[-1]))
-        if not joins or len(set(joins)) != 1:
+        join = self._switch_join(entries, [t for _, t in table], default)
+        if join is None:
             return False
-        join = joins[0]
         self.events = [e for e in self.events if e.pos not in (high_jump.pos, low_jump.pos)]
         self.events.append(Event("switch", ins.pos,
             (self._slot_atom(_s16(subtract.w_arg2)).text,
@@ -4723,6 +4793,16 @@ class Structurer:
                                 self._next_index(boundary), SwitchCtx(join, loop))
                     arms.append((labels[target], self.out[mark:]))
                     del self.out[mark:]
+                # **An arm with no statements under `default:` is a label
+                # the source never wrote.** Where the source omits
+                # `default:`, the compiler emits the default label and the
+                # break label as one, so the default's position is the end
+                # of the switch and its span is empty. Keeping the label
+                # would put `default:` immediately before the closing
+                # brace, with the statements it looked like it owned now
+                # correctly placed after the switch.
+                arms = [(names, lines) for names, lines in arms
+                        if lines or names != ["default:"]]
                 self.out.append((indent, f"switch ({selector}) {{"))
                 for names, lines in _default_last(arms):
                     for label in names:
