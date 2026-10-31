@@ -140,6 +140,10 @@ class FoldSafetyTests(unittest.TestCase):
         sim.slot_writes = {}
         sim.short_circuit_slots = set()
         sim.var_names = {}
+        # `_stale_global` asks which of the module's globals a value
+        # reads. A real decompiler always has this; empty here so a case
+        # that is not about globals stays about what it was written for.
+        sim.global_types = {}
         for name, value in attrs.items():
             setattr(sim, name, value)
         return sim
@@ -218,6 +222,84 @@ class FoldSafetyTests(unittest.TestCase):
         # through the frame.
         self.assertFalse(
             sim({2: [4], 0: [4]})._stale_fold(12))
+
+    def test_a_global_read_goes_stale_through_any_call(self):
+        """A global is not one of the frame's slots, and has no receiver.
+
+        `slot_writes` cannot see a global and `_CALL_RECEIVER` finds
+        nothing in `current_bgm` to be invalidated through, so a snapshot
+        of one folded across whatever ran in between. Any call can write
+        any global, which is the same argument `_prop_receiver` makes with
+        `this` for a bare member, one scope out.
+
+        Paladin's `pause_menu` keeps `current_bgm` across the menu music
+        and restores it on the way out; folded, the restore read the
+        global `change_music` had just overwritten, so leaving the pause
+        menu re-applied the menu music. And `waiting` keeps
+        `int(default_volume)` before the volume keys adjust it, so the
+        guard became `default_volume != double(int(default_volume))` --
+        always false, and the volume keys never reached the sound.
+        """
+        from decompile import Atom, DataType
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+
+        def sim(value, texts, stmt_at_bind=0):
+            s = self._sim(instrs=instrs, k=8,
+                          temps={12: value}, temp_bound={12: (8, stmt_at_bind)},
+                          var_names={}, slot_writes={}, var_types={12: DataType(token_type=70)},
+                          duplicate_binds=set(), cond_spans=[],
+                          back_edges=[], stmt_count=len(texts),
+                          stmt_texts=texts)
+            s.global_types = {"current_bgm": DataType(token_type=70),
+                              "default_volume": DataType(token_type=70)}
+            return s
+
+        bgm = Atom(kind="global", text="current_bgm")
+        # A call ran in between, and any call can write any global.
+        self.assertTrue(
+            sim(bgm, ["change_music(local_5, false, 0);"])._stale_fold(12))
+        # An assignment to that global in between counts too.
+        self.assertTrue(
+            sim(bgm, ["current_bgm = local_5;"])._stale_fold(12))
+        # A statement that neither calls anything nor touches it does not.
+        self.assertFalse(sim(bgm, ["local_4 = 3;"])._stale_fold(12))
+        # Nothing has run since the bind: the same moment, so it folds.
+        self.assertFalse(
+            sim(bgm, ["change_music(local_5, false, 0);"],
+                stmt_at_bind=1)._stale_fold(12))
+        # A value BUILT OUT OF a global reaches the same answer by the
+        # other path -- `int(default_volume)` is kind `call`, so it has no
+        # receiver for `_CALL_RECEIVER` to find.
+        cast = Atom(kind="call", text="int(default_volume)")
+        self.assertTrue(
+            sim(cast, ["default_volume = (default_volume - 2.0);"])
+            ._stale_fold(12))
+
+    def test_assigning_a_field_of_an_object_changes_the_object(self):
+        """`voice.rate++` is not a call on `voice` nor an assignment to it.
+
+        So a snapshot taken before it survived it, and Paladin's
+        `tts_selector` keeps one in each of its six settings branches:
+        `int old = voice.rate; voice.rate++; if (voice.rate == old) ...`.
+        Folded past the increment that is `voice.rate == voice.rate`,
+        always true with the empty arm taken, so rate, pitch and volume
+        all changed silently and nothing said what they had become.
+        """
+        from decompile import _mutates
+        for statement in ("voice.rate++;", "voice.rate--;",
+                          "voice.rate = 3;", "voice.rate += 3;",
+                          "voice.reader.rate = 3;", "bag[2].count = 1;",
+                          "voice.set_current_voice(local_6);"):
+            self.assertTrue(_mutates(statement, statement.split(".")[0]
+                                     .split("[")[0]),
+                            statement)
+        # Reading it, or comparing against it, is not writing it.
+        for statement in ("local_4 = voice.rate;",
+                          "if (voice.rate == local_12) {",
+                          "local_4 = voice.rate + 1;",
+                          "local_4 = other.rate;"):
+            self.assertFalse(_mutates(statement, "voice"), statement)
 
     def test_lowering_the_duplication_threshold_for_calls_is_not_the_answer(self):
         """Pins the threshold, and the measurement that says why it is 3.

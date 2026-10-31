@@ -382,14 +382,35 @@ def _mutates(statement: str, receiver: str) -> bool:
     while `item_list.resize(...)` changes `item_list`. So what counts is a
     call *on* the receiver, or an assignment *to* it -- not an appearance of
     its name on the right of one.
+
+    **An assignment to one of its FIELDS counts too**, and that was the
+    hole. `voice.rate++` is not a call on `voice` and not an assignment to
+    `voice`, so a snapshot taken before it survived it -- and Paladin's
+    `tts_selector` keeps one in each of its six settings branches:
+
+        int old = voice.rate;
+        voice.rate++;
+        if (voice.rate == old) { } else { speak("Rate, " + voice.rate); }
+
+    Folded past the increment that is `if (voice.rate == voice.rate)`,
+    always true, with the empty arm taken -- so rate, pitch and volume all
+    changed **silently** in both directions, and nothing in the selector
+    said what they had become. An `if` with an empty arm is the signature
+    this file records for a condition that has lost its value.
     """
     name = re.escape(receiver)
+    #: `x`, `x[i]`, `x.f`, `x.f[i].g` -- the receiver and any path below it.
+    path = r"(?:\s*\[[^\]]*\]|\s*\.\s*[A-Za-z_]\w*)*"
     return bool(
-        # a method call on it: `item_list.resize(...)`
-        re.search(r"(?<![\w.])" + name + r"\s*\.\s*[A-Za-z_]\w*\s*\(", statement)
-        # or an assignment to it, including compound and indexed
-        or re.search(r"(?<![\w.])@?" + name + r"\s*(?:\[[^\]]*\])?\s*"
-                     r"(?:[-+*/%|&^]|<<|>>)?=(?!=)", statement))
+        # a method call on it, at any depth: `item_list.resize(...)`,
+        # `arg0.interacts.remove_at(...)`
+        re.search(r"(?<![\w.])" + name + path + r"\s*\.\s*[A-Za-z_]\w*\s*\(",
+                  statement)
+        # or an assignment to it or to anything under it, including
+        # compound, indexed and `++`/`--`. `=(?!=)` is what keeps a
+        # COMPARISON against it from counting as a write.
+        or re.search(r"(?<![\w.])@?" + name + path + r"\s*"
+                     r"(?:(?:[-+*/%|&^]|<<|>>)?=(?!=)|\+\+|--)", statement))
 
 
 def _prop_receiver(text: str) -> str:
@@ -450,6 +471,15 @@ SLOT_NAME_RE = re.compile(r"\b((?:local|tmp)_?\d+)\b")
 #: `arg0.interacts[local_2].mode` names three things and only `local_2`
 #: is a slot.
 _IDENT = re.compile(r"[A-Za-z_]\w*")
+
+#: Any call at all. A snapshot of a global is invalidated by one,
+#: because any function can write any global -- the same argument
+#: `_prop_receiver` makes with `this` for a bare member, one scope out.
+#: A cast (`int(x)`, `double(x)`) matches too and is harmless: it only
+#: ever makes the test stricter, and never about a value read at the
+#: moment it was bound, which `bound[1] == self.stmt_count` has already
+#: excluded.
+_ANY_CALL = re.compile(r"[A-Za-z_]\w*\s*\(")
 # Locals this decompiler generates. They belong to the function, never to the
 # block they were written in.
 GENERATED_LOCAL = re.compile(r"__nvgt_(?:out|ret|list|hold)_")
@@ -2166,6 +2196,50 @@ class FuncDecompiler:
             # into a read after it. The menu's arrow keys did nothing,
             # because that arm is always taken.
             return True
+        # **Which slots does this value READ, and has one been written
+        # since?** That question has nothing to do with whether the value
+        # is repeatable, and it used to be asked only of values that were
+        # -- so an expression BUILT OUT OF a reassigned slot was never
+        # asked at all. A cast is kind `call`, so it fell through to the
+        # receiver test, and `_CALL_RECEIVER` finds no `name.method(` in
+        # `double(local_3)`.
+        #
+        # Paladin's `get_percent_of_range` is the cost. Its source is one
+        # expression --
+        #
+        #     int((double)a0 - (double)(a0 - a1) * ((double)a2 / 100.0))
+        #
+        # -- and the compiler parks each operand in slot 3 in turn,
+        # converting each to double as it goes. All three `double(local_3)`
+        # temps outlived the next write to slot 3, so all three rendered
+        # the same name and the recovery computed `a0 - a0 * (a0 / 100)`,
+        # with `a1` and `a2` gone. All three of its callers scale something
+        # by the player's level, so the scaling stopped above level 1.
+        #
+        # **A computed value is only asked once a statement has run**, the
+        # guard the non-repeatable path below already carries: within one
+        # statement the bind and the read are the same moment. Asked
+        # without it, a loop condition built out of the loop variable --
+        # `(local_4 < local_2)`, with the latch writing `local_4` -- is
+        # "stale" too, gets promoted to a statement before a jump, and
+        # stops being a loop condition: Egg Hunt 0 residual gotos -> 2, and
+        # a Paladin body given up on.
+        if _is_repeatable(value) or bound[1] != self.stmt_count:
+            slot_of = {n: s for s, n in self.var_names.items()}
+            if value.kind == "var":
+                names = {value.text.lstrip("@")}
+            else:
+                names = set(_IDENT.findall(_mask_strings(value.text)))
+            if any(any(bound[0] < write <= self._pos()
+                       for write in self.slot_writes.get(slot_of[name], ()))
+                   for name in names if name in slot_of):
+                # A repeatable value answers True whatever its type, which
+                # is what this did before it was hoisted. A computed one
+                # answers `declarable`, because the only thing to do with a
+                # stale fold is promote the slot, and a slot with no type
+                # cannot be declared -- an undeclared name does not compile
+                # at all, where a duplicated expression does.
+                return True if _is_repeatable(value) else declarable
         if _is_repeatable(value):
             # **...but a plain VARIABLE is only repeatable while it still
             # holds the same value.** `_is_repeatable` says a variable can be
@@ -2208,15 +2282,8 @@ class FuncDecompiler:
             # `local_2` now holding the *new* event's index and the element
             # it named already removed. Loading a save runs `init_events`,
             # so every save that had ever replaced an event died there.
-            slot_of = {n: s for s, n in self.var_names.items()}
-            if value.kind == "var":
-                names = {value.text.lstrip("@")}
-            else:
-                names = set(_IDENT.findall(_mask_strings(value.text)))
-            if any(any(bound[0] < write <= self._pos()
-                       for write in self.slot_writes.get(slot_of[name], ()))
-                   for name in names if name in slot_of):
-                return True
+            # (the slot-write test is hoisted above, because it is the same
+            # question for a computed value.)
             # **...and a MEMBER read goes stale through a call on its own
             # object, which no slot write can show.** The test above asks
             # which of the frame's slots the expression reads; `level` reads
@@ -2250,6 +2317,13 @@ class FuncDecompiler:
                 if any(_mutates(text, owner)
                        for text in self.stmt_texts[bound[1]:]):
                     return declarable
+            # **...and so does a GLOBAL, which has no receiver at all.**
+            # `pause_menu` keeps `current_bgm` across the menu music and
+            # restores it on the way out; folded, the restore read the
+            # global `change_music` had just overwritten. See
+            # `_stale_global`.
+            if self._stale_global(value, bound):
+                return declarable
             return False
         if bound[1] == self.stmt_count:
             return False            # nothing has run since: the same moment
@@ -2272,16 +2346,72 @@ class FuncDecompiler:
         # of the list. Those eight entries are the speaker songs.
         receivers += [m.group(1) for m in _INDEX_BASE.finditer(masked)]
         if not receivers:
-            # No receiver to be invalidated through. A bare call's result can
-            # still go stale through engine state -- `reserve_slot()` hands
-            # out a different slot each time -- but that is the duplication
-            # case, measured by `bgt libcheck` and not guessed at here.
+            # No receiver to be invalidated through -- but a GLOBAL the
+            # value reads is one, and it has no receiver syntax for
+            # `_CALL_RECEIVER` to find. `waiting`'s
+            # `int old = int(default_volume);` reached exactly here and
+            # folded, which is why the volume keys were not live.
+            if self._stale_global(value, bound):
+                return declarable
+            # A bare call's result can still go stale through engine state
+            # -- `reserve_slot()` hands out a different slot each time --
+            # but that is the duplication case, measured by
+            # `bgt libcheck` and not guessed at here.
             return False
         if not any(_mutates(text, receiver)
                    for text in self.stmt_texts[bound[1]:]
                    for receiver in receivers):
             return False
         return declarable
+
+    def _stale_global(self, value: Atom, bound) -> bool:
+        """Has a global this value reads been written since it was bound?
+
+        `_stale_fold` asks which of the frame's SLOTS an expression
+        reads, and a global is not one of them: `slot_writes` cannot see
+        it, and `_CALL_RECEIVER` finds nothing in `current_bgm` or
+        `int(default_volume)` to be invalidated through. So a snapshot of
+        a global folded straight across whatever ran in between, which is
+        the member-snapshot bug one scope out and takes the same
+        argument: a method can change any field of its object, so `this`
+        is a bare member's receiver -- and any function can write any
+        global, so a call is a global's.
+
+        Two reported Paladin bugs, one cause. `pause_menu` keeps
+        `current_bgm` before `change_music(\"the_menu\", ...)` and
+        restores it on the way out, and `change_music` ends
+        `current_bgm = arg0;` -- so folded, the restore read the global
+        after the menu music had already overwritten it, and leaving the
+        pause menu re-applied the menu music. And `waiting` keeps
+        `int(default_volume)` before the page up/down keys adjust it:
+
+            int old = int(default_volume);
+            if (recorder.pressed(KEY_NEXT))  default_volume -= 2;
+            if (recorder.pressed(KEY_PRIOR)) default_volume += 2;
+            if (default_volume != old) { ...clamp...;
+                                         music.set_volume(default_volume); }
+
+        Folded, that guard became
+        `default_volume != double(int(default_volume))` -- always false,
+        the steps being whole numbers -- so the volume keys moved the
+        global and never reached the sound. The volume did not change
+        live, and the clamp that keeps it inside -24..-4 never ran
+        either. Both compile, both run, and neither shows in any count.
+        """
+        if bound[1] == self.stmt_count:
+            return False        # nothing has run since: the same moment
+        masked = _mask_strings(value.text)
+        names = [n for n in set(_IDENT.findall(masked))
+                 if n in self.global_types]
+        if not names:
+            return False
+        for text in self.stmt_texts[bound[1]:]:
+            clean = _mask_strings(text)
+            if _ANY_CALL.search(clean):
+                return True
+            if any(_mutates(clean, name) for name in names):
+                return True
+        return False
 
     def _diamond_bind(self, bind_pos: int, off: int, now: int) -> bool:
         """Is the value at `bind_pos` one arm of an if/else over slot `off`?
@@ -2541,11 +2671,25 @@ class FuncDecompiler:
         that one write leaves the constant alone, because this answers one
         question and guessing the rest is how a plausible wrong type gets in.
         """
+        #: The store that writes a constant through the reference
+        #: register, by width. **One and two bytes are in here because a
+        #: `uint8` member is written one byte wide**, and leaving them out
+        #: left the worst case of this rule unreached: Psycho Strike's
+        #: `populate_voice_sets` writes every `voice_set` count with
+        #: `SetV1 ; LoadRObjR ; WRTV1`, and slot 1 reads as bool because
+        #: one byte is all the evidence there is -- so 25 threes, 28
+        #: fours, 24 fives, 21 twos, 19 sixes and 12 eights all rendered
+        #: as `true`, which is 1. Every character voice in the game
+        #: reduced to one variant of each sound.
+        pair = {"SetV1": "WRTV1", "SetV2": "WRTV2",
+                "SetV4": "WRTV4", "SetV8": "WRTV8"}
+        #: ...and the float reading, which only a four- or eight-byte
+        #: store can have.
         widths = {"WRTV4": 81, "WRTV8": 94}            # float, double
         loads = ("ADDSi", "LoadThisR", "LoadRObjR", "LoadVObjR")
         typed = {}
         for index, ins in enumerate(self.instrs):
-            if ins.name not in ("SetV4", "SetV8"):
+            if ins.name not in pair:
                 continue
             off = _s16(ins.w_arg)
             known = self.var_types.get(off)
@@ -2555,7 +2699,7 @@ class FuncDecompiler:
             destination = None
             for j in range(index + 1, min(index + 9, len(self.instrs))):
                 nxt = self.instrs[j]
-                if widths.get(nxt.name) == widths.get(ins.name.replace("SetV", "WRTV"))                         and _s16(nxt.w_arg) == off:
+                if nxt.name == pair[ins.name] and _s16(nxt.w_arg) == off:
                     for back in range(j - 1, index, -1):
                         previous = self.instrs[back]
                         if previous.name in loads:
@@ -2572,8 +2716,8 @@ class FuncDecompiler:
                     break
             if destination is None or destination.obj_type is not None:
                 continue
-            want = widths[ins.name.replace("SetV", "WRTV")]
-            if destination.token_type == want:
+            want = widths.get(pair[ins.name])
+            if want is not None and destination.token_type == want:
                 typed[index] = destination
             elif (known is not None and known.obj_type is None
                   and known.token_type == 67            # the slot reads as bool

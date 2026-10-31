@@ -1726,6 +1726,51 @@ Manamon 1's seven character stats all came out as `1` -- `strength = 1`,
 and the two are complementary rather than alternatives: one asks what a
 constant is being stored into, the other what the slot is.
 
+#### ...and the destination rule had a width blind spot of its own
+
+`_constant_destinations` pairs `SetV4` with `WRTV4` and `SetV8` with
+`WRTV8`, and a **`uint8` member is written one byte wide** -- `SetV1` and
+`WRTV1`, which it never looked at. So the rule that exists precisely to
+stop a bool-typed slot flattening a constant could not see the case where
+that slot has *no other evidence at all*: one byte is all there is.
+
+Psycho Strike's `populate_voice_sets` is 10,425 instructions of exactly
+that:
+
+```
+SetV1 v1, 3 ; LoadRObjR v2 voice_set::gender      ; WRTV1 v1
+SetV1 v1, 8 ; LoadRObjR v2 voice_set::hurt_sounds ; WRTV1 v1
+```
+
+Every field of `voice_set` is a `uint8` saying how many variants of a
+sound that character has, and the recovery read `gender = 1` and
+`hurt_sounds = 1`. **25 threes, 28 fours, 24 fives, 21 twos, 19 sixes and
+12 eights**, all flattened, in the one function that describes every
+character voice in the game -- so every recovered character had one
+variant of each sound, or none.
+
+`SetV1` is also the bool-constant opcode, which is what makes the width
+pairing safe to widen: the branch fires only where the destination member
+is **not** a bool, so `bool_member = true;` is left exactly as it was, and
+`uint8_member = 1;` renders the same either way. Super Egg Hunt, Paladin
+and Psycho Strike come out with identical line, goto, call and split
+figures, and Psycho Strike's constant audit goes **18 rows -> 8**, all
+eight accounted for: four are the two stock library files, whose text is
+BGT's own source and spells a float constant `-100` where the audit
+spells it `-100.0`; three are one-byte `255` constants the text correctly
+spells signed (`this.walk(-1, false)` into an `int8` parameter); and one
+is `find_best_weapon`'s `int best = -1;`, written three times and read
+never -- the original's own dead local, dropped for the same reason
+`sleep_in_bed`'s is.
+
+**And Paladin's six are the same three kinds**, which supersedes the note
+above that one of them had not been run down: four stock-library float
+spellings, `play_me`'s dead `default_volume + 4.0`, and `init_events`'s
+`SetV4 4, -1` into a slot nothing ever reads. **So the audit reports no
+lost constant on either title**, which is the result -- the same shape the
+literal audit reached on Manamon 1, where the value was the one row that
+was real and not the eleven that were not.
+
 #### The instrument: every numeric constant, against the text
 
 This was found by an audit, not by a diagnostic, and the audit is worth
@@ -1748,8 +1793,8 @@ and `_2d`, which are **stock library files** whose text is BGT's own source
 rather than the recovery, so the audit is comparing against a different
 artefact; `play_me`'s 4.0, which is the original's own dead store
 (`default_volume + 4.0` computed into a slot nothing reads -- the
-`sleep_in_bed` shape); and one `-1` in `init_events`, which is a single
-constant in a 500-line body and has not been run down.
+`sleep_in_bed` shape); and one `-1` in `init_events`, which is a
+`SetV4 4, -1` into a slot nothing ever reads -- the same shape.
 
 **And the counts say it is correctly scoped.** Across all five titles that
 can be measured here, not one residual goto, call count, split
@@ -1816,12 +1861,29 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | **compiled cleanly** |
-| Paladin of the Sky | 27,335 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
-| Psycho Strike | 27,446 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,584 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
-| Manamon 1 | 90,848 | 0 | 0 | yes | 26,568 | **not measured -- wrong engine** |
+| Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | compiled cleanly, not re-run |
+| Paladin of the Sky | 27,393 | 0 | 0 | yes | 7,110 | compiled cleanly, not re-run |
+| Psycho Strike | 27,529 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,626 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
+| Manamon 1 | 90,852 | 0 | 0 | yes | 26,568 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
+
+**Three of those rows are current and two are not, and the difference
+matters more than the figures.** Super Egg Hunt, Paladin and Psycho Strike
+were re-derived on the code as it stands. Crazy Party's and Manamon 1's
+are from the width-fix commit and carry nothing after it: the run that
+would have given them the four fold-safety rules' numbers was stopped by
+the host for system memory partway through Crazy Party. So those two
+line counts are a lower bound on what the current code produces, not a
+measurement of it, and their goto counts are an assumption rather than a
+reading. See **What these cost, measured -- and the two titles that are
+not here**.
+
+**And the compiler column was not re-run for any of them.** It is the
+verdict on the recovery those line counts no longer describe. Running it
+costs a modal dialog on whoever is at the machine, so it is a thing to do
+deliberately; what the column says is true of the commit it was measured
+at, and the residual goto count is the proxy in the meantime.
 
 **Every number above was re-measured, and several of them moved a long
 way.** The table used to claim 0 residual gotos for Psycho Strike and for
@@ -1842,7 +1904,8 @@ runtime. The two it used to give up on were `number_key_pressed` and
 name -- and both are fixed under **The tables nothing claims**.
 
 Its line count moved from 91,310 to 90,314 when the global-pointer encoding
-was corrected and to 90,848 when those two bodies came back, and the five
+was corrected, to 90,848 when those two bodies came back and to 90,852 when a
+slot's width evidence stopped being first-come-first-served; the five
 `__nvgt_global_init_N` callees this file used to list as declared nowhere
 were a defect in the checker: see below.
 
@@ -3898,6 +3961,198 @@ slot. Super Egg Hunt renders **byte-identical** under this, Paladin gains
 two lines and Psycho Strike six, and no title's goto count, split or
 `libcheck` score moves -- which is what a correctly scoped fold change looks
 like.
+
+### Six, seven and eight: one question asked of the wrong things
+
+`_stale_fold` asks whether anything has run that touched **what this value
+reads**. Three things it reads were not in the answer, and each cost a
+reported bug. They are one discovery read three ways, which is why they
+are here together.
+
+#### Six: the value reads a GLOBAL, which is not one of the frame's slots
+
+`slot_writes` cannot see a global, and `_CALL_RECEIVER` finds nothing in
+`current_bgm` or `int(default_volume)` to be invalidated through. So a
+snapshot of a global folded straight across whatever ran in between, and
+the test came back False through the branch whose own comment says "no
+receiver to be invalidated through".
+
+It is the member-snapshot rule one scope out, and it takes the same
+argument. `this` is a bare member's receiver because a method can change
+any field of its object; a global's receiver is the whole program, because
+**any function can write any global.** So an intervening statement
+invalidates it if it assigns that global or if it contains a call at all.
+
+Two reported Paladin bugs, one cause:
+
+- **Leaving the pause menu did not bring the map's music back.**
+  `pause_menu` opens `string old = current_bgm;`, plays `the_menu`, and
+  restores `old` on the way out -- and `change_music` ends
+  `current_bgm = arg0;`, which is the whole reason the source saved it.
+  Folded, the restore read the global the menu music had already
+  overwritten, so it called `change_music(current_bgm, ...)`; and that
+  function's first guard is
+  `if (lower(current_bgm) == lower(arg0) && music is playing) return;`, so
+  it did **nothing at all** and the menu music simply kept playing.
+- **The music volume keys were not live.** `waiting` keeps
+  `int old = int(default_volume);`, then page down and page up adjust
+  `default_volume`, then
+
+      if (default_volume != old) { ...clamp to -24..-4...;
+                                   music.set_volume(default_volume); }
+
+  Folded, that guard became `default_volume != double(int(default_volume))`
+  -- always false, the steps being whole numbers -- so the keys moved the
+  global and never reached the sound. The change only took effect at the
+  next track, where `change_music` applies `default_volume` itself, which
+  is exactly what "it does not happen live" means from the outside. The
+  clamp never ran either, so the value could drift outside its own range in
+  the meantime.
+
+#### Seven: ...and the SLOT test was asked only of REPEATABLE values
+
+"Which slots does this value read, and has one been written since?" has
+nothing to do with whether the value is repeatable -- and it sat inside the
+`_is_repeatable` branch, so an expression **built out of** a reassigned
+slot was never asked at all. A cast is kind `call`, so it fell through to
+the receiver test, and `_CALL_RECEIVER` finds no `name.method(` in
+`double(local_3)`.
+
+Paladin's `get_percent_of_range` is the cost. Its source is one expression
+per branch:
+
+```
+return int((double)a0 - (double)(a0 - a1) * ((double)a2 / 100.0));
+```
+
+and the compiler parks each operand in slot 3 in turn, converting each to
+double as it goes. All three `double(local_3)` temps outlived the next
+write to slot 3, so all three rendered the same name:
+
+```
+local_3 = (arg0 - arg1);
+local_3 = arg2;
+local_3 = arg0;
+local_3 = int((double(local_3) - (double(local_3) * (double(local_3) / 100.0))));
+```
+
+-- `a0 - a0 * (a0 / 100)`, with `a1` and `a2` gone and the first two
+assignments dead. All three of its callers scale something by the player's
+level (`damage /= get_percent_of_range(1, 10, player.level, false)` among
+them), so the scaling stopped happening above level 1.
+
+**And the first attempt at this was too broad, measurably.** Hoisting the
+test unconditionally cost Super Egg Hunt 0 residual gotos -> **2** -- two
+compiler errors on a title that compiles cleanly -- and Paladin a body it
+gave up on and 134 duplicated calls. The reason is the guard the
+non-repeatable path already carried and the hoist jumped over: **within one
+statement the bind and the read are the same moment.** A loop condition
+built out of the loop variable is exactly that -- `(local_4 < local_2)`,
+with the latch writing `local_4` -- so asked without the guard every such
+condition is "stale", gets promoted to a statement before a jump, and
+stops being a loop condition. With it, `get_percent_of_range` still
+answers, because the compiler's own dead stores into slot 3 are statements
+between each bind and its read.
+
+**The shape is worth grepping for**, alongside the empty `if` arm: a name
+assigned twice in a row and then read several times in one expression.
+Across Paladin there are exactly four, two of them this function; the other
+two read the same value at every read and are faithful.
+
+#### Eight: and assigning a FIELD of an object changes the object
+
+`_mutates` asked for a call *on* the receiver or an assignment *to* it, and
+`voice.rate++` is neither -- so a snapshot taken before it survived it.
+Paladin's `tts_selector` keeps one in each of its six settings branches:
+
+```
+int old = voice.rate;
+voice.rate++;
+if (voice.rate == old) { } else { speak("Rate, " + voice.rate + "."); }
+```
+
+Folded past the increment that is `if (voice.rate == voice.rate)`, always
+true, with the **empty** arm taken -- so rate, pitch and volume all changed
+**silently**, in both directions, and nothing in the TTS selector said what
+they had become. Six of them, and the empty arm is what pointed at them:
+this file already records that an `if` with an empty arm is a condition
+that has lost its value.
+
+**The arm stays empty, and the count does not move.** The source wrote the
+announcement in the `else`, so the compiler emitted a branch over an empty
+fall-through and that is what the structurer renders:
+`if (local_12 == voice.rate) { } else { speak(...); }`. What was wrong was
+the condition, not the shape -- so Paladin's ten empty arms are still ten,
+and the signature is a lead rather than a metric. The other four are read
+and faithful: two are the original's own `if (c) { } else { ... }`, one is
+`if (continue_story()) { }`, a call run for the keys it polls, and one is
+`if (local_10.is_empty()) { }` in `load()`, where the bytecode is
+`CALLSYS dictionary::is_empty ; JLowZ 0 ; LABEL` -- a branch to the very
+next instruction with nothing in between, so the original's own `if` body
+is empty.
+
+**That last one is worth keeping**, because it is not ours and it explains
+a report. `load()` tests whether the deserialized save dictionary came
+back empty and then does nothing about it, and the next statement is
+`deserialize_all(...)` -- which is exactly the null-pointer trace a tester
+sent back from a Paladin build. The guard the author wrote is there; its
+body is not, in the shipped bytecode.
+
+#### What these cost, measured -- and the two titles that are not here
+
+Each rule was measured alone before being taken together, because the
+first version of the seventh broke two titles and a combined measurement
+would have said only that something had. Alone, on the titles that show
+structural damage fastest: the global rule gives Paladin +28 lines and
+Super Egg Hunt +0; the field-write rule +18 and +0; the slot test, once
+narrowed, +15 and +0 with Psycho Strike +12; the width pairing of the
+section before this one, +0, +0 and +0. Together:
+
+| title | lines | goto | split | calls | passthru / bodyerr / unbal |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 6,240 | 0 | verified | 1,608 | 0 / 0 / 0 |
+| Paladin of the Sky | 27,335 -> 27,393 | 0 | verified | 7,110 | 0 / 0 / 0 |
+| Psycho Strike | 27,446 -> 27,529 | 2 | verified | 6,443 | 0 / 0 / 0 |
+| Crazy Party | **not measured** | | | | |
+| Manamon 1 | **not measured** | | | | |
+
+Super Egg Hunt is byte-identical; Paladin and Psycho Strike move by the
+lines the four rules give back and by nothing else. `bgt libcheck
+--decompiler` holds at 39/47 call sequences and 46/47 literals on Paladin,
+and every duplication count this file records holds exactly: `do_damage`
+13, `interact_in_location` 5, `dragon_strike` 7, `reserve_slot` 8.
+
+**The last two rows are owed, and Crazy Party is the one that matters.**
+The run was stopped by the host for system memory partway through that
+title, and it is precisely the title every over-broad fold change in this
+file has been caught by -- 14 residual gotos -> 30 for a call-text
+threshold, -> 44 for dropping the declaration-order rule, -> 90 for
+forcing on the copy idiom. Three titles agreeing is the evidence there is,
+and it is weaker evidence than this file normally asks for a fold change.
+Re-derive both before quoting this section as settled, and if Crazy
+Party's fourteen have moved, the rule that moved them comes out and gets
+recorded as rejected with its number, the way the three rejections above
+it are.
+
+**What is cross-validated is the diagnosis**, which is a different claim
+from the counts and is what says the rules are about BGT rather than about
+Paladin. Psycho Strike carries every one of the defects and nothing was
+looking for them there: `if (base.log_cursor != base.log_cursor)`, a whole
+branch that could never run; `this.damage = this.damage;`, a save and
+restore around something that changes it, collapsed to a no-op; two
+`pool.volume_step = float(double(pool.volume_step));` of the same shape;
+its own copy of `get_percent_of_range`, wrong the same way; and 10,425
+instructions of flattened `voice_set` counts. All of them come back.
+
+Counting lines whose two sides are textually identical -- the signature a
+collapsed snapshot leaves -- gives the same answer from the other
+direction: Paladin **11 -> 2**, Psycho Strike **3 -> 1**. Both of
+Paladin's survivors are the original's own no-ops, `arg0 = arg0;` confirmed
+against the bytecode as `VAR 0 ; PshVPtr 0 ; GETOBJREF 1 ; CALLSYS
+string::opAssign`. Crazy Party has **16** of these and Manamon 1 **17**,
+among them `pool.volume_step = pool.volume_step;` in three of Manamon 1's
+classes -- unfixed as far as any measurement here shows, because those are
+the two titles the run did not reach.
 
 ### A base class's method, called through `this`, recurses forever
 
