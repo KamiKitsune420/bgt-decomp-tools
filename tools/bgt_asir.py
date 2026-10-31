@@ -888,6 +888,21 @@ class Builder:
         downstream.
         """
         tagged = self.info["dialect"] == as_module.TAGGED
+        # Which opcode this build's literals arrive through decides
+        # whether a global pointer needs the table-selector bit. Counted
+        # here rather than taken from the dialect, because Manamon 1 is
+        # `len2` and plain -- see `as_opcodes.global_index_is_plain`.
+        str_count = pga_count = 0
+        for f in m.saved_functions:
+            for ins in f.bytecode or ():
+                if ins.name == "STR":
+                    str_count += 1
+                elif ins.name == "PGA":
+                    pga_count += 1
+        plain_global = as_opcodes.global_index_is_plain(str_count,
+                                                       pga_count)
+        if plain_global is None:
+            plain_global = tagged
         for f in m.saved_functions:
             # A behaviour's name is `_beh_N_` in this generation and `$behN` in
             # the newer one, for the same N: `_beh_0_` is the constructor (seen
@@ -914,7 +929,7 @@ class Builder:
                     # literal sits at index 0 -- a real string, in every body
                     # that has one, which is why this fails quietly.
                     ins.dw_arg = ins.w_arg
-                elif tagged and ins.name in GLOBAL_PTR_OPS:
+                elif plain_global and ins.name in GLOBAL_PTR_OPS:
                     # The operand carries a table selector in its low bit in
                     # the newer dialect and no selector at all in the older
                     # one, where a string literal has its own STR opcode.

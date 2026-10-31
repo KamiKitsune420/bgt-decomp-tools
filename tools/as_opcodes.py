@@ -228,6 +228,36 @@ def _name_at(exe: bytes, va: int) -> Optional[str]:
     return None
 
 
+
+def global_index_is_plain(str_count: int, pga_count: int):
+    """Does a global-pointer operand carry a plain index, or `2n + tag`?
+
+    The newer generation has no opcode of its own for a string literal, so
+    `PGA` carries both literals and globals and the low bit says which:
+    `2 * index + tag`, tag 0 selecting the string-constant table. The older
+    generation gives a literal its own `STR`, so nothing needs to share the
+    field and the operand is a plain `usedGlobalProps` index.
+
+    **That is a property of the build, not of the string dialect**, and
+    Manamon 1 is what proves it: a `len2` module whose literals come
+    through `STR` (12,523 of them against 136 `PGA` in all), and whose
+    global operands saturate `usedGlobalProps` exactly -- 414 against 415.
+    Read through Manamon 2's rule instead, every one of its 4,117 global
+    operands resolved to the wrong thing: the even half to a string from
+    the wrong table (`@local_10 = "";` for a `character@[]@` global) and
+    the odd half to the global at half its index.
+
+    So the question is which opcode this module's literals arrive through,
+    counted rather than inferred. The gap is three orders of magnitude in
+    both directions -- Manamon 2 carries 149,656 literals in `PGA` and
+    this corpus's five other modules carry theirs in `STR` -- so a module
+    with neither returns None and the caller keeps its dialect default,
+    which is the honest answer for a module with no literals at all.
+    """
+    if not str_count and not pga_count:
+        return None
+    return str_count > pga_count
+
 def disassemble(bc: bytes, table: Dict[int, Dict[str, Any]], start: int = 0,
                 limit: Optional[int] = None) -> List[Tuple[int, int, str, List[int]]]:
     """Decode a bytecode run. Every operand is one varint regardless of declared width."""

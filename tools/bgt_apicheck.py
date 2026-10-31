@@ -89,7 +89,14 @@ NOT_A_TYPE = KEYWORDS | frozenset((
 CALL = re.compile(r"(?<![\w])\.?\s*([A-Za-z_]\w*)\s*\(")
 PRECEDING = re.compile(r"([A-Za-z_]\w*|[@\]])\s*$")
 #: `<type> <name>` at a declaration: a parameter, a local, a member, a function.
-DECLARED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?:\s*@|\s*\[\s*\])?"
+#: The marker run **repeats**, because a type may carry more than one:
+#: `interact@[]` is a handle array and `collect@[]@` a handle to one. Accepting
+#: a single marker lost every such declaration -- and so reported Manamon 1's
+#: five generated `__nvgt_global_init_N` initialisers as declared nowhere while
+#: each sat in the file that calls it. Same family as `bgt_api`'s array return
+#: and its handle marker against either side: a type has more spellings than it
+#: looks, and this set is what decides whether an absence gets reported.
+DECLARED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?:\s*@|\s*\[\s*\])*"
                       r"\s+([A-Za-z_]\w*)\s*[(=;,){\[]")
 
 

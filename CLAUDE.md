@@ -590,6 +590,153 @@ per-build field like `template_namespace` and the zero-parameter list guard,
 trialled against the exact-EOF landing, and the object-variable field count
 travels with it rather than with the dialect.
 
+### A global pointer's encoding is per build, and the reader says which
+
+A fifth per-build field, after `template_namespace`, the zero-parameter list
+guard, `objvar_three` and `legacy_body` -- and the one that had been read off
+the wrong field for longest. Whether a global-pointer operand carries a
+table-selector bit was keyed to the **dialect**, so Manamon 1, which is
+`len2`, was read with Manamon 2's rule. Every one of its **4,117** global
+operands resolved to the wrong thing: the 2,122 even ones to a string from
+the string table, and the 1,995 odd ones to the global at *half* their index.
+
+Nothing reported it, and the shape of what it produced is why:
+
+```
+character@[]@ local_10;
+@local_10 = "";            // an empty string, into a handle-to-array
+heal_all(local_10);
+```
+
+**What found it was the literal audit, not a diagnostic.** The bytecode-vs-text
+literal multiset said 12 of Manamon 1's bodies were missing one, and 11 of
+those were explained (see below); the twelfth was `sleep_in_bed`, where a
+`PshGPtr` had become `""`. A count of lost literals is a thin thread, and it
+led to the largest single correctness defect found in this title.
+
+**Three lines of evidence said plain, and then the reader settled it.** The
+circumstantial case first, because each line is the kind this file trusts:
+
+| evidence | what it says |
+|---|---|
+| saturation | max operand **414** against **415** `usedGlobalProps` -- exact |
+| the tag bit | operands freely even *and* odd (2,122 / 1,995), so there is none |
+| the other reading | its largest even operand is string index 207 of 7,802 -- 97% of the table unreachable |
+| where the literals live | `STR` 12,523 against `PGA` 136 |
+| width consistency | plain **90.5%**, tag **44.9%** -- and the four titles whose answer is known score 85-94% against 17-43% |
+
+That last one is the instrument worth keeping. AngelScript has a separate
+opcode per operand width, so the instruction says what it expects of the
+global it names -- `PshGPtr`/`PGA`/`LDG` a pointer, `PshG4`/`SetG4`/`CpyGtoV4`
+a four-byte primitive -- and the right reading agrees while the wrong one
+scores chance. It is a consistency check with a known expected answer, the
+same shape that settled `ALLOC`'s one-based operand, and it was **validated
+against four titles whose answer was already known** before being believed
+about the fifth.
+
+**And then `asCReader::TranslateFunction` in that title's own binary said it
+outright**, which is the rule this document opens with. `FUN_004250C0` puts
+all eight of those opcodes in one branch:
+
+```c
+else if (op == PGA || op == PshGPtr || op == LDG || op == PshG4 ||
+         op == LdGRdR4 || op == CpyGtoV4 || op == CpyVtoG4 || op == SetG4) {
+    if (*(uint *)(this + 0x54) <= *(uint *)(instr + 4)) goto Error;
+    *(undefined4 *)(instr + 4) =
+        *(undefined4 *)(*(int *)(this + 0x50) + *(uint *)(instr + 4) * 4);
+}
+```
+
+The raw operand is bounds-checked against one length and used **directly** as
+the index into one array. No mask, no shift, no branch on the low bit, no
+second table. The control that makes the absence meaningful: the *same
+function* does shift an operand where it means to -- the jump-offset
+conversion for `JMP`/`JZ`/`JS`/... -- and that shows plainly in the
+decompilation. `this+0x50` is `usedGlobalProps`, confirmed three ways: `STR`
+(op 0x3C) bounds-checks a **word** operand against `this+0x68` and indexes a
+different array, `this+0x64`; `ReadInner`'s call order forces the identity of
+the reader that fills `this+0x50`, and reading it shows name + namespace +
+datatype + flag per entry resolved against the module's property table; and
+`FindFunction` fixes the 0x14-byte `asCArray` stride, giving 0x28 `usedTypes`,
+0x3C `usedFunctions`, 0x50 `usedGlobalProperties`, 0x64 `usedStringConstants`.
+
+Two things the same read settled in passing, both of which this file had as
+inferred from grouping in a *different* binary: `Thiscall1`'s operand really
+is a `usedFunctions` index, because `CALL`, `CALLINTF`, `CALLSYS` and
+`Thiscall1` all go through that one `FindFunction`; and `ALLOC` resolves arg0
+by type and arg1 by `FindFunction(arg1 - 1)` under a non-zero guard, which is
+the one-based rule read directly rather than deduced from an owner match.
+
+#### What decides it, and why it is a reading rather than a threshold
+
+`as_opcodes.global_index_is_plain` asks **which opcode this build's literals
+arrive through**, which is the mechanism: a build that gives a literal its own
+`STR` has no reason to put a selector in a global pointer, and a build whose
+literals come through `PGA` must. Counted per module:
+
+| title | `STR` | `PGA` | encoding |
+|---|---|---|---|
+| Manamon 1 | 12,523 | 136 | plain |
+| Crazy Party | 130,243 | 70 | plain |
+| Paladin of the Sky | 4,625 | 87 | plain |
+| Psycho Strike | 3,637 | 66 | plain |
+| Super Egg Hunt | 1,079 | 48 | plain |
+| Manamon 2 | 0 | ~149,762 | `2n + tag` |
+
+Three orders of magnitude in both directions, so this is not a threshold with
+a tuned constant. A module carrying no literals either way returns None and
+the caller keeps its dialect default, because no evidence is the honest
+answer there.
+
+**It is answered in two places that have to agree**, which is the failure this
+file keeps recording, so the policy is one function and only the counting is
+local: `as_disasm` resolves operands for `bgt lift` and `bgt libcheck`, while
+`bgt_asir` pre-shifts the operand to `2n + 1` before handing it to the newer
+engine's reader, whose own rule is unconditional. The pre-shift used to be
+gated on `tagged`; it is gated on this now.
+
+#### The scope, measured both ways
+
+| title | lines | goto | split | calls | files identical to the previous run |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 6,247 | 0 | verified | 1,608 | **14 / 14** |
+| Paladin of the Sky | 27,343 | 0 | verified | 7,110 | **59 / 59** |
+| Psycho Strike | 27,469 | 2 | verified | 6,443 | **73 / 73** |
+| Crazy Party | 192,603 | 14 | verified | 90,118 | **558 / 558** |
+| Manamon 1 | 91,310 -> **90,314** | 0 | verified | 26,548 | 53 / 806 |
+
+Four titles **byte-identical**, and 753 of the fifth's 806 files changed. That
+is what a correctly scoped per-build fix looks like, and equal counts would
+not have shown it: this file records a change that held every count while
+making the output badly wrong, so the diff is the measurement and the counts
+are the summary.
+
+#### What the literal audit left on this title
+
+The other eleven, now that the twelfth is explained:
+
+- **Eight are the audit's own artifact.** The recovery writes any byte above
+  0x7F as `\xNN` -- deliberately, because a literal has to reach the engine as
+  the bytes the module held -- so comparing bytecode *bytes* against the
+  literal's *source text* compares an escape against the byte it escapes.
+  Every one of the eight is a monster description carrying a Windows-1252
+  right single quote.
+- **Three are an empty string** the recovery renders as a declaration
+  (`string local_3;`) rather than an assignment of `""`, which is the same
+  program.
+- **One is the original's dead code**, and it is worth stating because it
+  looked exactly like a lost line. `sleep_in_bed` computes
+  `<global>.name + " slept in the bed.[/]"`, copies it into a slot, and then
+  calls `string::opAssign` on that slot with
+  `"All manamon have been completely healed."` -- `opAssign`, not
+  `opAddAssign`, so the concatenation is **overwritten on the next line**.
+  Someone changed the message and left the old one. Dropping a pure
+  expression whose value nothing reads is behaviour-preserving, so this stays
+  dropped, exactly like `generate_maze`'s discarded comparison.
+
+So **no literal is lost by the decompiler on this title**, which is the
+result; the audit's value was the twelfth row, not the eleven.
+
 ### A known target BOTH readings satisfy is not a discriminator
 
 This is the expensive lesson of this title, and it is a correction to what
@@ -798,16 +945,22 @@ namespace is not empty.
 The lesson is the same as for `ALLOC`: a field that parses to EOF can still be
 the wrong field, and a resolver that returns a placeholder is not resolving.
 
-**Global-pointer operands are encoded differently per dialect, and both readings
-fail quietly.** In `len2` the operand is `2 * index + tag`: tag 0 selects the
-string-constant table, tag 1 the global-property table. 149,656 `PGA` operands in
-Manamon 2 are even (literals) and 106 are odd (`player`, `current_map`,
-`save_data`); reading them all as literals resolves those 106 to a real string
-from the wrong table. In `tagged` there is no tag bit at all — the operand is a
-plain `usedGlobalProps` index, `STR` carries literals separately, and Psycho
-Strike's `PshG4` saturates at 170 against 171 globals. Applying the `len2` rule
-there halves every index and still yields a real global name:
-`pack_file::open(retreave, ...)` reads as `pack_file::open(money_wanted, ...)`.
+**A global pointer carries a table selector in some builds and not others,
+and both readings fail quietly.** Where it does, the operand is
+`2 * index + tag`: tag 0 selects the string-constant table, tag 1 the
+global-property table. 149,656 `PGA` operands in Manamon 2 are even
+(literals) and 106 are odd (`player`, `current_map`, `save_data`); reading
+them all as literals resolves those 106 to a real string from the wrong
+table. Where it does not, the operand is a plain `usedGlobalProps` index,
+`STR` carries literals separately, and Psycho Strike's `PshG4` saturates at
+170 against 171 globals. Applying the other rule there halves every index
+and still yields a real global name: `pack_file::open(retreave, ...)` reads
+as `pack_file::open(money_wanted, ...)`.
+
+**This file had that keyed to the dialect, and it is keyed to the build.**
+See **A global pointer's encoding is per build, and the reader says which**
+below -- Manamon 1 is `len2` and plain, and reading it the other way
+resolved every one of its 4,117 global operands to the wrong thing.
 
 **Rare opcodes do not need their own evidence when they share a code path.**
 `LoadRObjR` and `LoadVObjR` are the *same branch* in `TranslateFunction`
@@ -1560,7 +1713,7 @@ checks say:
 | Paladin of the Sky | 27,343 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
 | Psycho Strike | 27,469 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
 | Crazy Party | 192,603 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
-| Manamon 1 | 91,290 | 0 | 0 | yes | 26,553 | **not measured -- wrong engine** |
+| Manamon 1 | 90,314 | 0 | 0 | yes | 26,548 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
@@ -1576,9 +1729,13 @@ this project was started against: 784 classes and 332 globals, reached here
 by a different reader from the same bytes, and 4,909 bodies, which is the
 number that benchmark reported as "script functions". It recovers to 806
 files with **0 residual gotos**, a verified split, 0 unmodelled opcodes and
-26,553 calls read back against its own runtime. **2 bodies are given up on
-and counted**, and five `__nvgt_global_init_N` callees are reported as
-declared nowhere -- both are open and neither is a parse failure.
+26,548 calls read back against its own runtime. **2 bodies are given up on
+and counted**, and they are the two switch shapes named under **The tables
+nothing claims** -- the same two functions Manamon 2 gives up on, by name.
+
+Its line count moved from 91,310 to 90,314 when the global-pointer encoding
+was corrected, and the five `__nvgt_global_init_N` callees this file used to
+list as declared nowhere were a defect in the checker: see below.
 
 Its compiler column is empty on purpose: the only engine installed here is
 BGT 1.3, which is not the fork that built it. See **The string factory has
@@ -2744,7 +2901,7 @@ Manamon 2 without any current call depending on it). And the four titles the
 compiler *can* judge come back clean from both, which is the cross-validation
 rather than the absence of evidence.
 
-Four things had to be right, and each was wrong first:
+Five things had to be right, and each was wrong first:
 
 - **Comments and strings are scrubbed in ONE left-to-right pass.** Each
   construct can contain the other's opener, so two regexes in sequence
@@ -2769,6 +2926,39 @@ Four things had to be right, and each was wrong first:
   reported five good `event()` calls as taking too few arguments -- the same
   collision as `string::insert` hiding behind `array::insert_at`, one level
   up.
+
+- **A type's marker run repeats, and a handle array has two.** The pattern
+  for `<type> <name>` at a declaration accepted `T`, `T@` and `T[]` -- one
+  marker -- so it could not see `interact@[]`, `collect@[]@` or
+  `dynamic_menu_item[]@` at all. Every handle-array declaration in every
+  title was therefore invisible to the declared-name set: locals,
+  parameters, globals and functions alike.
+
+  What it cost was **five false alarms on Manamon 1**, and they were
+  convincing ones: `__nvgt_global_init_256`, `266`, `285`, `301` and `303`
+  reported as declared by nothing, when each was declared in the very file
+  that called it -- and they are exactly the five of that title's 171
+  generated initialisers whose return type is a handle array. The other 166
+  were seen.
+
+  This is the third instance of one family: `bgt_api`'s array return
+  (`string[]@ find_files(string& in)`, four functions wrongly reported as
+  absent) and its handle marker against either side (`network_event @f()`
+  against `network_event@ request()`, eighteen factories lost). A type has
+  more spellings than it looks like it has, and a pattern that enumerates
+  them will miss one.
+
+  **The direction matters and the fix is measured in it.** This set decides
+  whether an absence gets reported, so widening it makes the check weaker:
+  a declaration it cannot see is a false alarm, but a name it wrongly held
+  would be a gap it never reports. Checked across every recovered project
+  on disk, the wider pattern adds only genuine declarations -- `T[]@`,
+  `T@[]`, `T@[][]` -- and the only reported outcome that moves is those
+  five, to zero. It does not make them *checked*: their arity is still not
+  judged, because the script-declared name set carries names and not
+  arities, so they move from a false alarm into the declined-and-counted
+  bucket. Judging a script function's own arity is a widening of its own
+  and is not done here.
 
 The honest summary is that this found no defect in the current recovery and
 closed the one thing that looked like one: a `tmp0(local_7, <?>, <?>, ...)`

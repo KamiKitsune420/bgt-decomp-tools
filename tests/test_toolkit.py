@@ -494,6 +494,10 @@ class _FakeModule:
     """Just enough of as_disasm.Module to disassemble a hand-built span."""
 
     dialect = as_module.LEN2
+    #: Whether a global-pointer operand is a plain index. A per-BUILD
+    #: field, not a per-dialect one -- the default here matches what the
+    #: dialect above used to imply, so a test that cares sets it.
+    plain_global_index = False
 
     def __init__(self, data, **tables):
         self.data = data
@@ -559,8 +563,11 @@ def test_backward_jump_resolves():
 
 def test_globalptr_low_bit_selects_the_table():
     """`2 * index + tag`: even is a string constant, odd is a global property.
+
     Reading every operand as a literal resolves the odd ones to a real string
-    from the wrong table, with nothing to signal it."""
+    from the wrong table, with nothing to signal it. This is the newer
+    build's encoding, which it needs because a literal has no opcode of its
+    own there and `PGA` carries both."""
     mod = _FakeModule(b"", strings=[b"alpha", b"data.dat", b"gamma"],
                       globals=[{"name": "player"}, {"name": "current_map"}])
     assert mod.resolve("globalptr", 2) == '"data.dat"'      # index 1, tag 0
@@ -607,18 +614,58 @@ def test_string_literals_escape_bytes_that_cannot_be_seen():
     assert as_disasm._quote(b"\xd7\xe9") == '"\xd7\xe9"'
 
 
-def test_globalptr_is_a_plain_index_in_the_tagged_dialect():
-    """No tag bit in the older build -- string literals have their own STR
-    opcode, so the field is a plain usedGlobalProps index. Applying the len2
-    rule halves it and still yields a real (wrong) global name."""
+def test_globalptr_is_a_plain_index_per_BUILD_not_per_dialect():
+    """No tag bit where a literal has its own `STR`: a plain index.
+
+    Applying the other rule halves it and still yields a real -- wrong --
+    global name, which is why neither reading fails loudly.
+
+    **And the choice is per build, not per dialect.** Manamon 1 is `len2`
+    and plain, which cost it every one of its 4,117 global operands: the
+    even half resolved to a string from the wrong table and the odd half to
+    the global at half its index. Its own `asCReader::TranslateFunction`
+    settles it -- the operand is bounds-checked and used directly as the
+    index, with no mask, no shift and no second table, while the same
+    function visibly does shift a jump offset. So this field is driven
+    independently of `dialect`, and a test that conflates them is wrong."""
     mod = _FakeModule(b"", strings=[b"alpha", b"data.dat"],
                       globals=[{"name": "g0"}, {"name": "g1"}, {"name": "g2"}])
-    mod.dialect = as_module.TAGGED
+    mod.plain_global_index = True
     assert mod.resolve("globalptr", 2) == "g2"
     assert mod.resolve("globalptr", 1) == "g1"
-    mod.dialect = as_module.LEN2
+    mod.plain_global_index = False
     assert mod.resolve("globalptr", 2) == '"data.dat"'      # even -> literal
     assert mod.resolve("globalptr", 3) == "g1"              # odd  -> global
+    # The dialect does not decide it: a `len2` module can be either.
+    mod.dialect = as_module.LEN2
+    mod.plain_global_index = True
+    assert mod.resolve("globalptr", 2) == "g2"
+
+
+def test_which_opcode_carries_the_literals_decides_the_encoding():
+    """The deciding question, with the corpus's real counts on both sides.
+
+    A build that gives a literal its own `STR` has no reason to put a table
+    selector in a global pointer; a build whose literals come through `PGA`
+    must. So the decision is which opcode carries them, counted from the
+    module -- and the gap is three orders of magnitude in both directions,
+    which is what makes it a reading rather than a threshold.
+
+    A module with no literals at all has no evidence either way, and None
+    says so rather than guessing: the caller keeps its dialect default.
+    """
+    plain = as_opcodes.global_index_is_plain
+    # Manamon 1, Crazy Party, Paladin, Psycho Strike, Super Egg Hunt:
+    # every one carries its literals in STR.
+    assert plain(12523, 136) is True        # manamon1
+    assert plain(130243, 70) is True        # crazyparty
+    assert plain(4625, 87) is True          # paladin
+    assert plain(3637, 66) is True          # strike
+    assert plain(1079, 48) is True          # egghunt
+    # Manamon 2 carries 149,656 of them in PGA and has no STR at all.
+    assert plain(0, 149762) is False
+    # No literals either way is not an answer.
+    assert plain(0, 0) is None
 
 
 def test_alloc_constructor_index_is_one_based():

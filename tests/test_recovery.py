@@ -2315,6 +2315,37 @@ def test_a_declaration_is_not_a_call():
     assert not bgt_apicheck.is_a_declaration("    f(serialize(", 6)
 
 
+def test_a_handle_array_return_is_still_a_declaration():
+    """`interact@[] f()` declares `f`, and a one-marker pattern loses it.
+
+    A type's marker run repeats: `T@`, `T[]`, `T[]@`, `T@[]`, `T@[][]`. The
+    pattern accepted exactly one marker, so every handle-array declaration
+    was invisible -- which reported five of Manamon 1's own generated
+    `__nvgt_global_init_N` initialisers as declared by nothing, while each
+    was declared in the very file that called it.
+
+    The direction is what makes it worth a test: this set decides whether
+    an absence gets reported, so a declaration it cannot see becomes a
+    false alarm, and a name it wrongly held would become a gap it never
+    reports.
+    """
+    def declared(text):
+        return [found.group(2)
+                for found in bgt_apicheck.DECLARED.finditer(text)
+                if found.group(1) not in bgt_apicheck.NOT_A_TYPE]
+
+    for spelling in ("interact@[]", "character@[]", "collect@[]@",
+                     "item@[]", "tamer_class@[]", "dynamic_menu_item[]@",
+                     "character@[][]", "string[]", "sound@", "timer"):
+        name = spelling + " __nvgt_global_init_256() {"
+        assert declared(name) == ["__nvgt_global_init_256"], spelling
+    # A local and a parameter are declarations by the same pattern.
+    assert "local_3" in declared("    dynamic_menu_item[]@ local_3;")
+    assert "arg1" in declared("void f(character@[] arg1, int arg2)")
+    # And it still refuses what is not a declaration at all.
+    assert declared("    return serialize(") == []
+
+
 def test_a_dropped_or_added_argument_is_reported():
     """The check that the compiler cannot run on Manamon 2.
 

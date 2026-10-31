@@ -235,6 +235,29 @@ class Module:
 
         self.functions = self._collect_functions()
         self.register_returns = self._register_returns()
+        self.plain_global_index = self._plain_global_index()
+
+    def _plain_global_index(self) -> bool:
+        """Is a global-pointer operand a plain index, or `2 * index + tag`?
+
+        Decided per BUILD, by `as_opcodes.global_index_is_plain`, from which
+        opcode this module's literals arrive through -- not from the string
+        dialect. Manamon 1 is `len2` and plain, so the dialect was the wrong
+        field to read; it stays as the fallback for a module that carries no
+        literals either way.
+        """
+        str_count = pga_count = 0
+        for f in self.functions:
+            start, end = f["body"]
+            for _off, _op, name, _args in as_opcodes.disassemble(
+                    self.data[start:end], self.opcodes):
+                if name == "STR":
+                    str_count += 1
+                elif name == "PGA":
+                    pga_count += 1
+        answer = as_opcodes.global_index_is_plain(str_count, pga_count)
+        return (self.dialect == as_module.TAGGED if answer is None
+                else answer)
 
     def _register_returns(self) -> frozenset:
         """usedFunctions indices whose result is read from the VALUE register.
@@ -359,7 +382,7 @@ class Module:
             #           and operands are freely odd and even, so there is no tag
             #           bit to read. String literals get their own STR opcode in
             #           this build, so nothing needs to share the field.
-            if self.dialect == as_module.TAGGED:
+            if self.plain_global_index:
                 g = _at(self.used_global_props, value)
                 return g["name"] if isinstance(g, dict) else None
             idx, tag = value >> 1, value & 1
@@ -393,7 +416,7 @@ class Module:
         Same encoding rules as resolve("globalptr"): a plain usedGlobalProps
         index in `tagged`, `2 * index + tag` in `len2` with tag 1 = global.
         """
-        if self.dialect == as_module.TAGGED:
+        if self.plain_global_index:
             g = _at(self.used_global_props, value)
         elif value & 1:
             g = _at(self.used_global_props, value >> 1)
