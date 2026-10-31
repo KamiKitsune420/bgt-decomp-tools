@@ -1367,7 +1367,31 @@ class FuncDecompiler:
             local = f"__nvgt_ret_{pos}"
             dt = copy.copy(ret)
             dt.is_reference = dt.is_readonly = False
-            self.events.append(Event("stmt", pos, (dt.format(), f"{local} = {calltxt};")))
+            #: **The call may already have been written out**, as the bare
+            #: statement a pending value call is flushed to, and the guard
+            #: below only catches it while it is still pending. Flushed
+            #: first and captured here, it was emitted TWICE --
+            #:
+            #:     arg0.get("voice.pitch", __nvgt_out_2_37);
+            #:     __nvgt_ret_37 = arg0.get("voice.pitch", __nvgt_out_2_37);
+            #:
+            #: -- in every save-loading body in the corpus, 218 `.get(`
+            #: lines in Paladin's `load_event_flags` where the bytecode has
+            #: one call per flag. `dictionary::get` is a pure read, so
+            #: nothing observable changed and nothing reported it; it is
+            #: still a duplicated call, which this file counts as a
+            #: correctness number. Rewriting the statement that is already
+            #: there keeps the call where the bytecode put it, which
+            #: appending a second one does not.
+            bare = calltxt + ";"
+            already = [e for e in self.events
+                       if e.kind == "stmt" and isinstance(e.data, tuple)
+                       and e.data[1] == bare]
+            if already:
+                already[-1].data = (dt.format(), f"{local} = {calltxt};")
+            else:
+                self.events.append(
+                    Event("stmt", pos, (dt.format(), f"{local} = {calltxt};")))
             for a in holders:
                 a.text = a.text.replace(calltxt, local)
             # The call has been emitted here; if its own return value was never
@@ -2345,14 +2369,45 @@ class FuncDecompiler:
         # returned the next song rather than the one it had just taken out
         # of the list. Those eight entries are the speaker songs.
         receivers += [m.group(1) for m in _INDEX_BASE.finditer(masked)]
+        # **A GLOBAL is asked about whether or not it also has a receiver**,
+        # and this used to be asked only where there was none -- which left
+        # the commonest shape a global takes in these games unreached, since
+        # a global object is almost always read through a method on it. A
+        # global the value names is invalidated by any call at all (see
+        # `_stale_global`), and that answer does not become less true because
+        # the global happens to be the receiver of the call producing the
+        # value. `waiting`'s `int old = int(default_volume);` has no receiver
+        # and was caught; `good_thus_far`'s
+        # `int old = int(music.get_volume());` has one and was not.
+        #
+        # What that cost is a music bug in the two Paladin scenes that duck
+        # the soundtrack for dialogue:
+        #
+        #     int old = int(music.get_volume());
+        #     fade(music, music.get_volume(), -20.0, 250.0, false);
+        #     storyline_scroll(...);                    // the scene
+        #     fade(music, music.get_volume(), double(old), 250.0, false);
+        #
+        # Folded, that last argument re-read the volume the first `fade` had
+        # just taken down, so the restore was a fade from -20 dB to -20 dB
+        # and the music stayed ducked until the next track change, where
+        # `change_music` applies `default_volume` itself. The receiver test
+        # cannot see it even in principle: the intervening `fade` changes
+        # `music`'s volume through a handle ALIAS of it (`local_5`), so no
+        # statement names `music` at all.
+        #
+        # `battle` is the same rule over `music.get_position()`, snapshotted
+        # before the battle music and read after it to resume the map's
+        # track where it left off -- folded, it resumed from wherever the
+        # battle music had reached. And `rec_timer::real_elapsed` is the
+        # same rule reaching a different defect: the value is a
+        # `dictionary::get` on `recorder.system_data`, so folding it moved
+        # the call PAST the `int(stored)` that reads its own out argument,
+        # and the recovered function converted the slot before the call
+        # filled it.
+        if self._stale_global(value, bound):
+            return declarable
         if not receivers:
-            # No receiver to be invalidated through -- but a GLOBAL the
-            # value reads is one, and it has no receiver syntax for
-            # `_CALL_RECEIVER` to find. `waiting`'s
-            # `int old = int(default_volume);` reached exactly here and
-            # folded, which is why the volume keys were not live.
-            if self._stale_global(value, bound):
-                return declarable
             # A bare call's result can still go stale through engine state
             # -- `reserve_slot()` hands out a different slot each time --
             # but that is the duplication case, measured by

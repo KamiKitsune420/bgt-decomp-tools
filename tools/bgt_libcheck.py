@@ -75,9 +75,38 @@ KEYWORDS = frozenset(("if", "while", "for", "switch", "return", "catch", "else",
 TYPE_NAMES = frozenset(("string", "int", "uint", "double", "float", "bool", "int8",
                         "int16", "int64", "uint8", "uint16", "uint64", "array",
                         "dictionary", "vector"))
-OPERATOR_METHODS = frozenset(("opIndex", "opAssign", "opEquals", "opAdd", "opCmp"))
+#: Operators the source writes as syntax, so neither side should count them as
+#: calls. `opAdd_r` is the **reversed** form, which the engine registers for
+#: `<number> + <string>`: `form.bgt` writes `speak(selections.length() + "
+#: items deleted.", true)` and the lifter renders the registered method the
+#: compiler actually calls. It was absent only because a string literal is
+#: blanked before matching, so no receiver was left to reach it -- the same
+#: blindness as the indexed receiver above, one receiver kind over.
+#:
+#: This set is widened one measured occurrence at a time, deliberately: a name
+#: in here is dropped from BOTH sides, so every addition makes the comparison
+#: weaker. `opAdd_r` is the only `op*` name the corpus produces that is not
+#: already here.
+OPERATOR_METHODS = frozenset(("opIndex", "opAssign", "opEquals", "opAdd",
+                              "opAdd_r", "opCmp"))
 
-_CALL = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(")
+#: The identifier a `(` opens against. **Not** a receiver chain: this used to be
+#: `(?<![\w.])(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(`, which named the callee by
+#: consuming the dotted chain in front of it -- and the `.` in that lookbehind is
+#: what made `global_interacts[slot].add_event(...)` invisible. The chain
+#: alternative cannot cross the `]`, and starting at `add_event` instead is
+#: refused because the character before it is a dot. So every method called on an
+#: indexed receiver was dropped from the sequence this checker compares, on BOTH
+#: sides -- a call it cannot see is a call it cannot report as missing.
+#:
+#: The receiver was never what identifies a call; **adjacency to the `(` is**. So
+#: there is nothing to enumerate: match the whole identifier the paren opens
+#: against, and let the one lookbehind say "whole identifier". That reaches
+#: `a[i].m()`, `a[i][j].m()`, `this.list[n].m()` and `a[f(i)].m()` without
+#: knowing anything about brackets, where a chain pattern taught to span `[...]`
+#: would have to stop at a nested `[` -- and would swallow a call written inside
+#: the subscript, because `finditer` resumes past whatever the match consumed.
+_CALL = re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*\(")
 _STRING = re.compile(r'"((?:\\.|[^"\\])*)"')
 _FUNC_HEAD = re.compile(r"([A-Za-z_][\w@\[\]<>&:]*\s+)?(~?[A-Za-z_]\w*)\s*"
                         r"\(([^;{}()]*)\)\s*(const\s*)?\{")
@@ -184,7 +213,33 @@ def _noise(name: str) -> bool:
 
 
 def calls(text: str) -> List[str]:
-    """Call names in EVALUATION order -- sorted by where each call's `)` closes."""
+    """Call names in EVALUATION order -- sorted by where each call's `)` closes.
+
+    The rule is unchanged by the pattern above seeing more calls than it used to:
+    a method on an indexed receiver is placed by its own `)`, exactly as any
+    other method is, so `global_interacts[slot].add_event(find(x))` is
+    `find, add_event` -- the order the bytecode runs them. What *is* new is that
+    a call on a call's result (`f(x).m()`) now yields both `f` and `m` rather
+    than `f` alone; both are real calls and the `)` rule orders them correctly.
+
+    Because it tracks no brackets at all, a nested subscript costs it nothing:
+    `a[b[i]].m()` is `m`, and a call written *inside* a subscript is still its
+    own match -- `a[fetch(i)].m()` is `fetch, m`. What it still does not see is a
+    call through a funcdef held in an array (`events[i](this)`), which has no
+    name to report at all.
+
+    One thing an indexed receiver is not the only kind of: a receiver that is not
+    a plain identifier. A **string literal** is another, and literals are blanked
+    to `""` two lines down, so `" items deleted.".opAdd_r(n)` was unreachable for
+    exactly the same reason and is reachable now. `OPERATOR_METHODS` is the list
+    that keeps an operator the source writes as syntax out of the comparison, and
+    it does not hold `opAdd_r` -- so the one reversed concatenation in this
+    corpus (Psycho Strike's lifted `audio_form::delete_list_selections`, where
+    the source writes `selections.length() + " items deleted."`) is now reported
+    as a difference it is not. That is the measured cost of this pattern, kept
+    separate from it on purpose: adding the name here would move a score for a
+    second reason in the same breath.
+    """
     text = _STRING.sub('""', text)
     found = []
     for m in _CALL.finditer(text):

@@ -21,6 +21,13 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt api garbage_collect                what the engine documents, from bgt.chm
     bgt verbs [--repoint]                  which BGT the shell runs for a .bgt
     bgt validate game.exe patched.exe
+    bgt audit  recovered/ game.exe         did the recovery lose a value? every
+                                           callee, literal and numeric constant
+                                           the bytecode holds, against the text
+    bgt signatures recovered/              ...and does the text say something no
+               [--against OTHER]            author would write? a shape per bug
+                                            class, swept, and the delta to a
+                                            previous tree
     bgt libcheck work/game_bytecode.bin game.exe   recovered code vs BGT's own library
                [--decompiler]                       source: the lifter, or `bgt recover`
     bgt files work/game_bytecode.bin game.exe      which source files it was built from
@@ -51,8 +58,9 @@ from typing import List, Optional
 
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
-                   bgt_api, bgt_apicheck, bgt_compile, bgt_crack, bgt_ghidra,
-                   bgt_oracle,
+                   bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
+                   bgt_signatures,
+                   bgt_ghidra, bgt_oracle,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_unpack, bgt_validate,
                    bgtlib, engine, script_files)
@@ -64,6 +72,8 @@ except ImportError:       # run directly from a checkout
     import as_write
     import bgt_api
     import bgt_apicheck
+    import bgt_audit
+    import bgt_signatures
     import bgt_oracle
     import bgt_compile
     import bgt_crack
@@ -312,6 +322,37 @@ def cmd_apicheck(args: argparse.Namespace) -> int:
     if args.quiet:
         argv.append("--quiet")
     return _run(bgt_apicheck.main, argv, prog="bgt apicheck")
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """`bgt audit` asks the bytecode whether the recovery lost a value."""
+    argv = [args.project, args.executable]
+    if args.module:
+        argv += ["--module", args.module]
+    for flag in ("calls", "literals", "constants", "stock", "strict"):
+        if getattr(args, flag):
+            argv.append("--" + flag)
+    argv += ["--limit", str(args.limit)]
+    if args.json:
+        argv += ["--json", args.json]
+    return _run(bgt_audit.main, argv, prog="bgt audit")
+
+
+def cmd_signatures(args: argparse.Namespace) -> int:
+    """`bgt signatures` asks the text whether it says something no author
+    would write. A hit is a lead, and the delta between two trees is the
+    measurement."""
+    argv = [args.project]
+    if args.against:
+        argv += ["--against", args.against]
+    if args.detail:
+        argv += ["--detail", args.detail]
+    for flag in ("stock", "strict"):
+        if getattr(args, flag):
+            argv.append("--" + flag)
+    if args.json:
+        argv += ["--json", args.json]
+    return _run(bgt_signatures.main, argv, prog="bgt signatures")
 
 
 def cmd_recover(args: argparse.Namespace) -> int:
@@ -723,6 +764,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--module", help="the module (default: <project>/*_bytecode.bin)")
     p.add_argument("--quiet", action="store_true", help="only the problems")
     p.set_defaults(func=cmd_apicheck)
+
+    p = sub.add_parser("audit",
+                       help="every callee, literal and numeric constant the "
+                            "bytecode holds, against the recovered text")
+    p.add_argument("project", help="a directory `bgt recover` wrote")
+    p.add_argument("executable", help="the game it was recovered from")
+    p.add_argument("--module", help="the module (default: "
+                                    "<project>/*_bytecode.bin, else unpacked "
+                                    "from the executable)")
+    p.add_argument("--calls", action="store_true", help="only the callee audit")
+    p.add_argument("--literals", action="store_true",
+                   help="only the string-literal audit")
+    p.add_argument("--constants", action="store_true",
+                   help="only the numeric-constant audit")
+    p.add_argument("--stock", action="store_true",
+                   help="include rows from substituted stock library files")
+    p.add_argument("--limit", type=int, default=40,
+                   help="rows printed per audit (0 = all)")
+    p.add_argument("--json", metavar="FILE")
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 if any row is reported")
+    p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("signatures",
+                       help="shapes in recovered text that no author "
+                            "would write, swept per signature")
+    p.add_argument("project", help="a directory of recovered .bgt files")
+    p.add_argument("--against", metavar="DIR",
+                   help="a second tree, for the delta that says whether "
+                        "the decompiler moved")
+    p.add_argument("--detail", metavar="SIGNATURE",
+                   help="print every row of one signature, or `all`")
+    p.add_argument("--stock", action="store_true",
+                   help="include files replaced by BGT's own source")
+    p.add_argument("--json", metavar="FILE")
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 if any signature is reported")
+    p.set_defaults(func=cmd_signatures)
 
     p = sub.add_parser("files",
                        help="which source files a module was built from (BGT or NVGT)")

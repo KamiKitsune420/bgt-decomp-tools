@@ -276,6 +276,66 @@ class FoldSafetyTests(unittest.TestCase):
             sim(cast, ["default_volume = (default_volume - 2.0);"])
             ._stale_fold(12))
 
+    def test_a_global_read_through_a_method_on_it_is_still_a_global_read(self):
+        """The global rule was asked only where there was NO receiver.
+
+        A global object is almost always read through a method on it, so
+        the test above reached `int(default_volume)` and could not reach
+        `int(music.get_volume())` -- `_CALL_RECEIVER` finds `music`, the
+        receiver list is not empty, and the global question was never put.
+        What decided it instead was whether some later statement calls a
+        method on `music` or assigns it, which is a strictly weaker test
+        and cannot see the case even in principle: the statement that
+        changes the volume names a handle ALIAS of the global.
+
+        Paladin's `good_thus_far` is the shape, and so is every other
+        scene that ducks the soundtrack for dialogue:
+
+            int old = int(music.get_volume());
+            fade(local_5, music.get_volume(), -20.0, 250.0, false);
+            storyline_scroll(...);
+            fade(local_5, music.get_volume(), double(old), 250.0, false);
+
+        Folded, the restore re-read the volume the first `fade` had taken
+        down, so it faded -20 dB to -20 dB and the music stayed ducked.
+        """
+        from decompile import Atom, DataType
+        instrs = [Instr(pos=p, op=0, name="SUSPEND", bc_type="", size=1)
+                  for p in range(0, 40, 4)]
+
+        def sim(value, texts, globals_=("music",)):
+            s = self._sim(instrs=instrs, k=8,
+                          temps={12: value}, temp_bound={12: (8, 0)},
+                          var_names={}, slot_writes={},
+                          var_types={12: DataType(token_type=70)},
+                          duplicate_binds=set(), cond_spans=[],
+                          back_edges=[], stmt_count=len(texts),
+                          stmt_texts=texts)
+            s.global_types = dict((g, DataType(token_type=70))
+                                  for g in globals_)
+            return s
+
+        volume = Atom(kind="call", text="int(music.get_volume())")
+        # The intervening statement names the global nowhere -- it changes
+        # the volume through `local_5`, a handle to the same object -- so
+        # only the global rule can answer, and it must be asked.
+        self.assertTrue(
+            sim(volume, ["fade(local_5, local_5.get_volume(), -20.0, 250.0,"
+                         " false);"])._stale_fold(12))
+        # A statement that calls nothing still does not invalidate it.
+        self.assertFalse(sim(volume, ["local_4 = 3;"])._stale_fold(12))
+        # And the receiver must really be a global: `item_list.length()`
+        # over a LOCAL is the rule this file opens with, and it still
+        # answers from the receiver test alone. An unrelated call in
+        # between leaves it folded, which is what keeps a condition an
+        # expression.
+        length = Atom(kind="call", text="item_list.length()")
+        self.assertFalse(
+            sim(length, ["speak(local_4);"], globals_=())._stale_fold(12))
+        self.assertTrue(
+            sim(length, ["item_list.resize(4);"], globals_=())
+            ._stale_fold(12))
+
     def test_assigning_a_field_of_an_object_changes_the_object(self):
         """`voice.rate++` is not a call on `voice` nor an assignment to it.
 

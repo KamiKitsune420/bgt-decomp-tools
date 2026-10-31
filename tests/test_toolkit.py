@@ -2022,6 +2022,54 @@ def test_libcheck_ignores_accessors_and_counts_literals_as_a_multiset():
         bgt_libcheck.literals('v = ""; w = "&";')
 
 
+def test_libcheck_sees_a_method_called_on_an_indexed_receiver():
+    """`global_interacts[slot].add_event(...)` was invisible to this extractor.
+
+    It matched a dotted chain of plain identifiers, which cannot cross the `]`,
+    and starting at `add_event` instead failed its `(?<![\\w.])` lookbehind
+    because the character before it is a dot. So every method called on an
+    indexed receiver was dropped -- on BOTH sides of the comparison, which is
+    the direction that matters: a call it cannot see is a call it cannot report
+    as missing, so the blindness FLATTERED every score.
+
+    The first assertion is the one that fails at the previous pattern: it
+    returned `[]`.
+    """
+    assert bgt_libcheck.calls("global_interacts[slot].add_event(a);") == ["add_event"]
+    assert bgt_libcheck.calls("a[i].m();") == ["m"]
+    assert bgt_libcheck.calls("a[i][j].m();") == ["m"]
+    assert bgt_libcheck.calls("this.list[n].m();") == ["m"]
+    assert bgt_libcheck.calls("a[b[i]].m();") == ["m"]
+    # A call inside the subscript is its own match, in evaluation order.
+    assert bgt_libcheck.calls("a[fetch(i)].m();") == ["fetch", "m"]
+    # What already worked must keep working.
+    assert bgt_libcheck.calls("obj.m();") == ["m"]
+    assert bgt_libcheck.calls("m();") == ["m"]
+    assert bgt_libcheck.calls("a.b.c.m();") == ["m"]
+    assert bgt_libcheck.calls("x = ns::fn(1);") == ["fn"]
+    # A call on a call's result: both are real calls, and the `)` rule orders
+    # them. The old pattern reported only the inner one.
+    assert bgt_libcheck.calls("f(x).m();") == ["f", "m"]
+
+
+def test_libcheck_does_not_invent_a_call_from_a_subscript():
+    """A subscript that merely precedes a paren names no callee.
+
+    `events[i](this)` is a real call -- through a funcdef held in an array -- but
+    it has no name, and reporting the array's name would be worse than reporting
+    nothing. A declaration is reported as a call to the declared name, which is
+    what the previous pattern did too: that behaviour is pinned here rather than
+    changed, because changing it would move the scores for a second reason and
+    neither side of the comparison could then be read.
+    """
+    assert bgt_libcheck.calls("events[i](this);") == []
+    assert bgt_libcheck.calls("a[i](x);") == []
+    assert bgt_libcheck.calls("v = a[i] * (b + c);") == []
+    assert bgt_libcheck.calls("string serialize(dictionary@ d)") == ["serialize"]
+    assert bgt_libcheck.calls("interact@[] gi(5);") == ["gi"]
+    assert bgt_libcheck.calls("double[] d(256);") == ["d"]
+
+
 def test_libcheck_reads_functions_with_their_owning_class():
     src = """
     // a comment with a { brace in it

@@ -127,6 +127,8 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_asir.py` | presents a BGT module as the AngelScript IR the NVGT decompiler reads |
 | `bgt_api.py` | `bgt api`: the engine's API -- documented, from `bgt.chm`, and registered, from `bgt.exe`'s own declaration strings |
 | `bgt_apicheck.py` | `bgt apicheck`: every call in a recovered project's text, against every arity its own build declares -- the check for a title the compiler cannot parse |
+| `bgt_audit.py` | `bgt audit`: every callee, string literal and numeric constant the BYTECODE holds, against the recovered text -- the instrument that found the dropped initialiser list and the flattened clock |
+| `bgt_signatures.py` | `bgt signatures`: shapes in recovered text that no author would write -- one per bug class in this file, swept, with the delta between two trees |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
@@ -179,6 +181,8 @@ bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt compile recovered/game.bgt            # just the compiler, on any script
 bgt oracle                                # does a recovery still COMPUTE the same?
 bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
+bgt audit    recovered/ game.exe          # ...and did it LOSE a value?
+bgt signatures recovered/                 # ...and does the text say something odd?
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 ```
 
@@ -1667,12 +1671,40 @@ Two titles do not move at all and the other two move by the lines the fix
 adds. Nothing else in the corpus passes a `?&` argument with a type-mismatched
 slot, which is what a correctly scoped change looks like.
 
-**Still open, found alongside it:** a `dictionary::get` whose out argument is
-a synthesised local is emitted **twice** -- once as a bare statement and once
-as the initialiser of the `__nvgt_ret` that holds its return value. `get` is
-a pure read so nothing observable changes, but it is a duplicated call and it
-is in every save-loading body. Not fixed here, because it needs the deferred
-out-call path rather than this one.
+**Found alongside it, and now fixed:** a `dictionary::get` whose out
+argument is a synthesised local was emitted **twice** -- once as a bare
+statement and once as the initialiser of the `__nvgt_ret` that holds its
+return value:
+
+```
+arg0.get("voice.pitch", __nvgt_out_2_37);
+__nvgt_ret_37 = arg0.get("voice.pitch", __nvgt_out_2_37);
+```
+
+`get` is a pure read, so nothing observable changed and nothing reported it
+-- and it is a duplicated call, which this file counts as a correctness
+number, in every save-loading body in the corpus.
+
+**The guard for it existed and fired too late.** `_order_out_arguments`
+already clears a call that is still *pending* when it captures it, and the
+duplicate is the case where the pending call had already been flushed to a
+bare statement before any statement mentioned the out local. There is
+nothing to append in that case: the statement is already there, in the
+position the bytecode gave it, so it is **rewritten in place** into the
+`__nvgt_ret` form rather than emitted a second time. Appending would also
+have moved the call, which is the defect `_order_out_arguments` exists to
+prevent.
+
+| title | duplicated `get` lines removed | bodies |
+|---|---|---|
+| Paladin of the Sky | **153** | 13 -- every `deserialize`, `load_event_flags`, `gift::get_gift` |
+| Psycho Strike | **40** | 10 |
+| Super Egg Hunt | 0 | 0 -- it passes no `?&` out argument of this shape |
+
+Paladin's `load_event_flags` goes from 218 `.get(` lines to 115, one per
+flag it restores, and `deserialize_calendar` reads as the source wrote it. No
+residual goto, call-sequence score or literal count moves on any of the
+three.
 
 ### A slot's width evidence is not first-come-first-served
 
@@ -1781,7 +1813,10 @@ source that compiles, runs and is wrong.
 
 Per body: the multiset of `SetV1/2/4/8` constants in the bytecode against
 the numeric literals in the recovered text, skipping 0 and 1 -- both the
-commonest and the two a bool can hold honestly. On Paladin:
+commonest and the two a bool can hold honestly. It is `bgt audit` now
+rather than a scratch script, and the figures below are the scratch
+script's -- see **The audits are one command now**, where three
+comparison rules take the same titles further. On Paladin:
 
 | | constants the text does not hold |
 |---|---|
@@ -1862,28 +1897,29 @@ checks say:
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 6,240 | 0 | 0 | yes | 1,608 | compiled cleanly, not re-run |
-| Paladin of the Sky | 27,393 | 0 | 0 | yes | 7,110 | compiled cleanly, not re-run |
-| Psycho Strike | 27,529 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 192,626 | 14 | 0 | yes | 90,118 | 14, every one a residual `goto` |
-| Manamon 1 | 90,852 | 0 | 0 | yes | 26,568 | **not measured -- wrong engine** |
+| Paladin of the Sky | 27,254 | 0 | 0 | yes | 6,957 | compiled cleanly, not re-run |
+| Psycho Strike | 27,489 | 2 | 0 | yes | 6,403 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 192,678 | 14 | 0 | yes | 90,105 | 14, every one a residual `goto` |
+| Manamon 1 | 90,901 | 0 | 0 | yes | 26,476 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
-**Three of those rows are current and two are not, and the difference
-matters more than the figures.** Super Egg Hunt, Paladin and Psycho Strike
-were re-derived on the code as it stands. Crazy Party's and Manamon 1's
-are from the width-fix commit and carry nothing after it: the run that
-would have given them the four fold-safety rules' numbers was stopped by
-the host for system memory partway through Crazy Party. So those two
-line counts are a lower bound on what the current code produces, not a
-measurement of it, and their goto counts are an assumption rather than a
-reading. See **What these cost, measured -- and the two titles that are
-not here**.
+**All five rows are from one run of the code as it stands**, which this
+table has rarely been able to say. It carried a mixture of rows from
+different commits for most of this project's life, and the two largest
+titles were a lower bound rather than a measurement, because the run that
+would have given them was stopped by the host for system memory. Both have
+been re-derived since -- see **What these cost, measured on all five** --
+and the way to keep saying this is the cheap one: freeze a copy of
+`tools/`, point `BGT_TOOLS` at it, and the verdict on a commit can be
+taken after the working tree has moved on.
 
-**And the compiler column was not re-run for any of them.** It is the
-verdict on the recovery those line counts no longer describe. Running it
-costs a modal dialog on whoever is at the machine, so it is a thing to do
-deliberately; what the column says is true of the commit it was measured
-at, and the residual goto count is the proxy in the meantime.
+**The compiler column is still not re-run, and it is the one column that
+cannot be.** It is the verdict on a recovery those line counts no longer
+describe, and asking costs a modal dialog on whoever is at the machine --
+so it is a thing to do deliberately and not while someone is using the
+computer. What the column says is true of the commit it was measured at;
+the residual goto count is the proxy in the meantime, and `bgt audit`,
+`bgt signatures` and `bgt apicheck` are the checks that cost nothing.
 
 **Every number above was re-measured, and several of them moved a long
 way.** The table used to claim 0 residual gotos for Psycho Strike and for
@@ -3161,11 +3197,98 @@ sequence: the text's order is "sorted by closing parenthesis", which this file
 already records as an approximation of evaluation order, so a sequence diff
 would measure the approximation instead of the recovery.
 
-### `bgt_libcheck.calls` cannot see a method called on an indexed receiver
+### The audits are one command now
+
+```bash
+bgt audit recovered/ game.exe                  # all three
+bgt audit recovered/ game.exe --constants      # ...or one
+```
+
+Three audits over every body that pairs unambiguously by `owner::name` on
+both sides -- callees from `CALL`/`CALLSYS`/`CALLINTF`/`Thiscall1`/`ALLOC`,
+literals from `STR` and `PGA`, numeric constants from `SetV1/2/4/8` -- each
+a multiset against the recovered text, reported with the body's name and
+the file and line it landed in. The module is found the way a person would
+expect: `--module`, else the `*_bytecode.bin` that `bgt recover` already
+wrote beside the project, else unpacked from the executable into a temp
+file. **A row is a lead and not a verdict**, so rows are not a failure
+exit; pairing *nothing* is, because an audit that measured nothing must not
+read like an audit that found nothing.
+
+Four benign kinds recur, and knowing them is most of the triage: `super()`
+where the bytecode names the base constructor; a value-declared member's
+generated construction; an empty string the recovery renders as a
+declaration rather than an assignment of `""`; and the original's own dead
+store.
+
+#### Three comparison rules, each measured by being defeated
+
+The scratch script that found the flattened clock compared *spellings*, and
+most of its surviving rows were that rather than a defect. Three rules take
+them out, and each was measured by turning it off again:
+
+| rule turned off | Paladin | Psycho Strike | Super Egg Hunt |
+|---|---|---|---|
+| all three on | 1 literal / 2 constants | 1 / 2 | 1 / 0 |
+| an escape is not the byte it escapes | **16** literals | **23** | **9** |
+| a number is a number, not a spelling | **177** constants | **201** | **33** |
+| the same bits have two honest readings | **55** constants | **94** | **9** |
+
+- **An escape is not the byte it escapes.** The recovery writes any byte
+  above 0x7F as `\xNN`, deliberately, so comparing bytecode bytes against
+  the literal's source text compares an escape against the byte it escapes
+  -- the eight Manamon 1 rows this file already records as the audit's own
+  artifact. The unescaper is written from the lexer's rules rather than as
+  the inverse of the renderer's table, for the reason
+  `LiteralRenderingTests` records: an inverse built from the same table
+  would agree with a wrong table.
+- **A number is a number, not a spelling.** The bytecode's `-100.0` and the
+  text's `-100` are one constant, which is what the four stock-library rows
+  on each title were. Compared with a **relative** tolerance only: an
+  absolute one looked harmless and hid everything, because the float
+  reading of a small integer is a denormal a hair above zero and almost
+  every body's text holds a zero.
+- **The same bits have more than one honest reading.** A one-byte `255` is
+  the `-1` the text spells in `this.walk(-1, false)`; a stripped module does
+  not record which the source wrote, so both readings are offered -- at the
+  opcode's own width and the operand field's width, and no narrower. An
+  int8 reading offered for a four-byte store would be one more way for a
+  lost constant to find a match and go unreported.
+
+So Paladin's constant audit is **44 rows -> 2** and Psycho Strike's
+**18 -> 2**, which supersedes the 6 and 8 recorded under **The instrument**
+below: the rules absorb those rows instead of the prose having to explain
+them. What is left on either title is the original's own dead store.
+
+#### ...and the rule that nearly made it blind
+
+The benign-call set declined any callee whose name starts `get_` or `set_`,
+on the sound grounds that a property accessor is written `pool.pan_step`
+and never appears as a call in the text. BGT registers
+**`set_sound_storage` and `set_sound_decryption_key` as ordinary global
+functions**, so both were declined -- and a name a check wrongly holds is a
+gap it will never report. Of all the calls in a BGT game those two are the
+difference between a recovery with sound and one without.
+
+An accessor is invisible only when the callee is a **method**, because a
+property access needs a receiver. Measured, that moved several hundred
+calls per title out of the declined pile with no new rows at all: Paladin
+20,398 -> 20,167 declined, Psycho Strike 15,443 -> 15,147.
+
+**And it is measured in both directions**, which is the standard
+`bgt apicheck` set and the reason to trust a zero. Four defects injected
+into a synthetic project -- a dropped literal, a constant flattened to 1, a
+deleted call, a high byte written as a character -- each come back, in
+`tests/test_audit.py`; and injecting a flattened `time.add_minutes(30)`
+into a copy of Paladin's real tree reports it by body and value. Every
+audit also prints how much it declined, because that number is the
+difference between "nothing lost" and "nothing looked at".
+
+### `bgt_libcheck.calls` could not see a method called on an indexed receiver
 
 The first result was in the checker, and it is worth stating before the
-finding, because it flatters `bgt libcheck --decompiler`'s own scores to this
-day. Its pattern is
+finding, because it flattered `bgt libcheck --decompiler`'s own scores for
+as long as it stood. Its pattern was
 
 ```
 (?<![\w.])(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(
@@ -3181,6 +3304,59 @@ calls in `other_stuff`, all 67 of which are present.
 A checker that under-reports is the same shape as everything else in this file:
 the first version of the audit was *more* convincing for being wrong, because
 67 lost calls in one function is exactly what a real defect looks like.
+(That artifact is gone with the pattern, below.)
+
+**Fixed, and the receiver was the wrong thing to describe.** The chain was
+never doing any work -- `a.b.c.m(` captures `m` with or without it -- so the
+fix is to delete it rather than teach it brackets:
+`(?<!\w)([A-Za-z_]\w*)\s*\(`, the whole identifier the paren opens
+against. **Adjacency to the `(` is what identifies a call; a receiver never
+was.** A chain taught to span `[...]` would stop at a nested `[`, and,
+because `finditer` resumes past whatever the match consumed, would swallow a
+call written *inside* the subscript -- so `a[fetch(i)].m()` would have traded
+the outer loss for an inner one. Tracking no brackets at all loses neither.
+
+**No score moved, and that is not the same as the fix being inert.** Per
+title, the calls the comparison now reaches that it could not see before:
+
+| title | pairs touched | calls compared, source | recovered | newly seen per side |
+|---|---|---|---|---|
+| Paladin of the Sky | 11 / 47 | 77 -> 109 | 93 -> 125 | **32** |
+| Psycho Strike | 24 / 149 | 452 -> 502 | 456 -> 506 | **50** |
+| Super Egg Hunt | 11 / 47 | 90 -> 122 | 101 -> 133 | **32** |
+
+In all 46 touched pairs the newly seen multiset is **identical on both
+sides**, which is why the scores hold at 39/47, 144/149 and 43/47. So the
+blindness was costing 11-42% of the calls this checker compares at all, and
+the recovery was right about every one of them -- the scores stand because
+the recovery is correct here, not because the shape is absent.
+
+`sound_pool::play_extended_1d` is the one worth reading, because it is the
+function this file records as having once run `reserve_slot()` forty-five
+times. It was being scored on **one** visible call; it now compares nine --
+`reserve_slot, reset, update, load, reset, seek, update, play_looped, play`
+-- in evaluation order, matching exactly. A ratio of 1.00 over one call was
+close to meaningless. Paladin's `pause_sound` and `resume_sound` rise from
+0.67 to 0.80 and 0.91 and **still differ**, by the same single `is_playing`:
+that title's `sound_pool` asks its `input_recorder` where stock BGT asks
+`items[slot].handle.playing`, which is the game's own library edit and
+exactly what this check is for.
+
+**An indexed receiver was not the only receiver that is not a plain
+identifier.** A string literal is another, and `calls` blanks literals
+before matching, so `" items deleted.".opAdd_r(n)` was unreachable for the
+same reason and became reachable with the same fix -- reporting a difference
+in Psycho Strike's lifted `audio_form::delete_list_selections` where
+`form.bgt` writes `speak(selections.length() + " items deleted.", true)`.
+`OPERATOR_METHODS` is the list that keeps an operator the source writes as
+**syntax** out of the comparison, and it did not hold the reversed spelling
+the engine registers for `<number> + <string>`. So `opAdd_r` belongs there
+on the same ground `opAdd` does, and that is why it was added rather than to
+restore a number: with it the lifter is back to 153/155, and `opAdd_r` is
+the only `op*` name the whole corpus produces that the set did not already
+hold. The set is widened one measured occurrence at a time, deliberately --
+a name in it is dropped from **both** sides, so every addition makes the
+comparison weaker.
 
 ### An initialiser list was dropped, so the array came out EMPTY
 
@@ -3598,8 +3774,8 @@ bgt libcheck work/game_bytecode.bin game.exe --decompiler
 ```
 
 On Psycho Strike, of the 149 library functions that appear exactly once on
-both sides: **140 have the source's exact call sequence in evaluation order**,
-3 more are within 80%, and **148 of 149 have its exact string literals**. The
+both sides: **144 have the source's exact call sequence in evaluation order**,
+4 more are within 80%, and **148 of 149 have its exact string literals**. The
 lifter, measured the same way over 155 functions, gets 153 and 155 -- it is
 still the better-validated path for reading one function, and this is the path
 that compiles.
@@ -4113,8 +4289,8 @@ section before this one, +0, +0 and +0. Together:
 | Super Egg Hunt | 6,240 | 0 | verified | 1,608 | 0 / 0 / 0 |
 | Paladin of the Sky | 27,335 -> 27,393 | 0 | verified | 7,110 | 0 / 0 / 0 |
 | Psycho Strike | 27,446 -> 27,529 | 2 | verified | 6,443 | 0 / 0 / 0 |
-| Crazy Party | **not measured** | | | | |
-| Manamon 1 | **not measured** | | | | |
+| Crazy Party | 192,626 -> 192,686 | **14** | verified | 90,118 -> 90,115 | 0 / 0 / 0 |
+| Manamon 1 | 90,852 -> 90,977 | **0** | verified | 26,568 | 0 / 0 / 0 |
 
 Super Egg Hunt is byte-identical; Paladin and Psycho Strike move by the
 lines the four rules give back and by nothing else. `bgt libcheck
@@ -4122,17 +4298,33 @@ lines the four rules give back and by nothing else. `bgt libcheck
 and every duplication count this file records holds exactly: `do_damage`
 13, `interact_in_location` 5, `dragon_strike` 7, `reserve_slot` 8.
 
-**The last two rows are owed, and Crazy Party is the one that matters.**
-The run was stopped by the host for system memory partway through that
-title, and it is precisely the title every over-broad fold change in this
-file has been caught by -- 14 residual gotos -> 30 for a call-text
-threshold, -> 44 for dropping the declaration-order rule, -> 90 for
-forcing on the copy idiom. Three titles agreeing is the evidence there is,
-and it is weaker evidence than this file normally asks for a fold change.
-Re-derive both before quoting this section as settled, and if Crazy
-Party's fourteen have moved, the rule that moved them comes out and gets
-recorded as rejected with its number, the way the three rejections above
-it are.
+**The last two rows were owed for a commit, and they are paid.** The run
+was stopped by the host for system memory partway through Crazy Party, so
+this section went in with three rows of five and said so; the undertaking
+was that if that title's fourteen had moved, the rule that moved them came
+out and was recorded as rejected with its number. **They did not move.**
+Crazy Party is 14 residual gotos before and after, and they are the same
+fourteen labels in the same four files -- `CarteCombat` 4, `part_6` 6,
+`Jeu` 2, `CombattantSauvage` 2 -- with the split still verified and
+passthrough, body errors, unbalanced files and dangling `else` all 0.
+Manamon 1 is 0 before and after. That matters more than the two line
+counts, because this is the title the three rejections above were caught
+by: 14 -> 30 for a call-text threshold, -> 44 for dropping the
+declaration-order rule, -> 90 for forcing on the copy idiom.
+
+**Manamon 1 is also where the diagnosis shows most**, which is the thing a
+line count cannot say. Counting the text-side signatures a collapsed value
+leaves -- see **The signatures, swept** -- that title goes from 9
+self-identical lines to **1** and from 12 tautologies to **4**, and three
+of its classes lose the `pool.volume_step = pool.volume_step;` this file
+records as unfixed as far as any measurement showed. Crazy Party barely
+moves on the same sweep (3 -> 3 and 21 -> 19), which is its own result: a
+title that keeps fewer snapshots has less to lose by folding them.
+
+It cost one measurement to find that out, and the measurement was cheap
+only because the tools were frozen first. A copy of the committed `tools/`
+tree and `BGT_TOOLS` pointed at it is what lets the verdict on a commit be
+taken while the working tree has already moved on.
 
 **What is cross-validated is the diagnosis**, which is a different claim
 from the counts and is what says the rules are about BGT rather than about
@@ -4146,13 +4338,231 @@ instructions of flattened `voice_set` counts. All of them come back.
 
 Counting lines whose two sides are textually identical -- the signature a
 collapsed snapshot leaves -- gives the same answer from the other
-direction: Paladin **11 -> 2**, Psycho Strike **3 -> 1**. Both of
-Paladin's survivors are the original's own no-ops, `arg0 = arg0;` confirmed
-against the bytecode as `VAR 0 ; PshVPtr 0 ; GETOBJREF 1 ; CALLSYS
-string::opAssign`. Crazy Party has **16** of these and Manamon 1 **17**,
-among them `pool.volume_step = pool.volume_step;` in three of Manamon 1's
-classes -- unfixed as far as any measurement here shows, because those are
-the two titles the run did not reach.
+direction, and that count is `bgt signatures` now: see **The signatures,
+swept** below for all five titles measured by one instrument, including
+the two this paragraph used to say the run had not reached. Manamon 1 goes
+**9 -> 1** on it and loses the `pool.volume_step = pool.volume_step;` in
+three of its classes that this file recorded as unfixed.
+
+**And both of Paladin's survivors are the original's own, but not both
+`arg0 = arg0;`.** One is, confirmed against the bytecode as `VAR 0 ;
+PshVPtr 0 ; GETOBJREF 1 ; CALLSYS string::opAssign`. The other is
+`breakfast_time`'s
+`global_interacts[receptionest_slot].speech = global_interacts[receptionest_slot].speech;`,
+and its bytecode is two operations rather than one:
+
+```
+ADDSi interact::speech ; GETREF 1 ; CALLSYS string::opAddAssign
+PshRPtr                                  ; the reference it RETURNS
+ADDSi interact::speech ; CALLSYS string::opAssign
+```
+
+-- `speech = (speech += "[/]Oh, and your friend Gabriel's room is ...")`,
+which assigns the member to itself after the append. The recovery renders
+both operations, in order, which is faithful. The conclusion stands and the
+detail was wrong, which is the cost of grepping one signature by hand: a
+count is not a list.
+
+### Nine: a global read THROUGH A METHOD on it is still a global read
+
+The sixth rule above is right and was asked in the wrong place. A value
+that reads a global goes stale through any call -- any function can write
+any global, which is the `this` argument for a bare member one scope out
+-- and `_stale_fold` put that question only to a value with **no
+receiver**. A global object is almost always read through a method on it,
+so the commonest shape a global takes in these games never reached the
+rule: `int(default_volume)` was caught and `int(music.get_volume())` was
+not.
+
+What decided it instead was the receiver test -- whether a later statement
+calls a method on `music` or assigns it -- which is strictly weaker and
+cannot see the case even in principle, because the statement that changes
+the volume names a handle **alias** of the global:
+
+```
+int old = int(music.get_volume());
+fade(local_5, music.get_volume(), -20.0, 250.0, false);   // local_5 IS music
+storyline_scroll(...);                                    // the scene
+fade(local_5, music.get_volume(), double(old), 250.0, false);
+```
+
+Folded, that last argument re-read the volume the first `fade` had just
+taken down, so the restore faded -20 dB to -20 dB and **the music stayed
+ducked** until the next track change, where `change_music` applies
+`default_volume` itself. `good_thus_far` and `bomb_hockey` are both of
+those, and `battle` is the same rule over `music.get_position()` --
+snapshotted before the battle music and read afterwards to resume the
+map's track where it left off, so it resumed from wherever the battle
+music had reached. "The music is kinda bugged in some places" is three
+bodies, and none of them is the music code.
+
+**And the same rule reached a different defect in `rec_timer::real_elapsed`.**
+There the folded value is a `dictionary::get` on `recorder.system_data`,
+so folding it moved the call PAST the `int(stored)` that reads its own out
+argument:
+
+```
+CALLSYS dictionary::get          ; fills slot 8, returns the bool in 5
+i64TOi 4 8 ; CpyVtoV4 1 4        ; elapsed = int(stored)  -- AFTER it
+NOT 5 ; JLowZ                    ; if (!ok)
+```
+
+The recovery converted the slot before the call filled it, which is "an
+out argument copied before the call that fills it" -- one of the three
+bugs the **Conventions** list at the end of this file records as having
+compiled cleanly and been caught only by running.
+
+#### The name match is broader than the rule, and two fixes come from that
+
+This is the part worth reading twice. `_stale_global` asks "does this
+value read a global?" by taking every identifier in the value's text and
+keeping the ones the module declares as globals. **A member whose name
+happens to match a global matches too**, and `x.current` does not read the
+global `current`.
+
+Manamon 1 declares `character@ current;`, and two of the bodies this
+change fixes are fixed through that collision rather than through the
+rule:
+
+```
+local_8 = int(this.user.stat[0].current);        // restored by this change
+heal(local_1, local_12);
+this.speak_heal_message(int((this.user.stat[0].current - double(local_8))));
+```
+
+Folded, that last line was
+`current - double(int(current))` -- **zero** -- so every healing item in
+Manamon 1 announced that it had healed nothing, and `magic_restorative`
+said the same about magic points. Both are real and both are now right.
+
+**No receiver-based test could have caught them**, which is why the
+coincidence is worth keeping rather than tightening away for now: `heal`
+changes `this.user.stat[0].current` through `local_1`, an alias taken two
+statements earlier, so neither `_CALL_RECEIVER` nor `_INDEX_BASE` nor
+`_prop_receiver` names anything an intervening statement mentions. The
+only rules that reach it are the "any call invalidates" kind. So the
+state of this is: the code is broader than its justification, the breadth
+is measured across five titles and costs nothing, and the question it
+raises -- whether a member read snapshotted across a call should go stale
+unconditionally, the way a global's does -- is the next fold rule to
+settle and is **not** settled here.
+
+#### What it cost, measured on all five
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 6,240 | 0 | verified | 1,608 |
+| Paladin of the Sky | 27,393 -> 27,254 | 0 | verified | 7,110 -> **6,957** |
+| Psycho Strike | 27,529 -> 27,489 | 2 | verified | 6,443 -> **6,403** |
+| Crazy Party | 192,686 -> 192,678 | **14** | verified | 90,115 -> **90,105** |
+| Manamon 1 | 90,977 -> 90,901 | 0 | verified | 26,568 -> **26,476** |
+
+Not one residual goto moves -- Crazy Party's fourteen are the same
+fourteen -- and passthrough, body errors, unbalanced files, dangling
+`else` and the split check are unchanged on every title. Super Egg Hunt is
+byte-identical. The call counts fall because of the `get` deduplication
+below, not because a call was lost: 153 on Paladin, 40 on Psycho Strike,
+92 on Manamon 1 and 10 on Crazy Party, every one a `dictionary::get` that
+had been emitted twice. `bgt signatures` moves on exactly two titles and
+exactly one shape -- Paladin's identity casts 4 -> 2 and Manamon 1's
+15 -> 13, which are the four snapshots above.
+
+**The cost is `real_elapsed`, and it is readability.** Promoting one value
+advances the statement counter, so the two later `int(recorder.mode)`
+reads in that body are no longer bound in the statement that reads them
+and promote behind it -- three extra assignments that say nothing. The
+cascade is pre-existing rather than new here, and correct-and-noisier is
+the right side of that trade.
+
+### The signatures, swept
+
+```bash
+bgt signatures recovered/
+bgt signatures recovered/ --against ../previous/     # the delta
+bgt signatures recovered/ --detail tautology         # the rows
+```
+
+Eight shapes, one per bug class this file records, swept over a recovered
+tree. Each is here because a real reported bug left it behind: a
+self-identical line and a tautology are a collapsed snapshot, inside a
+statement and inside a condition; an empty `if` arm is a condition that
+has lost its value, and two empty arms is the stronger form that found the
+folded `||` chain; a double assignment followed by a multi-read is one
+scratch slot carrying several operands (`get_percent_of_range`); an
+identity cast is a value converted twice and changed by neither; a bare
+read is the borrowed handle hoisted out of its guard; and the same call
+three times in one statement is a call run once per read.
+
+**It is a lead and not a metric**, which the two Paladin survivors above
+demonstrate: the original wrote both of them. Files replaced by BGT's own
+source are skipped by default, because their text is the engine's style
+rather than this decompiler's.
+
+What it is FOR is the delta, and the four fold-safety rules measured by it
+across all five titles -- the width-fix commit against the one after it:
+
+| title | self-identical | tautology | double assign | identity cast | duplicated call |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 0 | 0 | 3 | 1 | 0 |
+| Paladin of the Sky | 5 -> **2** | 7 -> **1** | 8 -> **5** | 6 -> **4** | 8 -> **6** |
+| Psycho Strike | 1 -> **0** | 1 -> **0** | 13 -> **11** | 3 -> **1** | 2 -> **0** |
+| Crazy Party | 3 | 21 -> **19** | 36 -> **35** | 5 | 22 -> **21** |
+| Manamon 1 | 9 -> **1** | 12 -> **4** | 24 -> **20** | 18 -> **15** | 3 -> **1** |
+
+Super Egg Hunt does not move because its project is byte-identical.
+Manamon 1 moves most, in a title where nothing was looking for any of it,
+and Crazy Party barely moves at all -- which is its own result rather than
+a disappointment: a title that keeps fewer snapshots has less to lose by
+folding them.
+
+Two narrownesses, both deliberate and both pinned by a test. A comparison
+is only seen **parenthesised**, which is what the renderer emits, so a
+comparison a person wrote as a bare argument is not swept. And the
+duplication check is **per statement**, so `file_menu`'s four reads across
+four statements are not its business -- that is the call-sequence
+comparison in `bgt libcheck`, and the two are complementary.
+
+#### What it found that nothing was looking for
+
+Three of Manamon 1's four surviving tautologies are **one defect, and a
+new one**: a string copied by `opAssign` keeps the *text* of the slot it
+was copied from, and that text goes stale when the source slot is written
+again. `skill::will_fail` is the clearest:
+
+```
+CALLINTF character::special_immunity    ; fills slot 1, the &out reason
+PSF 3 ; PSF 1 ; CALLSYS string::opAssign          ; slot1 = slot3
+STR "" ; $str ; PSF 3 ; CALLSYS string::$beh0     ; slot3 = ""
+PSF 3 ; PSF 1 ; CALLSYS string::opEquals          ; slot1 == slot3
+```
+
+-- `if (reason != "") { arg1 = reason; arg2 = ""; }`, which recovered as
+`local_3 = ""; if (local_3 != local_3) {`. **The slot-write test cannot
+see the write**, because slot 3 is filled by a *behaviour* (`string::$beh0`
+through a pushed address) and not by an opcode that names it, and
+`slot_writes` is built from opcodes. This file already records that
+"an object slot is written by a behaviour, not by an opcode" -- for
+`_short_circuit_slots`, one place over. Two places answering one question,
+again, and this is the one that was never told.
+
+The cost is a skill's failure message: `will_fail`'s guard is always false,
+so `arg1` and `arg2` keep the generic "The move failed!" instead of the
+reason, and `unknown_gift::give` takes its `else` branch -- "You can't
+obtain this gift yet." -- whatever the real reason was. Not fixed here; it
+needs `slot_writes` to count a construction through a behaviour, which is a
+fold-safety change and wants its own five-title measurement.
+
+**And Paladin's `battle` really does compare a thing with itself.** The
+last surviving tautology there is
+`player.strikes[local_47].name != player.strikes[local_47].name`, inside
+the `only_hit_by_scroll` guard, and the bytecode copy-constructs the left
+operand out of the same member it then compares against -- same array, same
+index slot, nothing in between. The author meant
+`!= arg0.only_hit_by_scroll` and wrote the left operand twice, so in the
+shipped game that guard is dead and any scroll hits a scroll-locked enemy.
+That is the third finding of this kind, after `generate_maze`'s discarded
+comparison and `load()`'s empty guard: the recovery is faithful, and the
+bug is the original's.
 
 ### A base class's method, called through `this`, recurses forever
 
