@@ -824,9 +824,26 @@ identical -- only the stray pointer in entry 0's name field differs
 (`if_handle_then_const` against `$dlgte`, the literal each copy happens to
 sit after). `ReadByteCode` uses the second; `bgt opcodes` finds the first.
 That is harmless, and it is worth knowing before concluding that a table
-reached through the code is a different table: `asBCTypeSize` at VA
-0x004CB390 is `[0, 1, 1, 1, 2, 2, 3, 3, 2, 3, 2, 1, 2, 3]`, and both copies
-index it the same way.
+reached through the code is a different table, and both copies index
+`asBCTypeSize` the same way.
+
+**That table is 21 entries, and the figure this file used to give for it
+was a truncated transcription.** It read
+`[0, 1, 1, 1, 2, 2, 3, 3, 2, 3, 2, 1, 2, 3]` -- fourteen, stopping at
+type 13 -- and `CMPi` alone is type 14, so a fourteen-entry table cannot
+size this instruction set. Read out of BGT 1.3 at VA 0x005054E8 it is
+
+```
+[0, 1, 1, 1, 2, 2, 3, 3, 2, 3, 2, 1, 2, 3, 2, 2, 4, 3, 2, 3, 3]
+```
+
+Nothing was ever decoded wrongly, which is why this went unnoticed: the
+decoder does not use the transcription. `as_opcodes.TYPE_INFO` carries
+all twenty used types with their operand counts, and it agrees with the
+binary **entry for entry** -- which is also the check that says the
+longer reading is right. A number in prose and the table the code
+actually uses are two places to keep in step, and only one of them was
+ever exercised.
 
 **The table is 203 entries where BGT 1.3's is 200**, and the three extra say
 which direction this fork went: `Thiscall1` at 200, and the compiler's own
@@ -1597,7 +1614,7 @@ a local the source declared and this had been inlining.
 
 ### A `?&` argument carries its type, so the slot's type is the call
 
-A **`?&in` / `?&out` parameter (token 60)** takes two stack slots for one
+A **`?&in` / `?&out` parameter** takes two stack slots for one
 declared parameter: the value address and a hidden `TYPEID`. This file already
 records that as a stack-layout rule. It is also a **semantic** one, and that
 half was missing: the callee *compares* the type id, so handing it a variable
@@ -4095,6 +4112,326 @@ cost one command each: the **line count**, which moved by 530, and
 `bgt recover --compile`, which named the file and the line. A passing
 oracle is evidence about what it covers and nothing else.
 
+### The compiler, read -- every statement's emitted shape
+
+`CompileSwitchStatement` was found through a literal and read on its own.
+The other nine statement compilers came out of **one** query, and the
+method is worth more than the addresses: `FUN_00426050` is
+`CompileStatement`, a bare dispatch on `node->nodeType`, and **its branch
+order is AngelScript's own source order** -- the
+`snExpressionStatement || firstChild` guard at the top, the `*hasReturn = 1`
+that only the last branch performs. So the dispatch names its own cases.
+
+| function | address |
+|---|---|
+| `CompileStatement` | `FUN_00426050` |
+| `CompileStatementBlock` | `FUN_0041E540` |
+| `CompileIfStatement` | `FUN_00428310` |
+| `CompileForStatement` | `FUN_00428B50` |
+| `CompileWhileStatement` | `FUN_00429630` |
+| `CompileDoWhileStatement` | `FUN_00429C60` |
+| `CompileExpressionStatement` | `FUN_0042A5E0` |
+| `CompileBreakStatement` | `FUN_0042A360` |
+| `CompileContinueStatement` | `FUN_0042A4A0` |
+| `CompileSwitchStatement` | `FUN_00426160` |
+| `CompileReturnStatement` | `FUN_0042A9D0` |
+| `CompileCase` | `FUN_00428060` |
+| `CompileFunction` | `FUN_0041D110` |
+
+**One mechanical obstacle stands in front of all of it**, and it is the
+reason a reading of this file is harder than a reading of `asCReader`: the
+emitter wrappers take the opcode **in EAX**, so the decompiler drops it
+and every emit site reads as `Instr(this)` with no indication of what is
+emitted. The constant is only in the instruction bytes. `FUN_0041A070` is
+`Instr(op)`, `FUN_0041A490` `InstrDWORD(op, arg)`, `FUN_0041A4F0`
+`InstrSHORT(op, arg)`, `FUN_0041A440` `InstrINT(JMP, label)` with the
+opcode baked in, `FUN_00419790` `AddCode`, `FUN_00419A00` `Line`,
+`FUN_00419BE0` `DeleteInstruction`. The way through is to scan `.text`
+for every `rel32` call to a wrapper and read the immediate pushed at each
+site, which turns "what emits `CpyVtoV4`?" into a complete enumeration
+rather than a search.
+
+What each statement emits:
+
+```
+while     L_cond: <c> CpyVtoR4 ClrHi JZ brk ; SUSPEND JitEntry ;
+                  <body> ; JMP cond ; L_brk
+do-while  L_top: <body> ; L_cont: SUSPEND JitEntry ;
+                  <c> CpyVtoR4 ClrHi JNZ top ; L_brk
+for       <init> ; JMP cond ; L_inside: SUSPEND JitEntry ; <body> ;
+                  L_cont: <incr> ; L_cond: <c> CpyVtoR4 ClrHi JNZ inside ;
+                  L_brk
+if        <c> CpyVtoR4 ClrHi JZ after ; <then> ; [JMP end] ; L_after ;
+                  <else> ; [L_end]
+break     Block(true) ; <dtors> ; Block(false) ; JMP brk
+continue  Block(true) ; <dtors> ; Block(false) ; JMP cont
+return    JMP 0          -- label 0 is the function's single exit
+```
+
+#### A `for` is bottom-tested, so it shares a CFG shape with `do-while`
+
+This is a correction. A `for` is **not** a head-tested loop: the compiler
+emits an unconditional forward `JMP` to the condition label, puts the
+condition **last** (after the increment), and closes with a *conditional*
+`JNZ` back edge to a label above the body. So `for` and `do-while` have
+the same shape, and "a header that is also the latch" cannot separate
+them. Three things can:
+
+| | entry jump to the condition | `SUSPEND` sits | labels |
+|---|---|---|---|
+| `while` | no | after the condition | 2 |
+| `do-while` | no | between body and condition | 3 |
+| `for` | **yes** | at the top of the body | 4 |
+
+#### ...and the increment is already outside the body
+
+`continueLabels` holds the label **before** the increment, so a `continue`
+in a `for` runs it -- which is what the language says and what the
+emission does. This file's rule was that a `for` header "may not hoist
+the increment when something jumps straight to the condition", on the
+grounds that such a jump is a `continue` whose increment is part of the
+body. **The only thing that jumps straight to a `for`'s condition is the
+entry jump from the init**, which every `for` has. Read that way the rule
+refuses to hoist on every genuine `for` it meets.
+
+The shape it was written to protect -- a `while` with a trailing
+increment -- is separable on much stronger evidence: in a `while` the
+continue label *is* the top condition label, and the back edge is an
+unconditional `JMP`.
+
+#### The latch is the instruction before `LABEL brk`
+
+In all three loop forms, and this is the useful positive result: `brk` is
+both the loop's exit and every `break`'s target, and the latch is the
+instruction **immediately preceding** it. **Any other backward jump to the
+header is a `continue`.** That is cheaper and stronger than
+`plain_latches[-1]`, and it is exactly the distinction Paladin's
+`register_software` needed -- a `while` pushes its header label onto
+`continueLabels`, so a mid-body `continue` is a *second* backward `JMP` to
+the same label, which is precisely what `plain_latches[-1]` claimed as the
+loop's tail.
+
+#### `break` really can be `JMP 0`, and now there is a mechanism
+
+`ResolveJumps` (`FUN_00419B40`) resolves a jump whose label is the next
+instruction to offset **0** and keeps it. The global peephole
+(`FUN_00418CE0`, gated on `engine->ep[0xEFD]`) then deletes it:
+`curr->op == JMP && next->op == LABEL && curr->arg == next->wArg[0]`
+removes the `JMP`. So such a jump is normally gone, and survives **only
+when something zero-sized intervenes** -- another `LABEL`, or a `Block`,
+`ObjInfo` or `VarDecl` marker. `break` emits `Block(false)` immediately
+before its `JMP`, which is exactly such a marker. The operational rule
+this file already records stands and is now explained: a surviving
+offset-0 `JMP` is a real edge and must not be dropped as a fallthrough.
+
+#### What the switch emission actually looks like
+
+Four corrections and one confirmation, all in BGT 1.3:
+
+- **Tables never interleave with arms, within one `switch`.** All of a
+  switch's guards and tables go into one buffer, then every arm in source
+  order, then the break label. The only things that can sit between two
+  tables are the `nextRange` label and the next range's guard instructions
+  (`SetV4`, `CMPi`, `JS`, `JP`) -- never arm code. So the
+  `type_effectiveness` diagnosis below, "the chain's tables and arms
+  interleave", cannot describe one switch.
+
+  **What does produce `table, arms, table, arms` is N consecutive source
+  `switch` statements**, each emitting its own tables and then its own
+  arms -- and a type chart written as several switches in a row is the
+  natural shape for the function that shows it. That gives a discriminator
+  the bytecode can answer today: from a table's end, look at what precedes
+  the next table. Guards and a label only, and it is the same switch, so
+  merge; any statement-shaped code -- a call, a store, a jump to the
+  function exit -- and the next table belongs to a *different* switch, so
+  the chain-merger must stop rather than grow `cursor` across it. If that
+  is what is happening, the `entries[0] <= instrs[cursor - 1].pos` guard is
+  firing because the merge over-reached, and the fix belongs in the merge.
+- **Each table has two guards going to different places.** The low bound is
+  `CMPi ; JS default` and the high bound `CMPi ; JP nextRange`, plus one
+  whole-switch prologue guard against the overall maximum, to the default.
+  **Only the high guard sends values on to the next table** -- which is what
+  the merge-and-drop-the-guard rule depends on.
+- **With no `default:`, the default label *is* the break label.** So those
+  edges already leave the switch.
+- **The compare chain is "fewer than three values", not "a single
+  value".** A two-value range emits *two* `SetV4 ; CMPi ; JZ` triples, and
+  there is no `JMP` per compare: one `JMP default` is emitted once after
+  all the ranges. The `JMP exit` after Super Egg Hunt's `case 27` is that
+  end-of-chain jump.
+- **An arm can leave to four places**: `break` to the break label, `return`
+  as `JMP 0`, `continue` to the enclosing loop (a switch scope sets
+  `isBreakScope` and clears `isContinueScope`), or fall through into the
+  next arm.
+
+And two things that confirm what is already here: the compiler **errors**
+if `default` is not last, so `_default_last` is needed for BGT too; and it
+deletes unreachable code itself (`FUN_00419DA0`), so `_drop_unreachable`
+is correctly a source-level pass rather than a model of the engine.
+
+`SUSPEND` is **not** a loop marker, which is worth knowing before reading
+one as a landmark: `Line()` emits `LINE` + `JitEntry` at every statement
+boundary, `LINE` is given size 1 so `ExtractLineNumbers` can rewrite it to
+`SUSPEND` offset-neutrally, and the peephole then collapses consecutive
+`SUSPEND`s -- merging a loop's explicit one with its body's first.
+
+### The allocator, read -- why one slot serves several source locals
+
+`AllocateVariableNotIn` is `FUN_0042B450`, and the whole of what
+distinguishes a declared variable from a temporary is **one flag**:
+`CompileDeclaration` (`FUN_00423570`) calls it with `isTemporary = 0` and
+all fifty-eight other call sites pass 1. There is one offset space --
+`GetVariableOffset` (`FUN_0042B740`) is a running sum from 1 over every
+prior slot, declared and temporary interleaved in allocation order -- and
+the flag lives in a `char` array at `this+0x9C`, which the free-list match
+consults alongside the type and the on-heap flag. Within one body an
+offset is therefore either always a declared variable or always a
+temporary, never both.
+
+**And the allocator erases the type on purpose.** Before matching the free
+list it rewrites any one-dword primitive's token to `ttInt` and any
+two-dword one to `ttDouble`, so `bool`, `int8`, `int`, `uint`, `float` and
+every enum share a single free-list class. That is the compiler-side root
+of what this file records as "a slot serves several source locals": it is
+deliberate reuse of one offset across unrelated declared types, not an
+accident of ordering, and it is why `clear_pathway`'s slot 1 is a `bool`
+through a `bool&out` and an `int` on the way out.
+
+The compiler also emits **`VarDecl`** (opcode 251) for every declared
+variable, carrying its index into the function's variable list -- which is
+exactly the fact `noDebugInfo` discards, and the reason no amount of
+reading the bytecode can recover it.
+
+#### The `CpyVtoV4` idiom holds, and the OPTIMIZER is the missing half
+
+This is the most useful correction of the two readings, because it
+reconciles two measurements this file records as contradictory.
+
+`CpyVtoV4` / `CpyVtoV8` are emitted from **exactly three sites in the
+whole binary**, by enumeration rather than by search:
+
+1. `PerformAssignment` at `0x0042C313`, gated on `isVariable`
+   (`test byte [edi+0x10], 8`) -- the destination being a variable is what
+   selects the copy over a `WRTV*` through the reference register. That is
+   the idiom's rule, exactly as recorded.
+2. `CompileBooleanOperator` at `0x00441A30` -- the `&&` / `||` merge.
+3. `ConvertToTempVariable` at `0x0043E22D`, which copies a declared
+   variable *into* a fresh temporary. **This exception was not recorded**,
+   and it has 32 call sites.
+
+The optimizer (`FUN_00417BF0`) then changes the shape of the answer, and
+every one of its fusions is gated on `IsTemporary(slot)` (`FUN_00418150`).
+Two rules matter: `SetV4 t,K ; CpyVtoV4 d,t` becomes `SetV4 d,K`, and
+**any three-operand arithmetic op** (`asBCType` 8 or 13) followed by
+`CpyVtoV4 d,t` is rewritten to target `d` directly. So:
+
+> **A declared variable initialised from an arithmetic expression leaves
+> no `CpyVtoV4` at all**, and from a constant leaves only `SetV4 v,K`. The
+> copy survives only when the producer is `asBCType` 3 -- `CpyRtoV4`, a
+> call return, or `RDR*`, a dereferenced read -- or when the source was
+> never a temporary.
+
+Which says two things at once. The idiom is **sound where it is used**:
+`copy_binds` lowers the duplicate-fold threshold for values that arrived
+through a copy, and those are exactly the call-return and dereferenced-read
+shapes the optimizer leaves alone. And the converse is **false**: "no
+`CpyVtoV4`, therefore not declared" is wrong for most declared variables
+in a BGT module, which is why forcing a variable on every copy destination
+was measured at 14 -> 90 residual gotos on Crazy Party and why no amount of
+tuning that lever would have worked. The engine supplies no decidable test
+for "did the source name this slot?"; it supplies an asymmetry, and the
+asymmetry is already what is being used.
+
+#### The short-circuit merge, and the ternary correction
+
+`&&` and `||` (`0x00441942`-`0x00441A40`) allocate the destination as a
+**temporary**, open with `CpyVtoR4 lhs ; ClrHi ; JNZ|JZ L1`, and store the
+short-circuit result **asymmetrically**: `&&` emits `SetV4 dest, 0` and
+`||` emits `SetV1 dest, 1`. The arm's store is `CpyVtoV4 dest, rhs`.
+`^^` is not short-circuit at all. `_short_circuit_slots` accepts
+`SetV1`/`SetV2`/`SetV4` with a constant of 0 or 1, so it sees both halves;
+a test written for one store would have missed every merge of the other
+operator, silently.
+
+**The left operand is released before the destination is allocated**, so a
+merge's destination may legitimately reuse the left operand's slot. That is
+`use_screen_reader` seen from the compiler's side, and it is why that
+function's four synthesised entries sit at offsets 1, 3, 3, 2.
+
+**The ternary does not work the way this file assumed.** It was recorded
+that both arms `SetV4` straight into the destination and that
+`CpyVtoV4` is not used. `CompileCondition` (`FUN_00432B30`) allocates its
+destination as a temporary and both arms store through `PerformAssignment`,
+i.e. `CpyVtoV4`; the bare `SetV4` that was observed is the *optimizer*
+collapsing `SetV4 t,K ; CpyVtoV4 d,t`, which only happens because both arms
+were constants. **With a non-constant arm the `CpyVtoV4` survives, into a
+temporary** -- so a ternary can look exactly like a declared variable's
+initialisation to a rule that reads the copy alone.
+
+#### Argument order, and the fix it specifies
+
+`MakeFunctionCall` (`FUN_0043D9A0`) moves the receiver's bytecode out of
+the context into a local, compiles every argument into the now-empty
+context, then re-appends the receiver. `PrepareFunctionCall`
+(`FUN_00420700`) walks the arguments **descending**
+(`n = len - 1; while (-1 < n)`). So the stream is
+
+```
+[a(N-1)] [a(N-2)] ... [a0] [receiver] <call>
+```
+
+which is the call frame this file already derived from the bytecode, now
+confirmed from the emission -- arguments pushed last to first, receiver
+last of all.
+
+It also **specifies the fix for the concatenation defect** recorded under
+`bgt oracle`, where `"" + bump() + "," + bump() + "," + bump()` answers
+`3,2,1` from the engine and `2,3,1` from the recovery. Each operand
+occupies a contiguous ordered span immediately before its call, so a folded
+call's statement can be placed by **the span it belongs to** rather than by
+the `opAdd` that consumes it -- and for a left-nested chain the textual
+order is exactly the reverse of the bytecode order. No new evidence is
+needed for that change, only the work.
+
+#### The initialiser list, confirmed, and why reading the slot is safe
+
+`CompileInitList` (`FUN_00424CB0`) emits `AllocMem`;
+`CompileInitListElement` (`FUN_004253A0`) emits `SetListSize`, every
+`PshListElmnt` and the single `PopRPtr`, and they are the only emitters of
+those opcodes in the binary. `PshListElmnt` carries the buffer variable and
+a **byte offset**, four-byte aligned per element. For a **scalar** element
+the `PopRPtr` is emitted and the element's lvalue is marked a reference with
+`isVariable` clear, so `PerformAssignment` takes its `WRTV*` branch --
+giving the `SetV4 t,K ; PshListElmnt buf,N ; PopRPtr ; WRTV4 t` this file
+records. For an **object** element there is no `PopRPtr`: construction goes
+through the address in the reference register.
+
+And the part worth having: **no peephole rule fuses `SetV4` with
+`PshListElmnt`**, so reading a scalar element's constant back out of the
+frame slot is provably safe rather than merely observed to work.
+
+#### A `?&` argument's `TYPEID` cannot disagree with what is passed
+
+`PrepareArgument` (`FUN_0041F460`) is the only emitter of `TYPEID`, at two
+sites, and the id comes from `GetTypeIdFromDataType(&ctx->type.dataType)`
+-- the argument expression's own type at that site, which is the same
+expression that is then passed. They cannot disagree.
+
+So **the `TYPEID` operand is authoritative for that slot's type at that
+call**, and where it conflicts with the decompiler's idea of the slot's
+type, the `TYPEID` is right and the slot type is wrong. Paladin's six lost
+`bool` save flags were therefore a mis-typing on this side and never a
+mismatch the compiler could produce -- the fix recorded above is confirmed
+from the engine, not merely measured.
+
+**And the token number is 59 and 60, in two numberings, both correct.**
+`ttQuestion` is `0x3B` = **59** in BGT's own `eTokenType`, settled from two
+independent sites in the binary. The IR converts a legacy token with
+`t + (t >= 36) + (t >= 64)`, so 59 becomes **60**, which is what
+`decompile.py` gates on. This file quotes both numbers in different
+sections and neither is wrong; what was missing is which numbering each
+belongs to. Changing the code to 59 would break every `?&` argument.
+
 ### Reading the compiler, not only the reader
 
 This document's first rule is to read `asCReader` rather than infer the
@@ -4168,35 +4505,106 @@ enumerated for exactly that: 2 in Manamon 2, 0 in the other three.
 Paladin, Psycho Strike and Super Egg Hunt render **byte-identical** before
 and after, which is what a correctly scoped structurer change looks like.
 
-#### The three tables nothing claims
+#### The tables nothing claims, and what each one really is
 
-Manamon 2's three given-up bodies have been "claimed by neither switch
-matcher" for as long as the message has existed, which is a symptom and not
-a cause. `_dense_table` reads all three perfectly; it is
+These bodies have been "claimed by neither switch matcher" for as long as
+the message has existed, which is a symptom and not a cause.
+`_dense_table` reads all of them perfectly; it is
 `_dense_switch_pattern`'s checks *after* it that decline, and they decline
-for **three different reasons**. Written down so the next attempt starts
-from a diagnosis:
+for **different reasons**.
 
-- **`number_key_pressed`** -- the arms leave the switch to two places.
-  Cases 0..8 end `JMP 0x12C` and case 9 ends `JMP 0x12F`, and the check
-  wants one shared join. 0x12C is the function's tail and 0x12F is three
-  instructions into it, so both *are* leaving; one arm jumps deeper in. A
-  switch that is the last statement of a function exits straight into the
-  epilogue, and the epilogue has more than one entry point.
-- **`type_effectiveness`** -- the chain's tables and arms interleave.
-  Twenty-two tables, laid out `table, arms, table, arms`, so merging the
-  chain grows `cursor` to 0x508 while the first merged table's arms sit at
-  0xAE. The guard `entries[0] <= instrs[cursor - 1].pos`, which exists to
-  catch an entry jumping *backwards into the table*, then fires on a
-  perfectly ordinary layout. The check assumes tables come before arms.
+**And they are not Manamon 2's alone.** Manamon 1 gives up on exactly two
+bodies, and they are `number_key_pressed` and `type_effectiveness` -- the
+same two functions, by name, in a title four years older by a developer
+whose source grew into the other. So these are two *shapes* across two
+titles, and a fix to either pays twice. Which guard declines each was read
+by tracing the real `_dense_switch_pattern` and reporting the line it
+returned None from, so no matcher logic was duplicated to find out:
+
+| body | instructions | tables | declines at |
+|---|---|---|---|
+| `number_key_pressed` | 168 | 1 | `len(set(joins)) != 1` |
+| `type_effectiveness` | 984 | 23 | `entries[0] <= instrs[cursor - 1].pos` |
+
+**Both of the diagnoses this file used to give for them were wrong**, and
+both were wrong the same way: they were read off the output rather than out
+of the compiler, and each invented a strange layout where the truth is an
+ordinary one being mis-measured.
+
+- **`number_key_pressed` has ONE exit, and the second "join" is a
+  `return`.** The old reading was that the arms leave to two places, 0x12C
+  and 0x12F, both in the epilogue. They do not. Read out of Manamon 1's
+  bytecode, the switch has ten case arms at 0x20 .. 0x113 and a default at
+  **0x12C** -- and with no `default:` in the source the default label *is*
+  the break label, which the compiler reading above confirms. `joins` is
+  built over `zip(entries, entries[1:])`, so the default's position closes
+  the **last arm's** span, and that arm is 0x113 .. 0x12B:
+
+```
+0x113  (case 9's body)
+0x11F  CALLSYS f
+0x121  CpyRtoV4 1
+0x122  CpyVtoV4 3, 1
+0x124  CpyVtoR4 3
+0x125  JLowZ      -> 0x12C
+0x127  SetV1 2, 1            ; true
+0x129  CpyVtoR4 2
+0x12A  JMP        -> 0x12F   ; <- counted as a second join
+0x12C  SetV1 3, 0            ; false -- the default, and the exit
+0x12E  CpyVtoR4 3
+0x12F  RET
+```
+
+  0x12A is the `else`-skip of an `if` **inside** case 9, and it is counted
+  only because the test is `_jump_target(body[-1]) >= entries[-1]` while
+  `entries[-1]` is the default, so any jump past the default qualifies. The
+  compiler says what that jump is: a `return` emits `JMP 0`, to the
+  function's single exit. `SetV1 ; CpyVtoR4 ; JMP -> RET` is therefore a
+  `return true;`, which this file already knows how to place -- "a register
+  load that flows only through cleanup to `RET` now emits `return x;` on the
+  spot". A join whose target is reached only by cleanup to `RET` is a
+  return, not a second exit, and dropping it from the join set leaves the
+  one join the matcher asks for. So the fix is narrow, where "allow a
+  switch two exits" would have been the dangerous shape.
+- **`type_effectiveness` is TWENTY SWITCHES, not one with an odd layout.**
+  The old reading was that its tables and arms interleave and that the
+  backward-entry guard fires on an ordinary layout. The compiler refutes the
+  premise: within one switch, only the next range's guards and a label can
+  sit between two tables -- never arm code. So the interleaving is real and
+  it is *between* switches.
+
+  Measured on Manamon 1's 23 tables, by asking what lies in each gap:
+  **19 of the 22 gaps hold arm code** (`CpyVtoR8`, which is this
+  `double`-returning function's `return`), and only 3 hold guards alone.
+  Those 3 are genuine two-table chains; the other 19 are boundaries. The
+  function is a type chart written as twenty consecutive `switch`
+  statements, which is the natural way to write one.
+
+  So the guard was doing its job and the **merge** over-reached: it follows
+  `next_range` into whatever JMPP it finds within twelve instructions, and
+  at a switch boundary that is the *next switch's* table, after which
+  `cursor` grows to instruction 622 of 984 and the entries it is compared
+  against still sit at 0x42 .. 0x486. The stop condition is the
+  discriminator above, and it is the same principle `_equality_chain`
+  already applies -- "the chain must begin exactly where the table's
+  entries ended", because extending a span to something not adjacent
+  swallows whatever lies between.
 - **`artisoul_tutor`** -- the same guard, failing by one: the span ends at
   exactly 0x263 and the first arm begins at exactly 0x263, and the
-  comparison is `<=`.
+  comparison is `<=`. Not re-derived, because Manamon 2 is not on this
+  machine any more; it may well be the same over-reach one step smaller.
 
 Each wants a different relaxation and each relaxation is the kind this
 file keeps recording as expensive -- "generalising the existing do-while
-handler took Crazy Party from 17 gotos to 55". So they stay counted.
-What is new is that they are three problems rather than one, and named.
+handler took Crazy Party from 17 gotos to 55". So they stay counted until
+one is measured on all four titles that can be measured here.
+
+What is new is that neither is a mystery and neither is what it was
+written down as. One is a `return` miscounted as an exit; the other is a
+merge crossing nineteen switch boundaries. Both diagnoses came from
+reading the compiler and the bytecode after reading the output had
+produced a confident wrong answer twice -- which is this document's first
+rule, arrived at one level up from the format.
 
 ### Typing the promoted local took three tries, and the declaration wins
 
