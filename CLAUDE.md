@@ -383,7 +383,7 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | SBYW | tagged | 154 / 154 | 2,348 | ends exactly at EOF |
 | Super Egg Hunt | tagged | 10 / 10 | 141 | ends exactly at EOF |
 | Crazy Party | tagged | 550 / 550 | 4,486 | ends exactly at EOF |
-| Manamon 1 | len2 | 784 / 784 | — | **class blocks do not parse yet** |
+| Manamon 1 | len2 | 784 / 784 | 4,719 | ends exactly at EOF |
 
 Super Egg Hunt is the fifth, and the first picked up cold after all of the
 above: `bgt validate` passed it on every stage, byte-exact rewrite included,
@@ -496,94 +496,144 @@ Manamon 2 all still pass every stage, Manamon 2 with its 9,700 bodies.
 
 Do not assume a third title matches either of these two. Run `bgt validate`.
 
-### Manamon 1 is a third reader generation, and where to pick it up
+### Manamon 1 is a third reader generation, and the body is where it differs
 
 Manamon 1 (`VGStorm.com\Manamon\rpg.exe`, 2017-07-30) is BGT, overlay
-0xF9C00, stock seed 0x11, `len2`, 55 enums, **784 classes** -- the figure the
-benchmark this project was started against reported. It unpacks cleanly and
-its enums, class declarations and funcdefs all parse. **Its class blocks do
-not**, and it is not a variant of either model: it is `len2` strings with
-some of the older reader's record shapes and at least one difference that is
-neither.
+0xF9C00, stock seed 0x11, `len2`, 55 enums, **784 classes**. It parses end to
+end now: 784 / 784 class blocks, 4,719 bodies each decoding to exactly its
+declared instruction count, 0 parse errors, a tail landing exactly on EOF and
+a byte-exact rewrite. `bgt validate` passes it on every stage.
 
-Two differences are found and trialled (above): the zero-parameter list
-guard, and three fields per object variable instead of two. With both, the
-walk reaches 0x65A2 instead of stopping at 0x655C -- the constructor and
-factory of `elemental_node` parse and it dies in that class's methods:
+**Two of its counts are the benchmark's own.** The tool this project was
+started against reported 784 classes and 332 globals for this title, and the
+tail independently gives 784 and 332 -- numbers reached by a different reader
+from the same bytes. The rest: 7 funcdefs, 1,608 module functions, 822 global
+functions, 883 `usedTypes`, 808 `usedTypeIds`, 4,087 `usedFunctions`, 415
+`usedGlobalProps`, 7,802 `usedStringConstants`, 3,567 `usedObjectProps`.
+
+What it needed was **a third per-build field, and not the one that had been
+guessed at**: whether a funcType-1 body opens with a flags byte. It does not.
+`asCReader::ReadFunction` is `FUN_004216D0`, and for funcType 1 it calls
+`ReadByteCode` straight after the signature:
 
 ```
-elemental_node method 0   bad function tag 0x01 at 0x656B
-elemental_node method 2   bad function tag 0x01 at 0x6591
-then                      implausible count -50 at 0x65A2
+ReadByteCode                       FUN_004245E0 -- eu(instruction count) + instructions
+eu(variableSpace)
+eu(nObjVar)   nObjVar x { ReadTypeInfo, eu }     <- TWO fields
+if nObjVar > 0: eu(objVariablesOnHeap)
+eu(nObjInfo)  nObjInfo x { eu, eu, eu }          <- unconditional, not nested
+ReadData(&bits, 1)                               <- read-only / private
 ```
 
-That `-50` is the sign-flag guard doing its job: a negative count means the
-field being read is not the field it was taken for, and it says so instead of
-walking off quietly.
+No `flags & 0x04` "body omitted", no `flags & 0x08` gate on the object
+variables, no try/catch block, and the debug-info branch dead because
+`noDebugInfo` is 1. That is the **older** reader's body shape -- the one this
+file had as `tagged`'s -- carried by a `len2` module, with two fields per
+object variable where the older one writes three. So `legacy_body` is a
+per-build field like `template_namespace` and the zero-parameter list guard,
+trialled against the exact-EOF landing, and the object-variable field count
+travels with it rather than with the dialect.
 
-**Do not add a third trial dimension by guessing.** The three-field finding
-earned its place because it had a *known target* -- `elemental_node`'s
-factory record begins at 0x6559, so the constructor's body must consume
-exactly up to there, and of the sixteen combinations of the four fields the
-two readers differ on, only the four with three-field object variables land
-on it. Two fields stops a byte short or three bytes over. Without a target
-like that, each flag that happens to clear one record is the
-confident-plausible-wrong answer this file keeps paying for.
+### A known target BOTH readings satisfy is not a discriminator
 
-What the binary has already given, so none of it needs redoing:
+This is the expensive lesson of this title, and it is a correction to what
+this file said a moment ago. The earlier attempt had a *known target* --
+`elemental_node`'s constructor record must end exactly where the factory
+that follows it begins, 0x6559 -- and it reported that only three-field
+object variables land on it. That was true, and the conclusion was wrong:
+**the correct reading lands on 0x6559 as well.**
 
-- **`asCReader` is at 0x0041F210 - 0x00425C5A.** Nineteen sites reference the
-  `LoadByteCode` literal (file 0xD1C18, VA 0x004D2818), one per error path
-  inside the reader: 0x41F22C, 0x41F745, 0x41F9FF, 0x41FB64, 0x41FC77,
-  0x41FD06, 0x41FE26, 0x4200F2, 0x420172, 0x420213, 0x4202A6, 0x42040A,
-  0x420494, 0x420785, 0x422E91, 0x4230E5, 0x424F89, 0x425ADD, 0x425C5A.
-  Of those, `FUN_0041F290` (977 lines) is a type reader -- it calls
-  `FUN_004216D0`, this build's `ReadTypeInfo`. `FUN_00421F10` (817) and
-  `FUN_004250C0` (566) are the unread candidates for the function reader.
-- **`asBCInfo[]` is at file 0xC80DC, VA 0x004C8CDC**, and exactly one `.text`
-  site references it, at 0x00412C3A inside `FUN_00412C00` -- so instruction
-  sizes during the body read come from somewhere else in this build.
-- **There is no `_builtin_function_` literal at all.** BGT 1.3 carries it at
-  0x108138; Manamon 1 carries neither it nor `builtin_function`. That is why
-  `--string _builtin_function_` returns no functions here, and it is also the
-  cleanest evidence that this is a different AngelScript generation rather
-  than a build with one field moved.
+The two differ by one byte at the *start* of the body, and the object
+variables give it back at the end:
 
-**The functions are named now, which is the expensive part of reading a
-stripped reader.** Identified from the stub, each by evidence rather than
-position:
+| | flagged + three fields | legacy + two fields |
+|---|---|---|
+| 0x6537 | flags byte 0x09 | instruction count 9 |
+| 0x6538 | instruction count 9 | first opcode |
+| objvar | `{typeinfo, eu, eu}` | `{typeinfo, eu}` |
+| ends | 0x6559 | 0x6559 |
+
+0x6537 and 0x6538 both hold 0x09, which is what makes the two readings
+indistinguishable at that record. A one-byte shift through nine instructions
+produces nine *different* instructions, and both decoded without complaint --
+`PopPtr ; STOREOBJ ; PshVPtr ; PshVPtr ; ADDSi ; REFCPY ; PopPtr ; FREE ;
+RET` for the wrong one.
+
+**The factory is what separates them**, and only because its bytecode has a
+shape worth recognising. Legacy decodes it as
+
+```
+PSF 1 ; ALLOC 1, 2 ; LOADOBJ 1 ; RET 0
+```
+
+which is what a default factory stub *is* -- make space, allocate, move the
+handle out of the object register, return -- and lands within a byte of the
+next record. Flagged decodes four instructions that are not a factory and
+overshoot it. So the discriminator was never the offset; it was reading the
+instructions and asking whether they are the function.
+
+The rule that survives is narrower than "have a known target": a target only
+discriminates if the candidates **disagree** about it. Check that they do
+before counting a landing as evidence, and prefer the reader.
+
+### The reader, read -- what each function is and how it was identified
+
+Nineteen sites reference the `LoadByteCode` literal (file 0xD1C18, VA
+0x004D2818), one per error path inside `asCReader` (0x0041F210 - 0x00425C5A):
+0x41F22C, 0x41F745, 0x41F9FF, 0x41FB64, 0x41FC77, 0x41FD06, 0x41FE26,
+0x4200F2, 0x420172, 0x420213, 0x4202A6, 0x42040A, 0x420494, 0x420785,
+0x422E91, 0x4230E5, 0x424F89, 0x425ADD, 0x425C5A. Thirteen of them are in one
+function, which is the first thing worth knowing.
 
 | function | what it is | how it was identified |
 |---|---|---|
-| `FUN_0041F210` | `asCReader::Error` | formats the `LoadByteCode` literal at VA 0x004D2818, calls the message virtual, sets a flag at `+0xD`, returns -1 |
-| `FUN_00423310` | **`ReadEncodedUInt64`** | tests `& 0x7F == 0x7F`, `& 0x7E`, `& 0x7C` for the 8/6/5-byte widths and lifts bit 7 out as the sign flag (`CONCAT13(b >> 7, ...) & 0xFF7FFFFF`), reading one byte per virtual call and counting them at `+0x10` |
-| `FUN_004216D0` | `ReadTypeInfo` | 42 call sites, and `FUN_0041F290` -- a type reader -- is built out of it |
+| `FUN_0041F210` | `asCReader::Error` | formats the `LoadByteCode` literal, calls the message virtual, sets the flag at `+0xD`, returns -1 |
+| `FUN_00423310` | **`ReadEncodedUInt64`** | tests `& 0x7F`, `& 0x7E`, `& 0x7C` for the 8/6/5-byte widths and lifts bit 7 out as the sign flag, reading one byte per virtual call and counting them at `+0x10` |
+| `FUN_004232E0` | `ReadEncodedUInt` | `ReadEncodedUInt64` plus the "high dword must be 0 or -1" check -- the 32-bit wrapper every count goes through |
+| `FUN_0041F290` | **`ReadInner`** | `ReadData(&noDebugInfo, 1)`, then a count and a loop that reads each enum phase 1 and phase 2; 13 of the 19 error paths |
+| `FUN_00421F10` | **`ReadTypeDeclaration`** | takes a phase argument and branches on `== 1`; phase 1 reads name, a 4-byte flags field, `eu(size)` and the namespace |
+| `FUN_004216D0` | **`ReadFunction`** | `ReadData(&c,1)`; `'\0'` returns null, `'r'` reads an index into `savedFunctions` at `+0x78`, otherwise allocates, pushes, and calls the signature reader |
+| `FUN_004211E0` | **`ReadFunctionSignature`** | name, `$dlgte` shortcut, return type, parameters, in/out flags, funcType, defaults, owner, traits byte, namespace -- in that order |
+| `FUN_004245E0` | **`ReadByteCode`** | `eu(count)` then a loop decrementing it once per opcode byte, stepping by `asBCTypeSize[asBCInfo[op].type]` |
+| `FUN_00423B90` | **`ReadTypeInfo`** | reads a tag char; `'a'` reads the template name **and a namespace** then `eu(numSubTypes)` |
+| `FUN_00423680` | `ReadString` | the `len2` codec, reading into an `asCString` |
+| `FUN_00423970` | `ReadDataType` | the only other thing a signature reads per parameter |
+| `FUN_00424E80` | `ReadUsedObjectProps` | `ReadTypeInfo` then a **property name** matched against the owner's table -- which is the independent confirmation of the `usedObjectProps` finding above |
+| `FUN_004250C0` | `TranslateFunction` | walks the decoded bytecode switching on opcode numbers -- 0x40 `ALLOC`, 0xB8/0xB9, 200 `Thiscall1` |
 | `FUN_0040A530` | `asCArray::PushLast` | grows by doubling, falls back to an inline buffer at `+0xC` |
-| `FUN_0041AEF0` | a map insert | binary tree walk keyed on `param_1[4]` |
-| `FUN_00412C00` | a bytecode walker | steps by `asBCTypeSize[asBCInfo[op].type]`, which also confirms `asBCInfo` entries are **16 bytes with `.type` at +8** |
 
-`ReadEncodedUInt64` is the one that matters: **87 call sites across the
-reader**, one per field read, so the field order of any record can be read
-off the call sequence instead of guessed at from bytes. `FUN_00421F10`
-(817 lines) and `FUN_004250C0` (566) are the remaining candidates for the
-function reader and are still unread.
+Two of those entries are corrections. `FUN_004216D0` was recorded here as
+`ReadTypeInfo` on the strength of its 42 call sites; it is `ReadFunction`,
+and the count fits that better -- five sites in `ReadTypeDeclaration`
+(destructor, constructor, factory, method, virtual) and the rest across the
+tail sections. And `FUN_0041F290` was "a type reader built out of it", which
+is backwards: it is `ReadInner`, the top of the whole parse.
 
-What the bytes say so far, for cross-checking that read rather than
-replacing it. `elemental_node`'s **factory** record at 0x6559 parses as
-name, data_type (`elemental_node@`), `nparams = 0`, `inOutFlags = 0`,
-`funcType = 1`, `defaults = 0`, owner `None` -- and then this reader takes
-the next byte as a **namespace string**, reads the one after as a body
-flags byte of 0x04 ("body omitted"), and stops at 0x656A, twenty-two bytes
-short of the next record at 0x657E. A factory is a script function with a
-body, so the namespace read is the misstep; which field really sits there
-is what the call sequence will say.
+`ReadEncodedUInt64`'s **87 call sites** remain the reason this is cheap: one
+per field read, so a record's field order comes off the call sequence instead
+of off the bytes.
 
-**Do not settle it by scanning.** Both obvious readings of those bytes
-decode to *something*: with the flags byte at 0x6568 the body is four
-instructions ending 0x6582, with it at 0x6569 four ending 0x6583, and both
-run past the next record. `ALLOC` (opcode 64) and `RET` (10) both appear in
-the span, so a scan looking for a factory's shape finds candidates and
-none of them lands. This is the 92%-parse-rate lesson in miniature.
+### Two more things the binary settled
+
+**`asBCInfo[]` is in this executable twice**, at VA 0x004C8CDC (file 0xC80DC)
+and at VA 0x004CA38C (file 0xC978C), 363 entries apart and otherwise
+identical -- only the stray pointer in entry 0's name field differs
+(`if_handle_then_const` against `$dlgte`, the literal each copy happens to
+sit after). `ReadByteCode` uses the second; `bgt opcodes` finds the first.
+That is harmless, and it is worth knowing before concluding that a table
+reached through the code is a different table: `asBCTypeSize` at VA
+0x004CB390 is `[0, 1, 1, 1, 2, 2, 3, 3, 2, 3, 2, 1, 2, 3]`, and both copies
+index it the same way.
+
+**The table is 203 entries where BGT 1.3's is 200**, and the three extra say
+which direction this fork went: `Thiscall1` at 200, and the compiler's own
+pseudo-instructions `VarDecl` at 251 and `ObjInfo` at 253. Every opcode 0-199
+matches 1.3's numbering and name exactly, which is what lets the same
+decompiler read both.
+
+**There is no `_builtin_function_` literal at all.** BGT 1.3 carries it at
+0x108138; Manamon 1 carries neither it nor `builtin_function`, which is why
+`--string _builtin_function_` returns no functions here.
 
 Two things about the Ghidra run itself, both of which cost time:
 
@@ -1454,6 +1504,7 @@ checks say:
 | Paladin of the Sky | 27,340 | 0 | 0 | yes | 7,110 | **compiled cleanly** |
 | Psycho Strike | 27,468 | 2 | 0 | yes | 6,443 | 34, every one the engine's but the 2 gotos |
 | Crazy Party | 192,485 | 14 | 0 | yes | 90,074 | 14, every one a residual `goto` |
+| Manamon 1 | 91,310 | 0 | 0 | yes | 26,553 | see below |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Every number above was re-measured, and several of them moved a long
@@ -1463,6 +1514,15 @@ seven thousand high. Nothing regressed to cause that -- the figures had
 simply outlived their run, across the borrowed-handle fix and six others,
 and a stale number in this file is worse than no number because it reads as
 a baseline. Re-derive before quoting.
+
+**Manamon 1 joins the table**, and two of its figures are the benchmark
+this project was started against: 784 classes and 332 globals, reached here
+by a different reader from the same bytes, and 4,909 bodies, which is the
+number that benchmark reported as "script functions". It recovers to 806
+files with **0 residual gotos**, a verified split, 0 unmodelled opcodes and
+26,553 calls read back against its own runtime. **2 bodies are given up on
+and counted**, and five `__nvgt_global_init_N` callees are reported as
+declared nowhere -- both are open and neither is a parse failure.
 
 **And two titles can no longer be measured the same way.** Psycho Strike's
 and Manamon 2's own runtimes are not on this machine, so their modules were
@@ -2455,7 +2515,7 @@ found by reading what it said rather than by inspection:
   `_drop_unreachable` deletes the statements that follow a `return` in a
   block, because BGT reports warnings in a modal dialog and waits on it. Its
   pattern's word boundaries were replaced by literal **backspace bytes** when
-  it was edited -- `` eaten by a shell -- which matches nothing, so
+  it was edited -- a `\b` eaten by a shell -- which matches nothing, so
   `return` and `goto` silently stopped terminating a block while `break;` and
   `continue;` went on working. Output stayed valid and two "Unreachable code"
   warnings per title looked like something the compiler had a right to say.
@@ -3790,6 +3850,7 @@ modules rather than asserted, and it is now a stage in `bgt validate`:
 | Psycho Strike | 509,207 B | 236,348 | byte-exact |
 | Paladin of the Sky | 631,015 B | 227,236 | byte-exact |
 | Manamon 2 | 4,736,046 B | 2,247,023 | byte-exact |
+| Manamon 1 | 2,415,727 B | 1,117,547 | byte-exact |
 
 **This lifts the equal-length restriction.** The format stores no absolute
 offsets anywhere -- everything is counted, length-prefixed or index-referenced --
@@ -3805,7 +3866,7 @@ Verified end to end: `sounds.dat` → `my_custom_sounds.dat` grows the module by
 bytes, the edited module still parses to EOF with 68/68 class blocks, the
 repacked executable round-trips, and `bgt validate` passes it on every stage.
 
-Two details that make this work rather than merely appear to:
+Three details that make this work rather than merely appear to:
 
 - **The encoder must stop short of the next width's marker.** Each form of the
   encoded integer gives up one more bit to the marker above it, so reading
@@ -3815,6 +3876,17 @@ Two details that make this work rather than merely appear to:
 - **The instruction count is recomputed, not copied.** It counts instructions,
   not dwords, and recomputing it from the instructions actually present is what
   lets one be inserted or removed.
+- **The tracer has to re-read under the assumptions `summarize` settled on.**
+  `trace_module` calls `summarize` to find out whether the parse reaches EOF,
+  and then builds its own `Reader` -- and it was passing only
+  `template_namespace` of the per-build fields, so the second read used the
+  defaults for the rest. That was latent for as long as the trialled fields
+  happened to be the defaults on every title that had been traced, and it
+  surfaced the moment one was not: Manamon 1 needs `unguarded_lists` and
+  `legacy_body`, and without them the trace raises rather than writing a
+  truncated module. Loud, because the tracer refuses a parse that does not
+  reach EOF -- but a *third* reading of one format is the shape this file
+  keeps warning about, and here two of them disagreed.
 
 What this does **not** do is check that an edit makes sense. Renaming a string is
 safe; changing an instruction to one with a different stack effect, or pointing a

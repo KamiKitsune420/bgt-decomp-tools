@@ -102,7 +102,8 @@ class Reader:
                  opcodes: Optional[Dict[int, Dict[str, Any]]] = None,
                  template_namespace: bool = True,
                  unguarded_lists: bool = False,
-                 objvar_three: bool = False) -> None:
+                 objvar_three: bool = False,
+                 legacy_body: Optional[bool] = None) -> None:
         self.d = data
         self.dialect = dialect
         self.p = pos
@@ -140,20 +141,43 @@ class Reader:
         # Manamon 2's twenty-seven all take at least one.
         self.unguarded_lists = unguarded_lists
         # Whether a funcType-1 body records THREE fields per object variable
-        # (`{typeinfo, eu, eu}`) or two. The dialect table has this as the
-        # older reader's shape against the newer one's, and Manamon 1 breaks
-        # that too: `len2` strings with three-field object variables.
-        #
-        # `elemental_node`'s constructor is what pins it. Its record starts
-        # at 0x652A and the factory that follows -- same back-referenced
-        # name -- begins at 0x6559, so the body has to consume exactly up to
-        # there. Of the sixteen combinations of the four fields the two
-        # readers differ on, the only ones that land on 0x6559 are the four
-        # with three-field object variables; two fields stops a byte short
-        # or three bytes over. That is a known target rather than a guess,
-        # and the module-wide trial then has 784 class blocks and an exact
-        # EOF landing to confirm it against.
+        # (`{typeinfo, eu, eu}`) or two. The older reader writes three and
+        # Manamon 1's writes two, so it travels with `legacy_body` below
+        # rather than with the dialect -- and it is settled the same way,
+        # by the exact-EOF landing.
         self.objvar_three = objvar_three
+        # Whether a funcType-1 body opens with a FLAGS BYTE or goes straight
+        # to the bytecode.
+        #
+        # This used to hang off the dialect, and Manamon 1 disproved that the
+        # way every other field in this list was disproved: it is `len2`
+        # and its bodies have no flags byte. Read out of its own reader
+        # (`asCReader::ReadFunction`, FUN_004216D0 in rpg.exe) rather than
+        # fitted to the bytes -- for funcType 1 it calls ReadByteCode
+        # immediately after the signature, then:
+        #
+        #     eu(variableSpace)
+        #     eu(nObjVar)   nObjVar x { ReadTypeInfo, eu }   <- TWO fields
+        #     if nObjVar > 0: eu(objVariablesOnHeap)
+        #     eu(nObjInfo)  nObjInfo x { eu, eu, eu }
+        #     ReadData(&bits, 1)            <- read-only / private
+        #
+        # with no `flags & 0x08` gate on the object variables, no try/catch
+        # block, and the debug-info branch dead because noDebugInfo is 1.
+        #
+        # Guessing it from the bytes would have got this wrong, and nearly
+        # did. `elemental_node`'s constructor record ends exactly on the
+        # factory that follows it (0x6559) under BOTH readings: flagged with
+        # three-field object variables, and legacy with two. The flags byte
+        # the first one consumes is 0x09 and the instruction count it then
+        # reads is also 9, so the two differ by a one-byte shift at the
+        # start of the body that three-field object variables give back at
+        # the end. The factory is what tells them apart: legacy decodes it
+        # as `PSF 1 ; ALLOC 1,2 ; LOADOBJ 1 ; RET 0`, which is what a
+        # factory stub is, and flagged decodes four instructions that are
+        # not one and overshoot the next record.
+        self.legacy_body = (dialect == TAGGED if legacy_body is None
+                            else legacy_body)
         self.saved: List[bytes] = []          # savedStrings
         self.types: List[Any] = []            # savedDataTypes
         self.functions: List[Any] = []        # savedFunctions
@@ -491,25 +515,31 @@ class Reader:
                 "funcType": func_type, "owner": owner, "namespace": ns,
                 "inOut": inout, "defaults": defaults, "traits": traits}
 
-    def _script_body_tagged(self, rec: Dict[str, Any]) -> None:
-        """The older reader's funcType-1 body (strike.exe 0x0041E2A0).
+    def _script_body_legacy(self, rec: Dict[str, Any]) -> None:
+        """A funcType-1 body with no flags byte.
+
+        strike.exe 0x0041E2A0 for the older reader, and rpg.exe (Manamon 1)
+        0x004216D0 -- which is `len2`, so this is not the dialect.
 
         Structurally different from the newer one, not just differently encoded:
 
             <bytecode>                      <- NO leading flags byte
             eu(stackNeeded)
             eu(nObjVar)
-            nObjVar x { typeinfo, eu, eu }  <- THREE fields, not two
+            nObjVar x { typeinfo, eu [, eu] }   <- three fields, or two
             if nObjVar > 0: eu(objVariablesOnHeap)
             eu(nObjInfo)                    <- unconditional, not nested
             nObjInfo x { eu, eu, eu }
             if noDebugInfo == 0: <debug info>
 
         The newer build gates all of this behind a flags byte (0x04 body omitted,
-        0x08 object variables present, 0x10 try/catch present). The older build
-        has no such byte and no try/catch block at all -- so reading a flags byte
+        0x08 object variables present, 0x10 try/catch present). This one has no
+        such byte and no try/catch block at all -- so reading a flags byte
         here consumes the first byte of the instruction count, and every count
         after it is wrong.
+
+        The object-variable field count travels with this shape rather than with
+        the dialect: the older reader writes three, Manamon 1 writes two.
         """
         rec["instructions"], rec["body"] = self.bytecode()
         rec["stackNeeded"] = self.eu()
@@ -519,7 +549,9 @@ class Reader:
             raise ParseError("implausible object-variable count %d" % nobj)
         objvars = []
         for _ in range(nobj):
-            objvars.append((self.type_info(), self.eu(), self.eu()))
+            ti = self.type_info()
+            objvars.append((ti, self.eu(), self.eu()) if self.objvar_three
+                           else (ti, self.eu()))
         rec["objVars"] = objvars
         if nobj > 0:
             self.eu()                            # objVariablesOnHeap
@@ -553,8 +585,8 @@ class Reader:
         rec.update(self.function_signature())
         ft = rec["funcType"]
 
-        if ft == 1 and self.dialect == TAGGED:
-            self._script_body_tagged(rec)
+        if ft == 1 and self.legacy_body:
+            self._script_body_legacy(rec)
         elif ft == 1:                            # a script function
             flags = self.raw(1)[0]
             rec["flags"] = flags
@@ -1119,12 +1151,14 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
           opcodes: Optional[Dict[int, Dict[str, Any]]],
           template_namespace: bool,
           unguarded_lists: bool = False,
-          objvar_three: bool = False) -> Dict[str, Any]:
+          objvar_three: bool = False,
+          legacy_body: Optional[bool] = None) -> Dict[str, Any]:
     """One full pass over a module under one set of build assumptions."""
     r = Reader(data, dialect, start, opcodes=opcodes,
                template_namespace=template_namespace,
                unguarded_lists=unguarded_lists,
-               objvar_three=objvar_three)
+               objvar_three=objvar_three,
+               legacy_body=legacy_body)
     classes, declared = [], None
     funcdefs, funcdefs_declared = [], None
     enums: List[Dict[str, Any]] = []
@@ -1162,7 +1196,8 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
             "parse_errors": r.parse_errors, "end": r.p,
             "template_namespace": template_namespace,
             "unguarded_lists": unguarded_lists,
-            "objvar_three": objvar_three}
+            "objvar_three": objvar_three,
+            "legacy_body": r.legacy_body}
 
 
 def _score(w: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1194,7 +1229,10 @@ def trace_module(path: str,
                info["tail_error"] or "tail not reached"))
 
     r = Reader(data, dialect, start, opcodes=opcodes,
-               template_namespace=info["template_namespace"])
+               template_namespace=info["template_namespace"],
+               unguarded_lists=info["unguarded_lists"],
+               objvar_three=info["objvar_three"],
+               legacy_body=info["legacy_body"])
     r.trace = [("raw", data[:start])]          # the header detect() stepped over
     for _ in range(len(enums)):
         r.enum()
@@ -1229,14 +1267,21 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
     # under the assumptions this reader already held keeps them: adding the
     # second field must not silently re-describe the four titles that were
     # already landing on EOF.
+    # The body shape is tried in the order that puts each dialect's known
+    # answer first, so adding the dimension cannot silently re-describe a
+    # module that was already landing on EOF.
+    legacy_first = dialect == TAGGED
     walk = None
     for namespaced in (True, False):
         for unguarded in (False, True):
             for three in (False, True):
-                trial = _walk(data, dialect, start, len(enums), opcodes,
-                              namespaced, unguarded, three)
-                if walk is None or _score(trial) > _score(walk):
-                    walk = trial
+                for legacy in (legacy_first, not legacy_first):
+                    trial = _walk(data, dialect, start, len(enums), opcodes,
+                                  namespaced, unguarded, three, legacy)
+                    if walk is None or _score(trial) > _score(walk):
+                        walk = trial
+                    if walk["tail"]:
+                        break
                 if walk["tail"]:
                     break
             if walk["tail"]:
@@ -1254,6 +1299,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "tail": walk["tail"], "tail_error": walk["tail_error"],
             "template_namespace": walk["template_namespace"],
             "unguarded_lists": walk["unguarded_lists"],
+            "legacy_body": walk["legacy_body"],
             "objvar_three": walk["objvar_three"],
             "parse_errors": walk["parse_errors"],
             "end": walk["end"]}

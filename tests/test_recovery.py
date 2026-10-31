@@ -678,13 +678,19 @@ def test_no_source_file_holds_an_escape_a_shell_ate():
 
     Neither failed a test, because a pattern that matches nothing just makes
     its branch dead. So the bytes are what get checked.
+
+    Three times, in fact. The scan covered the code and not CLAUDE.md -- and
+    the sentence in CLAUDE.md that documents this bug was itself carrying a
+    literal 0x08 where it meant to show a `\b`, committed and unreadable. A
+    prose file cannot have a dead branch, so the cost is only a line nobody
+    can read; it is also the one file here whose whole job is to be read.
     """
     import glob
 
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     allowed = {9, 10, 13}            # tab, LF, CR
     offenders = []
-    for pattern in ("tools/**/*.py", "tests/**/*.py"):
+    for pattern in ("tools/**/*.py", "tests/**/*.py", "*.md", "docs/*.md"):
         for path in glob.glob(os.path.join(root, pattern), recursive=True):
             data = open(path, "rb").read()
             for index, byte in enumerate(data):
