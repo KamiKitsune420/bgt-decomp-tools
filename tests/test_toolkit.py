@@ -2052,22 +2052,66 @@ def test_libcheck_sees_a_method_called_on_an_indexed_receiver():
     assert bgt_libcheck.calls("f(x).m();") == ["f", "m"]
 
 
+def test_libcheck_does_not_read_a_declaration_as_a_call():
+    """`bullet b1(x, y);` names a type and then a variable, which reads
+    exactly like a call to `b1`. `bgt_apicheck` already refuses that -- a
+    declaration has a *type* before the name -- and this checker did not,
+    so every one of a game's `spawn_*` helpers scored 0.50 against its own
+    source for a call it does not make.
+
+    Found against a whole game's original source rather than by inspection,
+    which is also what caught the first fix being too eager: this author
+    writes AngelScript's word operators, so `key_down(A) or key_down(B)`
+    put `or` where the type goes and SUPPRESSED the second call. A rule
+    that drops a call it should keep is the dangerous direction here, so
+    the word operators are pinned alongside the shape they broke.
+    """
+    # The shape being excluded.
+    assert bgt_libcheck.calls("bullet b1(x, y);") == []
+    assert bgt_libcheck.calls("timer d;") == []
+    assert bgt_libcheck.calls("array<int> v(3);") == []
+    assert bgt_libcheck.calls("obj@ h(1);") == []
+    assert bgt_libcheck.calls("sound_pool@[] p(4);") == []
+    # ...and the variable used afterwards is still a real receiver.
+    assert bgt_libcheck.calls("bullets.insert_last(b1);") == ["insert_last"]
+    # A word operator is not a type. Each of these lost its last call.
+    assert bgt_libcheck.calls("if (key_down(A) or key_down(B)) f();") == [
+        "key_down", "key_down", "f"]
+    assert bgt_libcheck.calls("if (a() and b()) {}") == ["a", "b"]
+    assert bgt_libcheck.calls("if (not f(x)) {}") == ["f"]
+    assert bgt_libcheck.calls("if (h is null or g(1)) {}") == ["g"]
+    # What already worked must keep working.
+    assert bgt_libcheck.calls("return f(1);") == ["f"]
+    assert bgt_libcheck.calls("else bar(1);") == ["bar"]
+    assert bgt_libcheck.calls("int n = add(1, 2);") == ["add"]
+    assert bgt_libcheck.calls("x = y(1) + z(2);") == ["y", "z"]
+    assert bgt_libcheck.calls("while (go(x)) { }") == ["go"]
+    assert bgt_libcheck.calls("for (i = 0; i < n(); i++) {}") == ["n"]
+    assert bgt_libcheck.calls("do { f(); } while (g());") == ["f", "g"]
+
+
 def test_libcheck_does_not_invent_a_call_from_a_subscript():
     """A subscript that merely precedes a paren names no callee.
 
     `events[i](this)` is a real call -- through a funcdef held in an array -- but
     it has no name, and reporting the array's name would be worse than reporting
-    nothing. A declaration is reported as a call to the declared name, which is
-    what the previous pattern did too: that behaviour is pinned here rather than
-    changed, because changing it would move the scores for a second reason and
-    neither side of the comparison could then be read.
+    nothing.
+
+    This test used to pin a declaration being reported as a call to the
+    declared name, on the stated grounds that changing it *would move the
+    scores for a second reason*. Measured, it does not: with the declaration
+    excluded, `bgt libcheck --decompiler` is unchanged on all three titles it
+    can score (43/47, 39/47, 144/149). So the deferral was paid rather than
+    kept, and the three declarations below are `[]` now --
+    `test_libcheck_does_not_read_a_declaration_as_a_call` is where that
+    shape lives.
     """
     assert bgt_libcheck.calls("events[i](this);") == []
     assert bgt_libcheck.calls("a[i](x);") == []
     assert bgt_libcheck.calls("v = a[i] * (b + c);") == []
-    assert bgt_libcheck.calls("string serialize(dictionary@ d)") == ["serialize"]
-    assert bgt_libcheck.calls("interact@[] gi(5);") == ["gi"]
-    assert bgt_libcheck.calls("double[] d(256);") == ["d"]
+    assert bgt_libcheck.calls("string serialize(dictionary@ d)") == []
+    assert bgt_libcheck.calls("interact@[] gi(5);") == []
+    assert bgt_libcheck.calls("double[] d(256);") == []
 
 
 def test_libcheck_reads_functions_with_their_owning_class():

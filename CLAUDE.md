@@ -7455,6 +7455,116 @@ stopped a measurement for memory that session. What made progress instead
 was the thing this file keeps coming back to: a fixture whose answer is
 known, and the exact-EOF landing to judge it.
 
+# A whole game WITH its source, which is the strongest oracle yet
+
+`bgt libcheck` scores a recovery against BGT's shipped `include/*.bgt` --
+source nobody here wrote -- and reaches 47 to 155 functions of a title's
+hundreds. `bgt oracle` writes 52 shapes whose answer is known. Neither is
+a whole game, and the gap between them is where every bug reported from
+playing these games has lived.
+
+A game handed over **with its source** closes it. `rage room` is one: 48
+`.bgt` files, BGT 1.3, written by hand by a beginner, so its idiom is
+nobody's house style and nothing in this toolkit was tuned against it.
+`bgt libcheck --decompiler --include <its source>` compares every
+function that appears once on both sides:
+
+| | |
+|---|---|
+| functions compared | **292** |
+| call sequence identical | **272** |
+| call sequence close (>= 80%) | 6 |
+| call sequence differs | 14 |
+| string literals identical | **279** |
+
+and the recovery itself: 31 classes, 265 functions, 418 globals, 840
+bodies, **8,673 lines**, 0 unmodelled opcodes, 0 bodies given up on, 0
+unbalanced files, 0 dangling `else`, a verified split, and **2,376 calls
+read back** against the game's own runtime. **4 residual gotos, all 4
+dangling** -- the new check from the section above, on a title it had
+never seen.
+
+## The ground truth found the bug in the CHECKER, not in the recovery
+
+All 14 differences were one shape, and it was mine:
+
+```
+source:     bullet b1(x, y, dm, sp, r, hs, di);   <- a DECLARATION
+            bullets.insert_last(b1);
+recovered:  bullets.insert_last(bullet(arg0, arg1, ...));
+```
+
+`_CALL` matches an identifier that a `(` opens against, so `b1(` reads as
+a call to `b1`. **`bgt_apicheck` already refuses exactly that** -- *"a
+declaration is not a call ... what tells them apart is the token before
+the name: a declaration has a *type* there"* -- and this checker never got
+the rule. Two places answering one question with one of them weaker, which
+is the shape this file keeps recording; here the weaker one is the
+instrument, so it was **under-reporting its own blindness as a difference**
+in all twelve of that game's `spawn_*` helpers.
+
+On this title `bgt apicheck` declines **377** declarations by that rule,
+which is the measure of how much of one game's text the shape is.
+
+**And the first fix was too eager, which only the ground truth could
+say.** This author writes AngelScript's word operators:
+
+```
+if(key_down(KEY_LCONTROL) or key_down(KEY_RCONTROL)) return true;
+```
+
+The prefix before the second call ends `) or `, so `or` sat where the type
+goes and the call was **suppressed** -- on both sides, which is the
+dangerous direction for a checker: a call it cannot see is a call it cannot
+report as missing. `control_down`, `dlg_wait`, `dlg` and `mainmenu` each
+lost one that way, and the score went **272 -> 268**. The corpus could not
+have caught it: BGT's own library writes `||` throughout, so all three
+titles held at their exact figures while the rule was wrong.
+`and`, `or`, `not`, `xor`, `is`, `in`, `out`, `inout` and the three
+literals are in the exclusion now.
+
+**A deferral was paid rather than kept.** A test pinned the old behaviour
+deliberately, saying changing it *"would move the scores for a second
+reason and neither side of the comparison could then be read"*. Measured,
+it moves nothing: `bgt libcheck --decompiler` is **43/47, 39/47 and
+144/149** before and after, the lifter path **153/155** with 155/155
+literals, and the whole suite passes. The reason to defer was real and it
+expired, which is worth as much as the fix.
+
+## What is left is the other half, and the docstring already names it
+
+All 14 rows rose from 0.50 to **0.67** and every one now differs for one
+reason only -- a **constructor** on the recovered side:
+
+```
+  0.67  <global>::spawn_bullet     insert  source []  recovered ['bullet']
+  0.67  <global>::stun             insert  source []  recovered ['timer']
+```
+
+The source writes `timer stuntimer;` and the recovery writes
+`@local_1 = timer();`, so one side spells the construction as syntax and
+the other as a call. `_noise` is meant to drop exactly this -- it already
+excludes `name in TYPE_NAMES` -- and that set holds the engine's value
+types only, not the game's own classes. The module has them: every
+`owner::` of a function label is a script class, so `compare` can pass the
+set to `calls` and 12 of the 14 should close.
+
+It is **deliberately not done here**, for the reason the last deferral
+names: a name in that set is dropped from BOTH sides, so it makes the
+comparison weaker, and it would move three titles' scores in the same
+breath as a fix that was measured not to move them. One step at a time is
+what made the `or` regression visible at all.
+
+## And a recovery is not the game's source, which is the real headline
+
+272 of 292 is the first number in this project that compares a recovery
+against a **whole game's own code** rather than against a library, a
+fixture or itself. What the remaining distance is made of is now a
+question with a known answer available in one command, on a title whose
+every line can be read side by side -- which is what `bgt roundtrip` has
+been approximating with a rebuild. The two should agree, and checking that
+they do is the cheapest validation of the round trip there is.
+
 # Repacking
 
 `bgt_repack.py` runs the chain backwards: compress, wrap in the container header,

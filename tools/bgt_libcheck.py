@@ -106,6 +106,15 @@ OPERATOR_METHODS = frozenset(("opIndex", "opAssign", "opEquals", "opAdd",
 #: knowing anything about brackets, where a chain pattern taught to span `[...]`
 #: would have to stop at a nested `[` -- and would swallow a call written inside
 #: the subscript, because `finditer` resumes past whatever the match consumed.
+#: A declaration is not a call. `bullet b1(x, y);` names a type and then a
+#: variable, which reads exactly like a call to `b1` -- the false positive
+#: `bgt_apicheck` already refuses and this checker did not. What separates
+#: them is the token before the name: a declaration has a *type* there.
+_TYPE_BEFORE_NAME = re.compile(
+    r"(?:^|[;{})]|\n)\s*"
+    r"(?!(?:return|else|case|default|do|new|delete|const|and|or|not|xor|is|in|out|inout|true|false|null)\b)"
+    r"(?:const\s+)?[A-Za-z_][\w:]*(?:<[^<>;{}]*>)?(?:@|[\[\]])*@?[ \t]+$")
+
 _CALL = re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*\(")
 _STRING = re.compile(r'"((?:\\.|[^"\\])*)"')
 _FUNC_HEAD = re.compile(r"([A-Za-z_][\w@\[\]<>&:]*\s+)?(~?[A-Za-z_]\w*)\s*"
@@ -245,6 +254,8 @@ def calls(text: str) -> List[str]:
     for m in _CALL.finditer(text):
         name = m.group(1)
         if _noise(name):
+            continue
+        if _TYPE_BEFORE_NAME.search(text[:m.start()]):
             continue
         j, d = m.end(), 1
         while j < len(text) and d:
