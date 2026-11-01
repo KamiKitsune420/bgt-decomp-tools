@@ -1265,6 +1265,11 @@ recovered.
 
 # Source file names
 
+**Everything in this section is about a RELEASE build**, which is what
+the rest of this file assumed without saying so. BGT's `-c` keeps the
+debug information and its `-C` strips it, and a shipped game can be
+either -- see **A debug build keeps the names** below, where one is.
+
 **The game's own file names are not recoverable, and nothing will change that.**
 They live only in AngelScript's debug information -- each function's script
 section -- and BGT always strips it. NVGT strips it too in release builds
@@ -7348,6 +7353,107 @@ recording because it is this file's own signature: its condition reads
 operands of a short-circuit chain, which is the `use_screen_reader`
 collapse. Structuring the loop does not fix that, and fixing that does
 not structure the loop.
+
+# A debug build keeps the names, and one shipped game is one
+
+This file says in two places that a game's own file names and its local
+variable names are "stripped and unrecoverable", on the grounds that
+"BGT compiles with `noDebugInfo = 1`". **That is true of `-C` and false
+of `-c`**, and the installer registers both: `compile_release` passes
+`-C` and `compile_debug` passes `-c`.
+
+Checked by compiling a script of my own both ways -- the module's first
+byte is `noDebugInfo`, and a `-c` build writes 0 there. So the question
+was never whether BGT can keep debug information; it is which switch the
+author used.
+
+**`screamingStrike_en.exe` (Nyanchan, 2013) was shipped `-c`.** A 790 KB
+executable, stock seed, 394 registered names -- a BGT between 1.0's 240
+and 1.3's 432, so a new version for this corpus as well. Its module
+holds:
+
+```
+D:\My Documents\screamingSstrike\screamingStrike_en.bgt   the source path
+i, temp, point, lostLife                                    LOCAL names
+itemComingTime, killedCount, lives, enemyCount              globals
+```
+
+**Why that is worth more than another test title.** The question this
+toolkit cannot answer is *did the source NAME this slot, or is it the
+compiler's scratch?* -- `_reused_object_slot` counts construction sites
+for it, `copy_binds` watches for a copy idiom, the declaration-order rule
+reads a synthesised list, and `slot_types` infers a type from the opcodes
+that touch a slot. Every one of those is a guess at something a debug
+module records outright. A `-c` build of a script written here is a
+known-answer fixture for all of them, and a shipped `-c` game is the
+same thing on code nobody here wrote.
+
+## What it took to get a debug module to parse, and where it stops
+
+Two things, and the first was my own shortcut coming back.
+
+**`detect` could not identify a module with no classes.** Its confidence
+comes from the class section landing whole, and this game is a
+single-file 2013 game: 0 enums, **0 classes**, 0 funcdefs, 51 globals. Its
+head reads perfectly by hand and `detect` refused it outright. I had met
+this hole earlier the same day building an oracle fixture and the note I
+wrote says *"a probe module of only an enum plus global functions fails
+dialect detection -- fixed by giving the probe a class"*. I worked around
+it instead of fixing it, and a shipped game walked into it.
+
+The fallback is the format's own strongest check, which `summarize`
+already ranks by one level up: parse the whole module and see whether the
+tail lands **exactly** on EOF. It fires only when no candidate found a
+single class, so no title that was already being identified can be
+re-described by it.
+
+**And the first version of that fallback could never have worked**, which
+is worth recording: `_walk` only attempts the tail when it has an opcode
+table, because a class block holds bytecode, and the fallback passed
+`None`. It reported "no candidate lands on EOF" for every module by
+construction. `detect` takes the table now.
+
+**Then the function record needs its debug block.** It goes exactly where
+this reader carried the comment `# debug info follows only when
+noDebugInfo == 0, and BGT always strips it` -- between `objInfo` and the
+trailing traits byte. The order is the one `nvgt/asreader.py` already
+reads for the newer generation, which was written from AngelScript's
+published source: line numbers, then the script sections as alternating
+index and string, then the variables with a name each, then the script
+section, the declaration position and the parameter names.
+
+Parameters are variables there, which a known-answer fixture shows at
+once: `int add_two(int left, int right)` with locals `total` and
+`doubled` writes **four** names in one list, in that order.
+
+**It is not finished.** Both debug modules get further and neither lands
+on EOF yet:
+
+| module | stops at | saying |
+|---|---|---|
+| my 744-byte probe | 0x2D5 | `implausible count 33554433` |
+| `screamingStrike_en` | 0x1A | `bad string tag 0x01` |
+
+The probe is the one to finish on, because its source is known: it reads
+both globals and both functions and stops near the end, so the remaining
+error is in one of the last fields rather than in the shape. Screaming
+Strike stops at 0x1A, inside the first global's init function, which is
+the same block seen earlier.
+
+**Nothing here changes a release build.** The debug block returns
+immediately when `noDebugInfo` is 1, the `detect` fallback needs a module
+with no classes at all, and Super Egg Hunt recovers to the same 5,294
+lines, 0 residual gotos, verified split and 1,608 calls read back as
+before.
+
+**And Ghidra was tried first and did not help**, as it did not on Crazy
+Party. This build has no `LoadByteCode` literal to anchor on; it does have
+`_builtin_function_`, so that was the anchor, and the import died with
+`OutOfMemoryError: Java heap space` in `X86Analyzer` at the 4G this file
+records as sufficient for `bgt.exe` -- on a machine that had already
+stopped a measurement for memory that session. What made progress instead
+was the thing this file keeps coming back to: a fixture whose answer is
+known, and the exact-EOF landing to judge it.
 
 # Repacking
 

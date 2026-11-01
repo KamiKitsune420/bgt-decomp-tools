@@ -107,6 +107,14 @@ class Reader:
         self.d = data
         self.dialect = dialect
         self.p = pos
+        # **Whether this module kept its debug information**, which is the
+        # module's own first byte: 0 means it did. This file said for a long
+        # time that "BGT compiles with noDebugInfo = 1" and that a game's own
+        # file names and local variable names are gone for good. That is true
+        # of a RELEASE build (`-C`) and false of a DEBUG one (`-c`) -- and
+        # `screamingStrike_en`, a shipped 2013 game, was built with `-c`. Its
+        # module carries the source path and every parameter and local name.
+        self.debug_info = bool(data) and data[0] == 0
         # Whether ReadTypeInfo's 'a' (template) form carries a namespace string
         # after the name. It does in Psycho Strike and Manamon 2 and does NOT in
         # Paladin of the Sky -- three builds, two answers, so this is a per-build
@@ -560,7 +568,7 @@ class Reader:
         if not 0 <= ninfo <= 1 << 18:
             raise ParseError("implausible object-info count %d" % ninfo)
         rec["objInfo"] = [(self.eu(), self.eu(), self.eu()) for _ in range(ninfo)]
-        # debug info follows only when noDebugInfo == 0, and BGT always strips it
+        self.debug_block(rec)
 
         # ...and then ONE trailing traits byte (bit 0 read-only, bit 1 private),
         # read unconditionally and *outside* the debug-info block. The 2/3/4
@@ -568,6 +576,64 @@ class Reader:
         # exactly one byte short, which puts the factory record that follows one
         # byte out and takes the whole class block with it.
         rec["traits"] = self.raw(1)[0]
+
+    def debug_block(self, rec: Dict[str, Any]) -> None:
+        """What a DEBUG build writes after a function body, and nothing else.
+
+        This reader carried `# debug info follows only when noDebugInfo == 0,
+        and BGT always strips it` here, and the second half is wrong: BGT's
+        `-C` strips it and its `-c` does not. `screamingStrike_en` is a
+        shipped 2013 game compiled with `-c`, so its module holds the source
+        path, every parameter name and every local name -- the information
+        this file says is "stripped and unrecoverable", which is true only of
+        a release build.
+
+        The order is the one `nvgt/asreader.py` already reads for the newer
+        generation, which was written from AngelScript's published source, so
+        this is the same reader family rather than a guess -- and the proof it
+        is right is the one this format gives: the tail has to land EXACTLY on
+        EOF, and nothing follows `usedObjectProps` to absorb a mistake.
+
+        Parameters are variables here, which is why a two-parameter function
+        with two locals reports four: `add_two(int left, int right)` with
+        `total` and `doubled` writes all four names in one list.
+        """
+        if not self.debug_info:
+            return
+        count = self.eu()
+        if not 0 <= count <= 1 << 20:
+            raise ParseError("implausible line-number count %d" % count)
+        rec["lineNumbers"] = [self.eu() for _ in range(count)]
+
+        count = self.eu()
+        if not 0 <= count <= 1 << 16:
+            raise ParseError("implausible section count %d" % count)
+        sections = []
+        for i in range(count):
+            sections.append(self.eu() if i % 2 == 0 else self.string())
+        rec["sections"] = sections
+
+        count = self.eu()
+        if not 0 <= count <= 1 << 16:
+            raise ParseError("implausible variable count %d" % count)
+        variables = []
+        for _ in range(count):
+            declared_at = self.eu()
+            name = self.string()
+            raw = self.eu()
+            variables.append({"declared_at": declared_at, "name": name,
+                              "on_heap": bool(raw & 1),
+                              "stack_offset": raw >> 1,
+                              "type": self.data_type()})
+        rec["variables"] = variables
+
+        rec["scriptSection"] = self.string()
+        rec["declaredAt"] = self.eu()
+        count = self.eu()
+        if count > len(rec.get("params") or ()):
+            raise ParseError("parameter-name count %d exceeds the %d parameters"
+                             % (count, len(rec.get("params") or ())))
+        rec["paramNames"] = [self.string() for _ in range(count)]
 
     def function(self) -> Optional[Dict[str, Any]]:
         """asCReader::ReadFunction. Returns None for the 'no function' marker."""
@@ -1007,7 +1073,9 @@ def _probe_classes(data: bytes, dialect: str, start: int,
     return (1 if parsed and parsed == declared else 0, parsed, r.p)
 
 
-def detect(data: bytes) -> Tuple[str, int, List[Dict[str, Any]]]:
+def detect(data: bytes,
+           opcodes: Optional[Dict[int, Dict[str, Any]]] = None
+           ) -> Tuple[str, int, List[Dict[str, Any]]]:
     """Return (dialect, start_offset, enums).
 
     The head is `eu(noDebugInfo)` then `eu(enumCount)`, so the enums start at a
@@ -1047,9 +1115,43 @@ def detect(data: bytes) -> Tuple[str, int, List[Dict[str, Any]]]:
         score = _probe_classes(data, dialect, start, enums) + (len(enums),)
         if best_score is None or score > best_score:
             best, best_score = (dialect, start, enums), score
-    if best is None or best_score[1] == 0:
-        raise ParseError("neither dialect parses a coherent module head")
-    return best
+    if best is not None and best_score[1]:
+        return best
+
+    # **A module can declare no classes at all, and then the class section
+    # cannot be the judge of anything.** `screamingStrike_en` is one: a
+    # single-file 2013 game with 51 globals, 0 enums, 0 classes and 0
+    # funcdefs, whose head reads perfectly by hand and which this refused
+    # outright.
+    #
+    # The fallback is the format's own strongest check, which is what
+    # `summarize` already ranks by one level up: parse the whole module and
+    # see whether the tail lands EXACTLY on EOF. Nothing follows
+    # `usedObjectProps`, so only the right dialect can land there, and a
+    # wrong one has nothing to absorb its mistake.
+    #
+    # It fires only when no candidate found a single class, so no title that
+    # was already being identified can be re-described by it.
+    # The tail is only reached with an opcode table, because a class block
+    # holds bytecode -- so without one there is nothing to rank by and the
+    # refusal stands. The first version of this fallback passed None and
+    # could never have succeeded.
+    for dialect, start, enums in candidates:
+        walk = _walk(data, dialect, start, len(enums), opcodes,
+                     True, False, False, dialect == TAGGED)
+        if walk["tail"]:
+            return (dialect, start, enums)
+
+    # Still nothing that lands on EOF. A head that reads is better than a
+    # refusal only if the caller is told which it got, and `summarize`
+    # reports `tail: False` for exactly that -- so hand back the furthest
+    # reading rather than refusing a module whose head is sound.
+    if candidates:
+        ranked = max(candidates, key=lambda c: _score(
+            _walk(data, c[0], c[1], len(c[2]), opcodes,
+                  True, False, False, c[0] == TAGGED)))
+        return ranked
+    raise ParseError("neither dialect parses a coherent module head")
 
 
 def _literal_is_plausible(s: bytes) -> bool:
@@ -1219,7 +1321,7 @@ def trace_module(path: str,
     """
     with open(path, "rb") as fh:
         data = fh.read()
-    dialect, start, enums = detect(data)
+    dialect, start, enums = detect(data, opcodes)
 
     info = summarize(path, opcodes=opcodes)
     if not info["tail"]:
@@ -1253,7 +1355,7 @@ def trace_module(path: str,
 def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) -> Dict[str, Any]:
     with open(path, "rb") as f:
         data = f.read()
-    dialect, start, enums = detect(data)
+    dialect, start, enums = detect(data, opcodes)
     members = sum(len(e["members"]) for e in enums)
 
     # Two fields vary between builds of the same dialect: whether
