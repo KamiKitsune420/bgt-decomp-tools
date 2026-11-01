@@ -7102,7 +7102,7 @@ and Crazy Party barely moves at all -- which is its own result rather than
 a disappointment: a title that keeps fewer snapshots has less to lose by
 folding them.
 
-#### The empty arms, triaged -- 18 of 20 are the authors' own
+#### The empty arms, triaged -- ALL TWENTY are the authors' own
 
 `empty_arm` is this file's own signature for *"a condition that has
 lost its value"*, and it has stood at about twenty rows across the
@@ -7124,8 +7124,9 @@ source's. Counted per module:
 So fourteen are the author writing `if (c) { }` -- Manamon 1's
 `if (key_pressed(KEY_Q)) { }` and `if (tamer_data !is null) { }` are
 both `JLowZ 0` with nothing between the branch and its target -- and
-the second question closes four more: **is the slot the arm writes
-ever READ?**
+the second question closes the other **six**: **is the slot the arm
+writes ever READ?** In every one of them it is not, so dropping the
+store and leaving the arm empty is faithful.
 
 - **Super Egg Hunt's three** are a joystick dead zone.
   `browse_trophies` has `if (absolute(double(stick.get_x())) < 100.0)
@@ -7139,10 +7140,31 @@ ever READ?**
   a dropped store there would change the XP curve of the whole game.
   The bytecode clamps `local_16` to 150 and never reads it -- the
   accumulator the function returns is a different slot.
+- **Manamon 1's `teleport`** opens `bool x = false; if (event !is null)
+  x = true;` and never reads `x` again, in 434 instructions.
+- **Crazy Party's is the author's own bug**, and it is the nicest of
+  them. `LancerBoulet::gereBoulet` has three nested empty arms, which
+  is as alarming as this signature gets, and the bytecode is a
+  speed-dependent delay:
 
-**Two are open and named**: one in Crazy Party, and Manamon 1's
-`if (get_SCRIPT_COMPILED()) { }` inside `if (!arg0)`, where the arm
-really is empty in the recovery and not in the bytecode.
+  ```
+  SetV4 14, 400
+  if (f <= 2.0)      local_14 = 300
+  else if (f <= 1.0) local_14 = 200
+  else if (f <= 0.5) local_14 = 100
+  PshC8 400.0 ; chronoVitesse.hasReached(...)
+  ```
+
+  Slot 14 is written four times and **never read**, and the argument
+  the timer is actually asked about is the literal `400.0`. The author
+  wrote the ladder and then forgot to use it, so the ball speeds up
+  every 400 ms whatever the player's pace -- in the shipped game. That
+  is the fourth defect of the original's own this file has found while
+  checking its own output, after `generate_maze`'s discarded
+  comparison, `load()`'s empty guard and `battle`'s self-comparison.
+
+**Nothing is open.** Twenty rows, twenty explanations, and the two
+questions that settle them cost one disassembly each.
 
 And the instrument needed its own correction, which is the usual one:
 asked of `jump_target == 0` it answered **0 for every title**,
