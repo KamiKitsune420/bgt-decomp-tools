@@ -240,6 +240,12 @@ class FoldSafetyTests(unittest.TestCase):
         # reads. A real decompiler always has this; empty here so a case
         # that is not about globals stays about what it was written for.
         sim.global_types = {}
+        # A call whose result nothing consumes is parked here until it is
+        # written out. It is admitted through the `stmt_count` guard only
+        # when it touches a receiver of the value being folded -- the
+        # `file::close()` case. A real decompiler always has both fields.
+        sim.pending_value_call = None
+        sim.pending_value_call_pos = 0
         for name, value in attrs.items():
             setattr(sim, name, value)
         return sim

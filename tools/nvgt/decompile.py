@@ -2712,8 +2712,6 @@ class FuncDecompiler:
             if self._stale_global(value, bound):
                 return declarable
             return False
-        if bound[1] == self.stmt_count:
-            return False            # nothing has run since: the same moment
         masked = _mask_strings(value.text)
         receivers = [m.group(1) for m in _CALL_RECEIVER.finditer(masked)]
         # **...and what the value INDEXES, which has no receiver syntax.**
@@ -2732,6 +2730,28 @@ class FuncDecompiler:
         # returned the next song rather than the one it had just taken out
         # of the list. Those eight entries are the speaker songs.
         receivers += [m.group(1) for m in _INDEX_BASE.finditer(masked)]
+        #: A call whose return value nothing consumes is parked in
+        #: `pending_value_call` and not written out until later, and the
+        #: flush does not touch `stmt_count` -- so between the call and
+        #: the flush it is invisible to the guard below, which is how
+        #: `cs`'s `get_file_size` came to close its file BEFORE reading
+        #: it: `bool file::close() const` returns a bool nobody reads.
+        #:
+        #: It is admitted through that guard ONLY when it demonstrably
+        #: touches a receiver of this value. Counting it as "something
+        #: ran" in general was measured twice and rejected twice --
+        #: Paladin lost 1 body and 20 calls one way, 2 bodies and 156
+        #: calls the other -- because the guard it bypasses is
+        #: load-bearing: within one statement the bind and the read are
+        #: the same moment.
+        pending = []
+        if (self.pending_value_call is not None
+                and self.pending_value_call_pos > bound[0]):
+            pending = ["%s;" % self.pending_value_call]
+        if bound[1] == self.stmt_count and not any(
+                _mutates(text, receiver)
+                for text in pending for receiver in receivers):
+            return False        # nothing has run since: the same moment
         # **A GLOBAL is asked about whether or not it also has a receiver**,
         # and this used to be asked only where there was none -- which left
         # the commonest shape a global takes in these games unreached, since
@@ -2777,7 +2797,7 @@ class FuncDecompiler:
             # `bgt libcheck` and not guessed at here.
             return False
         if not any(_mutates(text, receiver)
-                   for text in self.stmt_texts[bound[1]:]
+                   for text in list(self.stmt_texts[bound[1]:]) + pending
                    for receiver in receivers):
             return False
         return declarable

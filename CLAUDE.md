@@ -6133,6 +6133,112 @@ claim something it cannot prove, and it is the right side of that trade:
 a statement that does nothing costs a line, and a lost call costs a
 feature.
 
+### Twelve: a call nobody reads has still RUN, and it closed the file first
+
+The worst of this family so far, because the recovered code is in the
+wrong ORDER rather than merely duplicated -- and the engine's own
+declaration is what makes it invisible.
+
+`cs`'s `get_file_size` is four lines:
+
+```
+sizer.open(filename, "rb");
+size = sizer.read();
+sizer.close();
+```
+
+and it recovered as **`close()` before `read()`**. A closed file reads
+empty, so every size came back 0 -- and the same shape reaches
+`file_get_contents`, `file_put_contents`, `load_bases`,
+`base::load_vault`, `teamload` and `map::mapload`, which is that server's
+whole save and load path.
+
+**`bool file::close() const` returns a bool, and nobody reads it.** So the
+call goes down the value-returning branch: parked in `pending_value_call`
+and written out later by `_flush_pending_call`, which appends its event at
+the right position and **never touches `stmt_count`**. Every fold-safety
+rule measures `bound[1]` against `stmt_count`, so between the call and the
+flush `close()` had not run as far as any of them could tell, and the
+read's value folded forward over it.
+
+The engine is full of that shape: `open`, `close`, `seek`, `write` and
+most of its setters answer `bool` and are called for the effect.
+
+#### Three attempts, and the first two are rejected with their numbers
+
+The fix is one sentence -- a call that ran has run -- and where to say it
+took three goes, because the guards it has to pass are load-bearing.
+
+| attempt | what it counted the pending call for | Paladin |
+|---|---|---|
+| 1 | every "has anything run" test | **1 body given up on**, 20 calls lost |
+| 2 | ...and the receiver guard removed outright | **2 bodies**, 156 calls lost |
+| 3 | only where it MUTATES a receiver of this value | nothing moves |
+
+Both rejected attempts also grew four titles by 1,681 and 406 lines. What
+they broke is the guard this file already warns about -- *within one
+statement the bind and the read are the same moment* -- which is what
+stops a loop condition built out of the loop variable from being called
+stale, promoted to a statement before a jump, and ceasing to be a loop
+condition.
+
+So the pending call is admitted through that guard **only when
+`_mutates` says it touches one of this value's own receivers**.
+`local_2.close()` touches `local_2`, which `local_2.read(0.0)` reads;
+nothing else in these bodies qualifies.
+
+#### What it cost
+
+| title | lines | goto | bodies given up | split | calls |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,294 -> 5,296 | 0 | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,440 | 0 | 0 | verified | 6,952 |
+| Psycho Strike | 24,431 | 0 | 0 | verified | 6,406 |
+| Manamon 1 | 83,363 | 0 | 0 | verified | 26,482 |
+
+Three titles do not move at all and the fourth moves by two lines. Not one
+residual goto, call count, split check or body error anywhere -- which for
+a fold-safety change is the whole of the measurement.
+
+And against the games that came with their source:
+
+| | before | after |
+|---|---|---|
+| cs server | 186 / 196, 6 differ | **189 / 196, 4 differ** |
+| cs client | 214 / 218, 2 differ | **216 / 218, 0 differ** |
+| constant velocity | 94 / 95, 0 differ | 94 / 95, 0 differ |
+| rage room | 290 / 292, 0 differ | 290 / 292, 0 differ |
+
+**Crazy Party is owed**, as it is for the loop fix: the run that would
+give it was stopped by the host for system memory twice tonight. The new
+branch can only fire where a pending call mutates a folded value's
+receiver, and the four titles above cover that shape, but the row is left
+unquoted rather than guessed.
+
+#### The four rows left are one more shape, diagnosed and not fixed
+
+`file_get_contents` is the clearest:
+
+```
+source:     string r = tempfile.read();
+            tempfile.close();
+            return r;
+
+recovered:  local_1.close();
+            return local_1.read(0.0);
+```
+
+Here the read folds into the **`return`**, and `_bind` has a shortcut for
+exactly that: a value bound to the return slot of a function returning a
+value type is parked in `temps` and the method returns **before setting
+`temp_bound`**. So `_stale_fold` is asked, finds no bind position, and
+answers False -- not because nothing ran but because it cannot tell.
+
+That is the same defect this file records as *"a copy-constructed temp had
+no bind position"*, in a second place, and the fix looks like one line.
+It is deliberately not taken here: two changes in flight is a measurement
+of neither, which this session has already paid for once.
+
 ### Eleven: a snapshot of a MEMBER is stale once that member is assigned
 
 `_prop_receiver` gives `this` for a bare member, and deliberately: a
