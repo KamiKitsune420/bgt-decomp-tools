@@ -1992,12 +1992,26 @@ checks say:
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 5,294 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
 | Paladin of the Sky | 23,440 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | 24,428 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 174,665 | 14 | 0 | yes | 90,148 | 14, every one a DANGLING `goto` |
+| Psycho Strike | **24,431** | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
+| Crazy Party | 174,665 | 14 | 0 | yes | 90,148 | 14, every one a DANGLING `goto` -- **owed, see below** |
 | Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
-**All five rows are from one run of the code as it stands**, which this
+**Psycho Strike's goto column is 0 now**, which takes its two
+non-engine diagnostics with it -- see **Fixed: the shape, and the
+attempt that was worse than the goto**. The compiler column still says
+34 because that is the last number a compiler actually gave; 32 of the
+34 are the `elias` plugin and `tts_voice::speak_to_sound`, and the other
+2 were the gotos, so the engine-absence figure is unchanged and the
+recovery's own contribution is now **zero**. Re-deriving the 32 costs a
+modal dialog on somebody's screen and has not been spent.
+
+**Crazy Party's row is OWED on the same change.** Its 14 are the
+residual gotos and they are all this one shape, so the fix should take
+them to 0 -- and the run that would say so was stopped by the host for
+system memory, twice. The row is left at 14 rather than guessed at.
+
+**Four of the six rows are from one run of the code as it stands**, which this
 table has rarely been able to say. It carried a mixture of rows from
 different commits for most of this project's life, and the two largest
 titles were a lower bound rather than a measurement, because the run that
@@ -7291,7 +7305,7 @@ both Psycho Strike ones was compared against every label those files
 emit, and there are none. Run on the committed tree, Crazy Party comes
 back `gotos 14` and `dangling_goto 14` -- the two numbers equal, which is
 the statement that none of them is labelled.
-### The shape, and an attempt that was worse than the goto
+### Fixed: the shape, and the attempt that was worse than the goto
 
 Both titles' gotos are the compiler's **bottom-tested loop**, which this
 file already documents: an unconditional forward `JMP` to the condition,
@@ -7331,7 +7345,7 @@ wrong program, which is the one trade this file refuses -- *"half-emitting
 a construct is worse than refusing it, because the damage lands somewhere
 else"*.
 
-**The shape that would work is named rather than guessed at**: keep the
+**The shape that works was named rather than guessed at**: keep the
 condition block inside the loop and break out of it,
 
 ```
@@ -7343,9 +7357,149 @@ while (true) {
 }
 ```
 
-which loses nothing and needs no slot to serve two purposes. It is a
-different emission from any the structurer has, so it is the next
-attempt and not this one.
+which loses nothing and needs no slot to serve two purposes -- and that
+is what it emits now, verbatim:
+
+```
+local_1 = 0;
+while (true) {
+    local_2 = rebels.get_length();
+    if (local_1 >= local_2) {
+        break;
+    }
+    ...body...
+    local_1++;
+}
+```
+
+The bound's assignment is present, the test is the latch's condition
+negated, and the increment is where the bytecode put it. The decision is
+`_find_latch`'s third return value: a condition block of **call-free**
+assignments keeps the existing `while (cond)` emission, which leaves the
+block at the end of the body where a loop-invariant handle alias is
+harmless, and a block that **calls** something gets the form above,
+because the entry jump lands on it -- so it runs before the first test
+and cannot sit at the end of anything.
+
+Two things are still refused, and the second is the one that keeps this
+narrow. A statement that is not an assignment means an if/else merge
+block rather than a condition, which is why the original guard existed.
+And a working block whose values **the test does not read** is not a
+condition either -- without that, any run of assignments before a
+backward branch would be claimed as a loop.
+
+#### What it cost, measured on all five titles and the ground truth
+
+| title | lines | goto | dangling | split | calls |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,294 | 0 | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,440 | 0 | 0 | verified | 6,952 |
+| Psycho Strike | 24,428 -> **24,431** | **2 -> 0** | **2 -> 0** | verified | 6,406 |
+| Crazy Party | **not measured** | 14 | 14 | -- | 90,148 |
+| Manamon 1 | 83,363 | 0 | 0 | verified | 26,482 |
+| rage room | 8,673 -> **8,679** | **4 -> 0** | **4 -> 0** | verified | 2,376 -> **2,377** |
+
+**Crazy Party is OWED, and it is the row that matters most.** Its
+fourteen are what caught every over-broad structurer change this file
+records -- 14 -> 30 for a call-text threshold, 14 -> 44 for dropping the
+declaration-order rule, 14 -> 90 for forcing on the copy idiom -- and the
+run that would have given it was stopped by the host for system memory,
+twice in one session. So it is not quoted, and the undertaking is the one
+this file has made and paid before: if those fourteen move, the change
+comes out and is recorded as rejected with its number.
+
+What can be said without it is narrower than a measurement and is not
+nothing: the new branch fires only where `_find_latch` previously
+returned None, and None there emits a `goto`. A body with no goto cannot
+reach the new code at all, so at most Crazy Party's four goto-bearing
+files can differ and its other 554 cannot. Egg Hunt, Paladin and Manamon
+1 are the evidence for that rather than the argument: identical line
+counts, 0 gotos before and after.
+
+Egg Hunt, Paladin and Manamon 1 do not move at all, and they cannot: the
+new branch fires only where a loop was previously unrecognised, and an
+unrecognised loop is a `goto`. A title at 0 gotos has none to find.
+
+Nothing else moves either. `bgt libcheck --decompiler` holds at 44/47,
+39/47 and 147/149 with the lifter at 153/155; Psycho Strike's `bgt audit`
+is **41 call rows and 2 constant rows**, the figures this file already
+records; the split verifies everywhere and passthrough, body errors,
+unbalanced files and dangling `else` stay 0.
+
+**And the ground truth says it is right rather than merely quiet.** rage
+room's `count_total_items` was the last row that differed from its own
+source, and the two now have the same structure:
+
+```
+source:     for (uint i = 0; i < inv.get_keys().length(); i++)
+
+recovered:  while (true) {
+                @local_4 = inv.get_keys();
+                if (local_3 >= local_4.length()) { break; }
+                ...
+            }
+```
+
+so that title is **290 of 292 identical and 0 differing**, and the two
+remaining rows are an ordering difference on one `close` rather than a
+lost call. The whole progression on it, one measured step at a time:
+272 -> 272 -> 284 -> 289 -> **290**.
+
+**The call count rising is the result.** A residual goto had only ever
+been a line that cannot compile; here the loop's own test went with it,
+so `inv.get_keys().length()` was absent from the body entirely. That is
+the first time one of these has been shown to cost a CALL.
+
+### Found beside it: a call returning a VALUE TYPE is invisible to the
+### lost-call census
+
+Diagnosed exactly and **not fixed**, because one change at a time is what
+made this section's own regression visible.
+
+rage room's `mainmenu` loses an `input_box` and its three literals, which
+the bytecode audit reports and `bgt libcheck` confirms against the real
+source. The source is the dead-store shape this file already records:
+
+```
+string name = input_box("type your name", "type your name here");
+name = "name";                 // overwritten on the next line
+mainmenu();
+```
+
+so the store is correctly dropped -- and `input_box` **prompts the
+player**, so the call must not go with it. In the shipped game choosing
+"change name" asks you to type one (and throws the answer away, which is
+the author's own bug); in the recovery it does nothing at all.
+
+`_lost_calls` exists for exactly this and cannot see it. Instrumented,
+`_bind` IS reached twice with the right text on unnamed slots -- so the
+path is right -- and `self.invocations` never holds that text. The reason
+is one branch, in two of the three call sites:
+
+```python
+if has_out and pop_out is not None and pop_out.is_ptr \
+        and pop_out.offset is not None:
+    self._bind(pop_out.offset, Atom("call", calltxt))   # no _record_call
+elif ret is not None and ret.format() != "void":
+    ...
+    self._record_call(ins, calltxt, fr, ret)            # recorded ONLY here
+```
+
+A registered function returning a value type **by value** uses the stack
+return-address protocol -- `PSF dest` pushed deepest, before the call --
+so it lands straight in the caller's slot and never enters
+`invocations`. Only the value-register branch records. `string` is the
+commonest such type in these games, so this is not a corner: every
+`input_box`, `string_replace` or `get_item_name` whose result the
+original discards is a call the census cannot report.
+
+That makes **three** known blind spots with one shape between them, and
+this file already names the other two: `coin::act`'s `update_sound_2d`,
+whose result a `Cast` overwrites in the value register without flushing,
+and `pause_menu`'s seventh `menu_add_item`, masked by six identical
+siblings. The wider signal -- call SITES against text occurrences, per
+body -- covers all three, and carries the hazard it always did: a call
+the renderer spells as syntax would never match its own text.
 
 And `reset_rebels` has a second defect that the goto was hiding, worth
 recording because it is this file's own signature: its condition reads
@@ -7472,17 +7626,21 @@ function that appears once on both sides:
 | | |
 |---|---|
 | functions compared | **292** |
-| call sequence identical | **289** |
+| call sequence identical | **290** |
 | call sequence close (>= 80%) | 2 |
-| call sequence differs | 1 |
+| call sequence differs | **0** |
 | string literals identical | **279** |
 
 and the recovery itself: 31 classes, 265 functions, 418 globals, 840
-bodies, **8,673 lines**, 0 unmodelled opcodes, 0 bodies given up on, 0
-unbalanced files, 0 dangling `else`, a verified split, and **2,376 calls
-read back** against the game's own runtime. **4 residual gotos, all 4
-dangling** -- the new check from the section above, on a title it had
-never seen.
+bodies, **8,679 lines**, 0 unmodelled opcodes, 0 bodies given up on, 0
+unbalanced files, 0 dangling `else`, a verified split, and **2,377 calls
+read back** against the game's own runtime, with **0 residual gotos**.
+
+It arrived with 4, all 4 dangling -- the new check from the section above,
+on a title it had never seen -- and all 4 were one shape that this file
+already had written down from two other titles. Fixing it is the section
+**Fixed: the shape, and the attempt that was worse than the goto**, and it
+is where the 290th row and the 2,377th call come from.
 
 ## The ground truth found the bug in the CHECKER, not in the recovery
 

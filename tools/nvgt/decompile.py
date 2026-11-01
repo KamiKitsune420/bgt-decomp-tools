@@ -5311,34 +5311,69 @@ class Structurer:
 
     # -- loop detection -----------------------------------------------------
 
-    def _find_latch(self, i: int, cond_pos: int, end: int) -> tuple[int, int] | None:
+    def _find_latch(self, i: int, cond_pos: int,
+                    end: int) -> tuple[int, int, bool] | None:
         """Rotated-loop signature for the forward JMP at index i targeting
         cond_pos: a backward branch at some L whose target is at/below the
-        JMP, with no statement events between the condition block and the
-        latch (statements there would mean this is an if/else merge block,
-        not a loop condition)."""
+        JMP.
+
+        Returns `(latch index, head, cond_at_top)`. `cond_at_top` says the
+        condition block does real work and must be emitted at the TOP of
+        the loop -- `_block` then writes `while (true)` with an explicit
+        `break` rather than `while (cond)`.
+
+        A statement between the condition label and the latch usually means
+        this is an if/else merge rather than a loop condition. But a
+        pre-tested loop re-evaluates its condition every iteration, and the
+        compiler materialises whatever that condition reads. Two kinds turn
+        up and they need different emissions:
+
+        - `for (i = 0; i < bag[n].items.length(); i++)` emits
+          `@handle = bag;` -- loop-invariant, no call, and harmless at the
+          END of the body, which is where the `while (cond)` form leaves
+          it.
+        - `for (uint i = 0; i < inv.get_keys().length(); i++)` emits
+          `@local_4 = inv.get_keys(); local_2 = local_4.length();` -- a
+          CALL per iteration, which cannot sit at the end of the body: the
+          entry jump lands on it, so it runs BEFORE the first test.
+
+        The second was refused outright, on the stated grounds that
+        *anything that calls something is not the materialisation*. It is:
+        rage room's `count_total_items`, Psycho Strike's
+        `home::reset_rebels` and Crazy Party's fourteen are all this shape,
+        three titles by three authors. Each came out as a pair of `goto`s,
+        which AngelScript has no spelling for -- and one of them costs a
+        CALL too, because the condition never became a condition:
+        `inv.get_keys().length()` is simply absent from the recovered body.
+
+        What is still refused is anything that is not an assignment, and a
+        working block whose values the test does not read. A condition's
+        materialisation computes what the test reads, so without that an
+        unrelated run of assignments before a backward branch would be
+        claimed as a loop condition.
+        """
         for j in range(i + 1, end):
             e = self.ev[j]
             if (e.kind == "branch" and not self.done[j]
                     and self.ev[i].pos < e.data[1] <= cond_pos
                     and e.pos >= cond_pos):
                 c_idx = self._next_index(cond_pos)
+                cond_at_top, assigned = False, []
                 for k in range(c_idx, j):
                     if self.ev[k].kind != "stmt" or self.done[k]:
                         continue
-                    # A statement in the condition block usually means this is
-                    # an if/else merge rather than a loop condition. But a
-                    # pre-tested loop re-evaluates its condition every
-                    # iteration, and the compiler materialises what that
-                    # condition reads: `for (i = 0; i < bag[n].items.length();
-                    # i++)` emits `@handle = bag;` there. A plain assignment
-                    # with no call in it is that materialisation; anything
-                    # that calls something is not, and still rules the loop
-                    # out.
                     text = self.ev[k].data[1]
-                    if "(" in text or not re.match(r"@?[\w.\[\]]+ = ", text):
+                    m = re.match(r"@?([\w.\[\]]+) = ", text)
+                    if m is None:
                         return None
-                return (j, e.data[1])
+                    assigned.append(re.split(r"[.\[]", m.group(1))[0])
+                    if "(" in text:
+                        cond_at_top = True
+                if cond_at_top and not any(
+                        re.search(r"(?<!\w)%s(?!\w)" % re.escape(name),
+                                  e.data[0]) for name in assigned):
+                    return None   # the test reads none of it: not a condition
+                return (j, e.data[1], cond_at_top)
         return None
 
     # -- block structuring ---------------------------------------------------
@@ -5550,9 +5585,32 @@ class Structurer:
                 else:
                     latch = self._find_latch(i, t, end)
                     if latch is not None:
-                        l_idx, head = latch
+                        l_idx, head, cond_at_top = latch
                         lat = self.ev[l_idx]
                         self.done[l_idx] = True
+                        if cond_at_top:
+                            # The condition block calls something, so it
+                            # cannot be left at the end of the body: the
+                            # entry jump lands on it, so it runs before the
+                            # first test and again before every later one.
+                            # Hoisting it into a header is what went wrong
+                            # last time -- one slot served both the bound
+                            # and a body flag, so the bound's assignment
+                            # vanished and the loop never ran. The block at
+                            # the loop TOP with an explicit `break` needs no
+                            # slot to serve two purposes and loses nothing.
+                            c_idx = self._next_index(t)
+                            ctx = LoopCtx(head, t, lat.pos, lat.pos + 2)
+                            self.out.append((indent, "while (true) {"))
+                            self._block(indent + 1, c_idx, l_idx, ctx)
+                            self.out.append((indent + 1, "if %s {" % _condition(
+                                _negate_cond(lat.data[0]))))
+                            self.out.append((indent + 2, "break;"))
+                            self.out.append((indent + 1, "}"))
+                            self._block(indent + 1, i + 1, c_idx, ctx)
+                            self.out.append((indent, "}"))
+                            i = l_idx + 1
+                            continue
                         body_end = l_idx
                         continue_pos = t
                         update = self._next_index(t) - 1
