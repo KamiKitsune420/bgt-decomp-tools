@@ -7248,6 +7248,82 @@ which is the same value both times and is what the author wrote. Its
 FIRST assignment -- the sentence about the spirit horse -- looks
 unread, which is a different question and wants its own look.
 
+##### The fourth rejection, which fixes two of them and breaks a third
+
+`_conditionally_bound` carries the argument already -- *"a
+short-circuit merge slot is never one of these, however much it looks
+like one... promoting it makes each operand's computation an
+unconditional statement, so every term is overwritten before the `if`
+reads it"* -- and the guard that acts on it lives in `_diamond_bind`,
+which `_conditionally_bound` reaches only **after** its `cond_spans`
+test. So the argument was made and not applied to the half that fires
+first.
+
+Exempting `short_circuit_slots` at the top of `_conditionally_bound`
+brings both Paladin guards back as the source must have had them:
+
+```
+gift::get_gift   if (!is_in_party(for_character) && (for_character != ""))
+the save loader  if (!is_registered() && (difficulty == 2))
+```
+
+and **the lines go down**, which no previous attempt in this family
+managed: a forced operand slot costs an assignment per term as well as
+a wrong condition.
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,302 (byte-identical) | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,442 -> **23,395** | 0 | verified | 6,952 |
+| Psycho Strike | 24,431 -> 24,427 | 0 | verified | 6,406 |
+| cs server | 10,876 -> **10,196** | 0 | verified | 3,018 |
+
+`bgt oracle` 52/52, the server still 194 of 196 against its author's
+source, Paladin's `double_assign` rows 2 -> 0.
+
+**And it breaks Psycho Strike's `find_likely_request`**, which is why
+it is not taken:
+
+```
+before:  int local_1 = -1;
+         if (local_1 == -1) {
+             if (arg0.loyalty <= 0) local_1 = 2;
+             else if (...) local_1 = 0;
+         }
+         return ((arg0.bordum >= 100) || (local_1 != 0)) ? 1 : 0;
+
+after:   if (-1 == -1) { if (arg0.loyalty <= 0) { } else { ... } }
+         return ((arg0.bordum >= 100) || false) ? 1 : 0;
+```
+
+-- the `|| true` defect, re-made from a new direction, in a function
+that decides what a character asks for. Slot 1 is an ordinary source
+variable carried past the whole condition **and** the slot the
+compiler used as the merge's destination.
+
+Two narrowings were tried and neither separates the two bodies:
+
+- **Read past the merge.** A variable carries its value onward, so
+  something reads it there. `find_likely_request`'s slot IS the merge's
+  destination, so its last read is the merge itself and it qualifies as
+  the compiler's.
+- **Written outside every arm.** True of `local_1 = -1` -- and also
+  true of the gift's operand slot, whose left-hand half is computed
+  before the jump.
+
+So the two must be satisfied together, and the pre-pass does not hold
+enough to do it. The real difference is that one slot is a source
+variable the compiler **reused** as a merge destination, which is the
+same question as *"did the source NAME this slot?"* that this whole
+file is organised around being unable to answer -- see **Which slots
+the source NAMED**, where the engine supplies an asymmetry and not a
+test.
+
+That makes four measured rejections in this family, and this is the
+first one with two bodies that any fifth attempt must satisfy at once.
+`tests/nvgt/test_regressions.py` pins the guard's position so the
+record is not lost.
+
 ##### How far the gift one was traced, so the next attempt starts here
 
 `gift::get_gift`'s bytecode is a textbook `&&` merge:

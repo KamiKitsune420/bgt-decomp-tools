@@ -626,6 +626,61 @@ class FoldSafetyTests(unittest.TestCase):
         sim.flushed_calls = [(60, "local_1.close();")]
         self.assertFalse(sim._stale_fold(4))
 
+    def test_the_SHORT_CIRCUIT_exemption_stays_where_it_is(self):
+        """The fourth rejected attempt at the collapsed-guard family, pinned
+        so the fifth starts from the measurement.
+
+        `_conditionally_bound` carries the argument in its own docstring --
+        promoting a merge's operand makes each term an unconditional
+        statement, after which the condition reads one slot twice -- and the
+        guard that acts on it sits in the DIAMOND half, below the
+        `cond_spans` test which fires first. Moving it to the top fixes two
+        real bugs and causes a third:
+
+            fixed   gift::get_gift     !is_in_party(c) && c != ""
+            fixed   the save loader    !is_registered() && difficulty == 2
+            broke   find_likely_request (Psycho Strike)
+
+        and the costs went the right way too -- Paladin -47 lines, the `cs`
+        server -680, Super Egg Hunt byte-identical, no goto or call count
+        moved. What it breaks is `int local_1 = -1;` carried past the whole
+        condition in a slot the compiler ALSO used as the merge's
+        destination, so its conditional stores folded away and the `return`
+        came out `(arg0.bordum >= 100) || false`.
+
+        Two narrowings were tried and neither separates the cases:
+
+        * **read past the merge** -- a variable carries its value onward, so
+          something reads it there. `find_likely_request`'s slot is the
+          merge's own destination, so its last read IS the merge, and it
+          qualifies as the compiler's.
+        * **written outside every arm** -- true of `local_1 = -1`, and also
+          true of the gift's operand slot, whose left-hand half is computed
+          before the jump.
+
+        So the two bodies must be satisfied together, and the pre-pass does
+        not hold enough to do it: the real difference is that one slot is a
+        source variable the compiler reused as a merge destination, which is
+        the same question as "did the source NAME this slot?" that this whole
+        file is organised around not being able to answer.
+        """
+        import decompile
+        with io.open(decompile.__file__, encoding="utf-8") as fh:
+            body = fh.read()
+
+        def method(name):
+            cut = body[body.index("    def %s" % name):]
+            return cut[:cut.index("    def ", 4)]
+
+        #: the exemption lives in `_diamond_bind`, which `_conditionally_bound`
+        #: reaches only AFTER its `cond_spans` test -- which is what makes
+        #: this a record of the rejection rather than of the fix.
+        self.assertIn("self.short_circuit_slots", method("_diamond_bind"))
+        head = method("_conditionally_bound")
+        self.assertNotIn("short_circuit_slots", head)
+        self.assertLess(head.index("self.cond_spans"),
+                        head.index("_diamond_bind"))
+
     def test_a_computed_value_reading_a_NAMED_slot_goes_stale(self):
         """Rule ten counts a behaviour write -- an object slot filled through
         a pushed address -- and counted it only for a value that IS a slot.
