@@ -7472,9 +7472,9 @@ function that appears once on both sides:
 | | |
 |---|---|
 | functions compared | **292** |
-| call sequence identical | **284** |
-| call sequence close (>= 80%) | 6 |
-| call sequence differs | 2 |
+| call sequence identical | **289** |
+| call sequence close (>= 80%) | 2 |
+| call sequence differs | 1 |
 | string literals identical | **279** |
 
 and the recovery itself: 31 classes, 265 functions, 418 globals, 840
@@ -7567,10 +7567,53 @@ score at all, which is why it was taken in a second step rather than
 argued about: one change at a time is what made the `or` regression
 visible, and it is what says this one is free.
 
-What is left is the same shape one level out. `timer` and `file` are the
-**engine's** reference types, so they have no methods in the module and
-`script_types` cannot see them -- `bgt_api.registered()` is the list that
-can. Four rows are that, and it is the next step rather than this one.
+### ...and the same shape one level out: the ENGINE's reference types
+
+`timer`, `file` and `sound` are BGT's, not a game's, so they own no method
+in the module and `script_types` is blind to them by construction.
+`bgt_api.registered_types(exe)` names them -- the registration strings in
+the game's own runtime, the oracle `bgt api --exe` and both gap checks
+already use. 32 types in BGT 1.3, and exactly one collides with a
+registered *function* name: `pathfinder_callback`, the engine's one
+funcdef, which a call position makes a delegate rather than a call and
+which `bgt_apicheck` already refuses. So the collision wants dropping too.
+
+| | script types only | ...plus engine types |
+|---|---|---|
+| rage room | 284 / 292, 2 differ | **289 / 292, 1 differ** |
+| Super Egg Hunt | 43 / 47, 3 differ | **44 / 47**, 3 differ |
+| Paladin of the Sky | 39 / 47, 5 differ | 39 / 47, **4 differ** |
+| Psycho Strike | 144 / 149, 1 differ | **147 / 149, 0 differ** |
+| Psycho Strike, lifter | 153 / 155 | 153 / 155 |
+
+**This one DOES move the corpus, so every row was read before it was
+kept.** A checker that sees fewer calls scores higher for being blinder,
+which makes a rise the suspicious direction -- so all ten rows across the
+three titles were listed, and every one drops exactly one engine-type
+construction from the recovered side and nothing from the source side:
+`sound` five times, `timer` twice, `file` three times, `tts_voice` twice.
+Not one real call anywhere.
+
+And the source says they are declarations, in BGT's own code and in the
+game's alike:
+
+```
+sound_pool::reserve_slot      sound temp; @current.handle=temp;
+audio_form::set_tts_object    tts_voice temp_voice; @ui_speech=temp_voice;
+rage room                     timer speedtimer;   file f, c, mainprojectfile;
+```
+
+**It closes a row this file had been explaining away by hand.** The note
+above about the fold fixes ends *"Only `reserve_slot` itself is left, and
+that one is a shape difference rather than a defect"* -- which was the
+right reading and had to be re-made by a person every time the report was
+read. It is 1.00 on both titles now, mechanically, and **Psycho Strike's
+decompiler path reaches 0 differences across all 149 functions.**
+
+The refusal is what the test pins rather than the set: with no executable
+-- a `--opcodes` run legitimately has none -- the set is empty, so the
+comparison gets **stricter** rather than quietly weaker. An unreadable or
+non-PE file answers the same way instead of raising.
 
 ## All four of its dangling gotos are the ONE shape this file already names
 

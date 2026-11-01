@@ -242,6 +242,36 @@ def script_types(owners) -> frozenset:
     return frozenset(out)
 
 
+def engine_types(exe: Optional[str]) -> frozenset:
+    """The engine's registered type names, read out of the game's own runtime.
+
+    `script_types` covers a game's classes, and `timer`, `file` and `sound`
+    are not a game's -- they are BGT's, so they own no method in the module
+    and nothing in the bytecode names them as types. The registration
+    strings in the executable do, which is the same oracle `bgt api --exe`
+    and the engine-gap checks already use.
+
+    A type name and a registered FUNCTION name collide exactly once in
+    this corpus -- `pathfinder_callback`, the engine's one funcdef -- and a
+    funcdef in call position is a delegate rather than a call, which
+    `bgt_apicheck` already refuses. So the collision wants dropping too.
+
+    Returns an empty set rather than raising when the executable cannot be
+    read: this makes the comparison stricter, which is the safe direction
+    for a checker, and a `--opcodes` run legitimately has no exe at all.
+    """
+    if not exe:
+        return frozenset()
+    try:
+        try:                      # installed as a package
+            from . import bgt_api
+        except ImportError:       # run directly from a checkout
+            import bgt_api
+        return frozenset(bgt_api.registered_types(exe))
+    except Exception:
+        return frozenset()
+
+
 def calls(text: str, types: frozenset = frozenset()) -> List[str]:
     """Call names in EVALUATION order -- sorted by where each call's `)` closes.
 
@@ -334,12 +364,14 @@ class Comparison:
 
 
 def compare(mod: "as_disasm.Module",
-            library: Dict[str, List[str]]) -> List[Comparison]:
+            library: Dict[str, List[str]],
+            exe: Optional[str] = None) -> List[Comparison]:
     """Compare every function present exactly once on both sides."""
     recovered: Dict[str, List[dict]] = collections.defaultdict(list)
     for f in mod.functions:
         recovered[as_disasm.function_label(f)].append(f)
     types = script_types(k.rsplit("::", 1)[0] for k in recovered)
+    types |= engine_types(exe)
     out = []
     for label in sorted(library):
         bodies = library[label]
@@ -384,6 +416,7 @@ def compare_decompiled(module_path: str, exe_path: Optional[str],
         owner = f.object_type.name if f.object_type is not None else "<global>"
         recovered["%s::%s" % (owner, f.name)].append(f)
     types = script_types(k.rsplit("::", 1)[0] for k in recovered)
+    types |= engine_types(exe_path)
     out = []
     for label in sorted(library):
         bodies = library[label]
@@ -425,7 +458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         results = compare_decompiled(args.module, args.exe, args.opcodes, library)
     else:
         mod = as_disasm.load(args.module, args.exe, args.opcodes)
-        results = compare(mod, library)
+        results = compare(mod, library, args.exe)
     if not results:
         print("no library function appears in this module under the same name")
         return 1

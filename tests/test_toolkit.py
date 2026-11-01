@@ -2127,6 +2127,43 @@ def test_libcheck_counts_a_constructor_as_syntax_not_as_a_call():
     assert "<global>" not in bgt_libcheck.script_types(["<global>"])
 
 
+def test_libcheck_engine_types_declines_rather_than_guessing():
+    """`timer`, `file` and `sound` are the ENGINE's types, not a game's.
+
+    `script_types` reads a game's classes off its function labels, which
+    cannot see an engine type: it owns no method in the module. The
+    registration strings in the executable name them, and that is the oracle
+    `bgt api --exe` already uses.
+
+    What is pinned here is the REFUSAL, because the set changes scores and a
+    checker that silently sees fewer calls scores higher for being blinder.
+    With no executable -- a `--opcodes` run legitimately has none -- the set
+    is empty, so the comparison is STRICTER rather than quietly weaker.
+
+    The ten rows this closes across three titles were each read first and
+    every one is a declaration in the source it was checked against:
+    BGT's own `reserve_slot` writes `sound temp; @current.handle=temp;` and
+    its `set_tts_object` writes `tts_voice temp_voice;`.
+    """
+    assert bgt_libcheck.engine_types(None) == frozenset()
+    assert bgt_libcheck.engine_types("") == frozenset()
+    # An unreadable file is not an answer either, and must not raise.
+    missing = os.path.join(tempfile.gettempdir(), "no_such_bgt_game_xyz.exe")
+    assert bgt_libcheck.engine_types(missing) == frozenset()
+    # A file that exists and is not a PE must also come back empty.
+    with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as fh:
+        fh.write(b"not a PE at all")
+        junk = fh.name
+    try:
+        assert bgt_libcheck.engine_types(junk) == frozenset()
+    finally:
+        os.unlink(junk)
+    # Whatever the set holds is dropped by the same rule as a script class,
+    # so one path serves both.
+    assert bgt_libcheck.calls("@h = timer();", frozenset(["timer"])) == []
+    assert bgt_libcheck.calls("f.open(p, m);", frozenset(["file"])) == ["open"]
+
+
 def test_libcheck_does_not_invent_a_call_from_a_subscript():
     """A subscript that merely precedes a paren names no callee.
 
