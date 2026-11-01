@@ -7248,6 +7248,47 @@ which is the same value both times and is what the author wrote. Its
 FIRST assignment -- the sentence about the spirit horse -- looks
 unread, which is a different question and wants its own look.
 
+##### How far the gift one was traced, so the next attempt starts here
+
+`gift::get_gift`'s bytecode is a textbook `&&` merge:
+
+```
+CALL is_in_party ; CpyRtoV4 7 ; NOT 7      ; the LEFT operand, in slot 7
+SetV1 8 0 ; NOT 8                          ; a materialised `true`
+CMPi 7 8 ; JZ -> L6                        ; the test, by COMPARE
+SetV4 8 0 ; JMP -> L7                      ; the short-circuit store
+L6: ... string::opEquals ; CpyRtoV4 7 ; NOT 7
+    CpyVtoV4 8 7                           ; the arm's store
+L7: CpyVtoR4 8 ; JLowZ                     ; the merge
+```
+
+The destination is slot 8 and both operands pass through slot 7, which
+is the shape `_short_circuit_slots` is written for -- and the pattern it
+matches, `<JUMP> ; SetV dest,0|1 ; JMP merge`, is present here.
+
+Traced rather than reasoned about, two things are known and the third is
+not:
+
+- **What promotes slot 7 is `_conditionally_bound`** -- rule two, the
+  value computed on one path and read past the join. That is *correct in
+  itself*: the second value really is computed only inside the arm, and
+  the rendered condition really does read slot 7 after it.
+- **So the defect is upstream of the fold rules.** Had the merge been
+  folded, nothing would read slot 7 past the arm at all; the read exists
+  because the arms were emitted as statements.
+- **`_begin_bool_merge` claims one merge in that body and declines others
+  at its first shape test** (`setv.name` / `jump.name`), which is as far
+  as this got. Whether the merge above is the one claimed, or reaches the
+  recogniser at all, is the next question -- the JZ handler tries
+  `_begin_bool_merge`, then `_begin_value_merge`, then `_branch`, and a
+  jump already inside `skip_indexes` never arrives.
+
+The trace is one command, and worth repeating rather than re-deriving:
+`sys.settrace` on `_begin_bool_merge`, recording the line each call
+returns from, over `ModuleDecompiler._body` for the one function. That is
+how the `_conditionally_bound` answer above was got, after two wrong
+guesses from reading the code.
+
 So the narrowing turns a hundred rows of noise into a two-dozen-row
 pointer at the one defect class this file has three measured rejections
 against (`_short_circuit_slots` is a shape test by necessity, and every
