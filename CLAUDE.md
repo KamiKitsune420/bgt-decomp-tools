@@ -2214,6 +2214,95 @@ Three things it settles that were guesses before:
   installer's shell verbs do: `-c` debug, `-C` release, `-r` the registration
   manager, no space before a quoted path, and a bare `-c` opens a file dialog.
 
+### The PROSE of the help file, which `bgt_api` throws away
+
+`bgt_api` parses the reference tree and skips everything else, because
+example code is not an API. That is right for extracting signatures and
+it meant the 295 KB of prose beside them had never been read: an
+introduction, a one-line `limitations` page, **eight appendices**, a 45 KB
+change log and nine tutorials, 421 pages in all. BGT ships no `readme` --
+`bgt.chm` is the documentation -- so this is it.
+
+Four things in it are worth having, and the first cost nothing to fix and
+should never have been wrong.
+
+#### NVDA's client is LGPL, and its licence is not optional
+
+Appendix F, verbatim: *"you need to include the file called license.txt
+along with NVDA's dll (found in the same directory) if you wish to support
+this screen reader"*. `redist/screen_readers/nvda/` ships it -- LGPL 2.1,
+26 KB -- and it is **the only licence file anywhere in a BGT install**.
+
+`bgt recover` copied the DLL and left it behind. So every recovered
+project that speaks through NVDA was redistributing an LGPL library
+without its terms, and no count in this document could ever have shown
+that: the project compiles, runs and talks exactly the same either way.
+It is copied now, as `nvdaControllerClient32-license.txt` -- named after
+the DLL so it cannot be taken for the project's own licence or collide
+with one, since the LGPL asks that the terms accompany the library and
+not that the file keep a particular name.
+
+It is deliberately **not** in the "keep these beside the script" note. The
+engine never looks for a licence; that note is about what makes speech
+work, and the same appendix names the other half of it --
+`screen_reader_set_library_path`, for putting the clients somewhere other
+than the script's own folder. System Access carries no licence and must
+not grow one: that DLL "has no explicit license attached to it but is
+freely distributable".
+
+#### A debug build's file names are a documented feature, not a leak
+
+This file records Screaming Strike shipping its source path
+(`D:\My Documents\screamingSstrike\screamingStrike_en.bgt`) and local
+variable names, found by reading the module. Appendix H says what that is:
+*"Debug builds store a lot of additional information about your script
+such as the names of the files on your system that the code is contained
+in, line numbers, etc."*, and release builds "exclude this information,
+resulting in a smaller executable that is harder to reverse engineer".
+
+Appendix D then describes `script_current_file` as *"the full path and
+filename of the script that is currently being executed. If the property
+is retrieved from within a compiled game, the path is that of the source
+file on the original development machine"* -- which reads like the path
+being in **every** compiled game, release included, and would contradict
+this document's flat claim that a game's own file names are unrecoverable.
+
+**It does not, and the three release builds made for this were the test.**
+`constant velocity`, `cs client` and `cs server` were compiled here with
+`-C` from a known directory, and neither the executables nor the decrypted
+modules hold one byte of that path. The only `.bgt` in any of them is
+`rotu.bgt`, a filename the game itself writes. So the appendix is
+describing the debug case and simply does not say so, and the claim stands
+-- now confirmed from the engine's own documentation rather than inferred
+from a parse.
+
+**And the first run of that test was a false negative**, which is worth
+more than the result. `strings -a <exe> | grep -c scratchpad` printed `0`
+three times -- because **`strings` is not installed here**, so every
+pipeline failed and `grep -c` counted an empty stream. Three confident
+zeroes from a command that never ran. The answer only became real when the
+same search was done in Python against the bytes. A measurement is not a
+measurement until you have checked the instrument ran.
+
+#### `limitations` is one line, and it is about the network object
+
+The whole page: *"The network object is too complicated. We need a higher
+level wrapper around it that simplifies common tasks."* Worth knowing
+before reading networking code in a recovered game -- `cs` drives
+`network` directly across a client and a server, and that is not the
+author working around a missing wrapper, it is the only interface there
+has ever been.
+
+#### Running a script from source is a DEBUG run
+
+Appendix H closes with it: *"When you run a BGT script from source, it is
+automatically run in debug mode."* That is the other half of **Run as a
+script, a game takes its developer path** -- `bgt compile --run` does not
+merely skip `get_SCRIPT_COMPILED()`, it runs the whole thing under a
+different build, with the profiler instrumentation the same appendix
+describes. One more reason the executable is the only honest way to
+exercise a recovery.
+
 ### What the documentation does not say, the engine will
 
 A signature is not semantics, and recovered source is only as meaningful as

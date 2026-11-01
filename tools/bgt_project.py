@@ -941,13 +941,27 @@ def _bgt_roots() -> List[str]:
     return [os.path.dirname(folder) for folder in _default_includes()]
 
 
-#: BGT's own redistributables for talking to a screen reader, and the API each
-#: one serves. BGT ships them under `redist/screen_readers/` precisely because
-#: a built game needs them beside it.
+#: BGT's own redistributables for talking to a screen reader, the API each
+#: one serves, and the licence that has to travel with it. BGT ships them
+#: under `redist/screen_readers/` precisely because a built game needs them
+#: beside it.
+#:
+#: **NVDA's client is LGPL and its licence is not optional.** BGT's own
+#: Appendix F says so outright -- *"you need to include the file called
+#: license.txt along with NVDA's dll (found in the same directory) if you
+#: wish to support this screen reader"* -- and `redist/screen_readers/nvda/`
+#: ships that file (LGPL 2.1) beside the DLL. It is the only licence file in
+#: the whole BGT install, and this tool copied the binary and left it
+#: behind, so every recovered project that speaks through NVDA was
+#: redistributing an LGPL library without its terms.
+#:
+#: System Access carries none: the same appendix records that its DLL "has
+#: no explicit license attached to it but is freely distributable".
 SPEECH_CLIENTS = (
-    ("nvdaControllerClient32.dll", os.path.join("screen_readers", "nvda"), "NVDA"),
+    ("nvdaControllerClient32.dll", os.path.join("screen_readers", "nvda"),
+     "NVDA", "license.txt"),
     ("SAAPI32.dll", os.path.join("screen_readers", "system_access"),
-     "System Access"),
+     "System Access", None),
 )
 
 #: the APIs whose presence means the module speaks through a screen reader at
@@ -983,8 +997,12 @@ def speech_clients(module, out_dir: str,
         return [], []
 
     copied: List[str] = []
+    #: the DLLs alone. A licence is carried for redistribution and is
+    #: not what the engine looks for at run time, so it does not belong
+    #: in the "keep these beside the script" note.
+    dlls: List[str] = []
     notes: List[str] = []
-    for name, where, reader in SPEECH_CLIENTS:
+    for name, where, reader, licence in SPEECH_CLIENTS:
         source = next((os.path.join(root, "redist", where, name)
                        for root in (bgt_roots or _bgt_roots())
                        if os.path.isfile(os.path.join(root, "redist", where, name))),
@@ -996,12 +1014,33 @@ def speech_clients(module, out_dir: str,
             continue
         shutil.copy2(source, os.path.join(out_dir, name))
         copied.append(name)
+        dlls.append(name)
         notes.append("%s copied in, so speech reaches %s rather than falling "
                      "back to SAPI" % (name, reader))
-    if copied:
+        if licence is None:
+            continue
+        # Named after the DLL rather than left as `license.txt`, so it
+        # cannot be mistaken for the project's own licence and cannot
+        # collide with one. The LGPL asks that the terms accompany the
+        # library, not that the file keep a particular name.
+        from_licence = os.path.join(os.path.dirname(source), licence)
+        if not os.path.isfile(from_licence):
+            notes.append("%s is LGPL and its %s was not found beside it in "
+                         "BGT's redist folder -- fetch it before you "
+                         "redistribute this project" % (name, licence))
+            continue
+        as_named = "%s-%s" % (os.path.splitext(name)[0], licence)
+        shutil.copy2(from_licence, os.path.join(out_dir, as_named))
+        copied.append(as_named)
+        notes.append("%s copied in as well: %s is LGPL, and BGT's own "
+                     "Appendix F says this file has to ship with it"
+                     % (as_named, name))
+    if dlls:
         notes.append("keep %s beside the script: this game calls %s, and the "
                      "engine looks for the client DLL in the script's own "
-                     "folder" % (" and ".join(copied), ", ".join(uses[:3])))
+                     "folder -- or call screen_reader_set_library_path to "
+                     "point it somewhere else"
+                     % (" and ".join(dlls), ", ".join(uses[:3])))
     return copied, notes
 
 

@@ -1830,6 +1830,78 @@ def test_the_screen_reader_client_is_brought_in_for_a_game_that_speaks():
         assert os.listdir(quiet) == []
 
 
+def test_nvdas_lgpl_licence_travels_with_its_dll():
+    """BGT's Appendix F: *"you need to include the file called license.txt
+    along with NVDA's dll (found in the same directory) if you wish to
+    support this screen reader"*.
+
+    `redist/screen_readers/nvda/` ships that file -- LGPL 2.1, and the only
+    licence anywhere in a BGT install -- and this tool copied the binary and
+    left it behind, so every recovered project that speaks through NVDA was
+    redistributing an LGPL library without its terms. Nothing in any count
+    could show that, which is why it took reading the engine's own
+    documentation rather than running anything.
+
+    It is named after the DLL rather than kept as `license.txt`, so it
+    cannot be taken for the project's own licence or collide with one. The
+    LGPL asks that the terms accompany the library, not that the file keep a
+    particular name.
+
+    System Access carries no licence and must not grow one: the same
+    appendix records that its DLL "has no explicit license attached to it
+    but is freely distributable".
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        redist = os.path.join(tmp, "bgt", "redist", "screen_readers")
+        for sub, name in (("nvda", "nvdaControllerClient32.dll"),
+                          ("system_access", "SAAPI32.dll")):
+            os.makedirs(os.path.join(redist, sub), exist_ok=True)
+            with open(os.path.join(redist, sub, name), "wb") as fh:
+                fh.write(b"MZ-not-really-a-dll")
+        with open(os.path.join(redist, "nvda", "license.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("GNU LESSER GENERAL PUBLIC LICENSE Version 2.1")
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+
+        copied, notes = bgt_project.speech_clients(
+            _Mod([], called=["screen_reader_speak"]), out,
+            bgt_roots=[os.path.join(tmp, "bgt")])
+        assert copied == [
+            "nvdaControllerClient32.dll",
+            "nvdaControllerClient32-license.txt",
+            "SAAPI32.dll"]
+        assert os.path.isfile(
+            os.path.join(out, "nvdaControllerClient32-license.txt"))
+        # It is in the file list, so the ZIP and the report both hold it.
+        assert any("Appendix F" in note for note in notes)
+        # ...and it is NOT in the run-time note: the engine never looks for
+        # a licence, so saying to keep it beside the script is noise.
+        keep = next(n for n in notes if "beside the script" in n)
+        assert "license" not in keep
+        assert "screen_reader_set_library_path" in keep
+
+
+def test_a_licence_missing_from_the_redist_folder_is_reported():
+    """The DLL is still worth copying -- the game is mute without it -- so
+    the absence is a note rather than a refusal, and it says what to do.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        redist = os.path.join(tmp, "bgt", "redist", "screen_readers", "nvda")
+        os.makedirs(redist)
+        with open(os.path.join(redist, "nvdaControllerClient32.dll"),
+                  "wb") as fh:
+            fh.write(b"MZ")
+        out = os.path.join(tmp, "project")
+        os.makedirs(out)
+        copied, notes = bgt_project.speech_clients(
+            _Mod([], called=["screen_reader_speak"]), out,
+            bgt_roots=[os.path.join(tmp, "bgt")])
+        assert copied == ["nvdaControllerClient32.dll"]
+        assert any("LGPL" in note and "not found beside it" in note
+                   for note in notes)
+
+
 def test_a_missing_screen_reader_client_is_said_out_loud_not_skipped():
     """Falling back to SAPI is the quiet failure, so the absence is reported."""
     with tempfile.TemporaryDirectory() as tmp:
