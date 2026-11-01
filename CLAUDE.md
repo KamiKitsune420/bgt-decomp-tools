@@ -1994,7 +1994,7 @@ checks say:
 | Paladin of the Sky | 23,442 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
 | Psycho Strike | 24,431 | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
 | Crazy Party | 175,334 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
-| Manamon 1 | 83,406 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
+| Manamon 1 | 83,407 | 0 | 0 | yes | 26,483 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Psycho Strike's goto column is 0 now**, which takes its two
@@ -5873,14 +5873,34 @@ neither. I was about to drop both rows as the audit over-reporting.
 **Both are real**, and checking them is what found the instrument's two
 blind spots:
 
-- **`coin::act`: the call never reaches a slot at all.** Its
-  `sound_pool::update_sound_2d` leaves its result in the value register
-  and the next thing to touch that register is a `Cast`, whose handler
-  overwrites it without flushing. `CpyVtoR4`'s handler *does* flush
-  first -- its comment says why, "preserve its side effect before the
-  register is reused" -- so the rule exists and is scattered. The
-  census is built on slot binds, so it cannot see this half: a coin's
-  2D position is never updated as it moves.
+- **`coin::act`: the call never reaches a slot at all** -- **fixed.**
+  Its `sound_pool::update_sound_2d` leaves its result in the value
+  register and the next thing to touch that register was a `Cast`,
+  which overwrote it without flushing -- and a `Cast` takes its own
+  operand off the **stack**, so the register's pending call has
+  nothing to do with it and was simply dropped. The census is built on
+  slot binds, so it never saw this half: **a coin's 2D position was
+  never updated as it moved.**
+
+  `CpyVtoR4`'s handler has flushed for exactly this reason since the
+  value-register work -- its comment says "preserve its side effect
+  before the register is reused" -- so this is that rule at the branch
+  that did not have it, and the body now reads
+
+  ```
+  if (y < 0) { y = 0; }
+  game.update_sound_2d(slot, x, y);
+  @local_15 = cast<coin_collector@>(owner);
+  ```
+
+  It is the one of the 16 unserved overwrites with a named instance
+  behind it, which is why it is the one taken: the enumeration says
+  where the rule is missing and not which absence costs anything.
+
+  **And it is inert on everything else.** Super Egg Hunt, Paladin,
+  Psycho Strike and the `cs` server render byte-identical with it and
+  without it, and that server still matches its author's source in 194
+  of 196 functions:
 
   **Enumerated, which this file set as the next step: 27 sites write
   `value_reg`, and 16 of them have no flush above them that could
@@ -5893,12 +5913,36 @@ blind spots:
   |---|---|
   | anything above it in the handler | 24 of 27 -- and it counts `STOREOBJ`'s clear for `Cast` |
   | only inside the site's own branch | 5 of 27 -- and it misses the flush at the top of `_call` |
-  | above it, at no deeper an indent | **11 of 27** |
+  | above it, at no deeper an indent | **11 of 27**, and **12** since `Cast` was given one |
 
   The 16 are the register LOADS (`LdGRdR4`, `CpyGtoV4`, `LDG`, `LDV`),
   the two `TEST_OPS` sites, the three property loads (`LoadThisR`,
   `LoadRObjR`, `LoadVObjR`), `PopRPtr`, `STOREOBJ`, `Cast`, `_refcpy`,
-  `_alloc` and the three in the constructor branch.
+  `_alloc` and the three in the constructor branch. **`Cast` is served
+  now**, on the strength of the one named instance; the other 15 have
+  none, and flushing at all of them is the broad change this file
+  records as tried and wrong at a rebind.
+
+  **And the obvious way to find out which of the 16 cost anything does
+  not work**, which is worth more than the answer would have been. The
+  instrument: walk every body, and for each instruction note whether a
+  pending call was live before it and gone after it without being
+  written out. It took two corrections -- a cleared marker is the
+  NORMAL case when the value was captured into a slot, which it
+  counted 798 times on one title; and a `?&out` call is written out
+  LATER by `_order_out_arguments`, which it counted five more times on
+  the server -- and then answered **0 dropped** on Super Egg Hunt,
+  Paladin, Psycho Strike, the `cs` server and Manamon 1.
+
+  Run as a control against a build with the `Cast` flush taken back
+  out, it still answers **0** on Manamon 1 -- in a title whose
+  `coin::act` demonstrably loses a call there. A `Cast` does not clear
+  the marker at all, so the call stays pending and is dropped further
+  on, at a point where its text does sit in some temp or register that
+  nothing ever reads. Deciding whether that counts as captured IS the
+  lost-call question, so a per-step detector cannot answer it: its
+  zeros mean nothing, and the post-pass census stays the only sound
+  instrument. Recorded so the next reader does not build it again.
 
   Two things that count stops short of, and both matter before acting
   on it. A **clear** is not a flush: `pending_value_call = None`
@@ -5917,13 +5961,21 @@ blind spots:
   of a change this file records as tried and wrong at a *rebind*, where
   it emitted every intermediate of a built-up expression *and* folded
   it into the final statement.
-- **`pause_menu`: seven call sites, one text.** All six surviving
-  `menu_add_item(local_5, local_4, false)` lines read identically, and
-  the seventh -- the only one whose result is bound to a slot -- is
-  lost. `_lost_calls` tests whether the text is in the output, so six
-  identical survivors mask it. That is the under-report its own
-  docstring claims, now with an instance: an item missing from the
-  pause menu.
+- **`pause_menu`: seven call sites, one text** -- and **it is no longer
+  lost**, which this file records elsewhere and had not joined up here:
+  folding each literal into its own call made the seven texts distinct,
+  so nothing masks anything and the body renders all seven items. Read
+  again now, it is 7 of 7.
+
+  The blind spot it demonstrated is still real and now has no instance
+  in the corpus. **The wider signal was built and is inert**: counting
+  a text's call SITES against its occurrences in the output, with
+  `opCmp` excluded because the following jump renders it as a
+  comparison rather than as its own text. Every title that can be
+  measured here, and the `cs` server, renders byte-identical with it.
+  So it is not taken -- a detector with nothing to detect is one more
+  thing to keep in step -- and it is recorded here with the exclusion
+  it needs, because the next instance will want it.
 
 **And the fix for both is the same signal, one step up.** Compare the
 number of call *sites* the simulation rendered for a text against the
@@ -5940,6 +5992,24 @@ That is the next attempt, and it is deliberately not this one. The
 change here is measured on five titles; widening the signal in the
 middle of that measurement is how the previous attempt came to change
 7,627 lines.
+
+#### What the Cast flush cost, measured
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,302 | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,442 | 0 | verified | 6,952 |
+| Psycho Strike | 24,431 | 0 | verified | 6,406 |
+| Crazy Party | 175,334 | 0 | verified | 90,148 |
+| Manamon 1 | 83,406 -> **83,407** | 0 | verified | 26,482 -> **26,483** |
+| cs server | 10,876 | 0 | verified | 3,018 |
+
+Five of the six are **byte-identical**, the server included, which is what a
+fix with one named instance behind it should look like.
+
+Not one residual goto, dangling goto, split check, body error,
+passthrough or unbalanced file moves anywhere, every `bgt signatures`
+shape holds, and `bgt oracle` is 52/52.
 
 #### Sized, by the first call audit ever run on Crazy Party
 
@@ -7031,6 +7101,54 @@ Manamon 1 moves most, in a title where nothing was looking for any of it,
 and Crazy Party barely moves at all -- which is its own result rather than
 a disappointment: a title that keeps fewer snapshots has less to lose by
 folding them.
+
+#### The empty arms, triaged -- 18 of 20 are the authors' own
+
+`empty_arm` is this file's own signature for *"a condition that has
+lost its value"*, and it has stood at about twenty rows across the
+corpus with nobody reading them. **The bytecode answers most of it
+outright**: a conditional branch whose offset is 0 jumps to the very
+next instruction, so its arm is empty in the ORIGINAL -- and the
+compiler deletes unreachable code itself, so an empty arm there is the
+source's. Counted per module:
+
+| title | empty arms in the text | empty in the BYTECODE | left |
+|---|---|---|---|
+| Super Egg Hunt | 3 | 0 | 3 |
+| Paladin of the Sky | 2 | **2** | 0 |
+| Psycho Strike | 4 | **4** | 0 |
+| Crazy Party | 6 | **5** | 1 |
+| Manamon 1 | 5 | **3** | 2 |
+| cs server | 0 | 0 | 0 |
+
+So fourteen are the author writing `if (c) { }` -- Manamon 1's
+`if (key_pressed(KEY_Q)) { }` and `if (tamer_data !is null) { }` are
+both `JLowZ 0` with nothing between the branch and its target -- and
+the second question closes four more: **is the slot the arm writes
+ever READ?**
+
+- **Super Egg Hunt's three** are a joystick dead zone.
+  `browse_trophies` has `if (absolute(double(stick.get_x())) < 100.0)
+  { }` twice, and the arms store `false` into slots 18 and 19 -- which
+  are initialised `false` before the loop, set `true` in the key
+  branches, and **never read**. The author's own dead flags, like
+  `find_best_weapon`'s `int best = -1;`.
+- **Manamon 1's experience curve is safe**, which was the one worth
+  being nervous about: `experience_formula` has
+  `if (int(power(level, 3)) > 150) { }` for levels at or below 10, and
+  a dropped store there would change the XP curve of the whole game.
+  The bytecode clamps `local_16` to 150 and never reads it -- the
+  accumulator the function returns is a different slot.
+
+**Two are open and named**: one in Crazy Party, and Manamon 1's
+`if (get_SCRIPT_COMPILED()) { }` inside `if (!arg0)`, where the arm
+really is empty in the recovery and not in the bytecode.
+
+And the instrument needed its own correction, which is the usual one:
+asked of `jump_target == 0` it answered **0 for every title**,
+including two bodies whose branch over nothing had already been read by
+hand. `dw_arg` is the offset in instructions and `jump_target` is the
+resolved one -- a zero from the wrong field.
 
 Two narrownesses, both deliberate and both pinned by a test. A comparison
 is only seen **parenthesised**, which is what the renderer emits, so a
@@ -9187,9 +9305,18 @@ rendered output**, not just their counts: this fix leaves Super Egg Hunt,
 Paladin and Psycho Strike byte-identical, which is what a correctly scoped
 structurer change looks like.
 
-What is left is irreducible flow, switch tails and multi-entry loops in other
-titles — Manamon 2 still reports 4 — which stay labelled rather than forced
-into a shape they do not have.
+**Nothing is left on any title that can be measured here.** All five are
+at 0 residual gotos and 0 dangling gotos, Crazy Party's fourteen
+included -- that row was owed twice and is paid above. Manamon 2
+reported 4 at the commit it was last measured and cannot be
+re-measured here, because its own runtime is gone from this machine
+and BGT 1.3 does not parse its fork.
+
+And they were never "labelled", which this said for a long time: a
+residual `goto` in this corpus has no label anywhere -- see **A
+residual `goto` is a DANGLING goto, in every title**, where the
+structurer turns out to have two sites that write a `goto` and none
+that writes a label.
 
 **No semantic checking on edits.** `bgt asm` proves the *encoding* round-trips,
 not that your edit makes sense. Renaming a literal is safe; changing an

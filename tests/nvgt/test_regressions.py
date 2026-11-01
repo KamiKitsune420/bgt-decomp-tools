@@ -2080,6 +2080,45 @@ class ClosedBeforeReadTests(unittest.TestCase):
         with io.open(decompile.__file__, encoding="utf-8") as fh:
             self.assertIn("if off <= 0:", fh.read())
 
+    # -- and the register, which a Cast used to overwrite --------------
+    def test_a_pending_call_is_written_out_before_a_CAST(self):
+        """A call whose result nothing reads is parked in the value register,
+        and a `Cast` takes its own operand off the STACK -- so the register's
+        pending call has nothing to do with it and was simply dropped.
+
+        Manamon 1's `coin::act` is the instance: it moves the coin, calls
+        `pool.update_sound_2d(slot, x, y)` without reading the result, and
+        then casts its owner to a `coin_collector@`. So **a coin's 2D
+        position was never updated as it moved**, and the body came out with
+        the call missing entirely.
+
+        `CpyVtoR4`'s handler has flushed for this reason since the
+        value-register work -- "preserve its side effect before the register
+        is reused" -- and of the 27 places that overwrite that register, 16
+        have no flush that reaches them. This is the one with a named
+        instance behind it.
+        """
+        from decompile import Atom
+        fd = self._fd(pending_value_call="game.update_sound_2d(slot, x, y)",
+                      pending_value_call_pos=120)
+        fd.last_set = None
+        fd.sparse_switches, fd.dense_switches = {}, {}
+        fd.stack = [Atom("var", "owner", 1)]
+        fd.value_reg = Atom("raw", "<?reg>")
+        fd.list_values = {}
+        cast = Instr(pos=130, op=0, name="Cast", bc_type="", size=1)
+        cast.type_ref = None
+        cast.dw_arg = 7
+        fd.instrs = [cast]
+        fd.step(cast)
+        self.assertEqual(fd.flushed_calls,
+                         [(120, "game.update_sound_2d(slot, x, y);")])
+        self.assertIsNone(fd.pending_value_call)
+        #: ...and the statement lands where the call RAN, not at the cast.
+        self.assertEqual(fd.events[0].pos, 120)
+        #: the cast itself still happens
+        self.assertIn("cast<", fd.value_reg.text)
+
     # -- the destructor --------------------------------------------------
     def test_destructing_a_slot_is_not_writing_to_it(self):
         """Built from a real module, because this is the PRODUCER side.

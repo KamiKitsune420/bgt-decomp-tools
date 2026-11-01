@@ -2458,6 +2458,19 @@ class FuncDecompiler:
             self._refcpy(ins)
             return
         if name == "Cast":
+            #: **A call still waiting in the value register has RUN**, and a
+            #: `Cast` takes its own operand off the STACK -- so the register's
+            #: pending call is unrelated to it and was simply dropped.
+            #: `CpyVtoR4`'s handler has flushed for this reason since the
+            #: value-register work, with the comment "preserve its side
+            #: effect before the register is reused"; this is the same rule
+            #: at the branch that did not have it.
+            #:
+            #: Manamon 1's `coin::act` is the instance: it moves the coin,
+            #: calls `pool.update_sound_2d(slot, x, y)` without reading the
+            #: result, and then casts its owner -- so a coin's 2D position
+            #: was never updated as it moved.
+            self._flush_pending_call()
             # Cast's operand is the target handle type (`sword@`); the result
             # is always a handle, so write it as one.
             t = (ins.type_ref.format_name() + "@") if ins.type_ref else f"type#{ins.dw_arg}"
