@@ -2929,13 +2929,95 @@ cleans 8 + 12. Count pushes; use `add esp` as the check.
 | `elias_theme_get_source_count(theme, &count)` | |
 | `elias_theme_enumerate_sources(theme, callback, user)` | **a callback**, and its own context |
 | `elias_theme_destroy(theme)` | |
-| `elias_theme_start(a, b)`, `set_level(a, b)`, `play_stinger(a, b)`, `change_key(a, b)` | two each |
+| `elias_theme_start(theme, cb, 0, x, level, max, y, z, flag)` | **nine**, and the second is a callback |
+| `elias_theme_set_level(theme, a, b, c, d, key, flag)` | **seven** |
+| `elias_theme_change_key(theme, a, b)` | three |
 | `elias_theme_read_samples(ctx, buffer, &count)` | |
 | `set_prebuffer_length_in_milliseconds(theme, 500)` | and `set_processing_period_in_milliseconds(theme, 250)` |
 
 **Zero is success**, consistently: every call is followed by `test eax, eax`
 and a jump that treats non-zero as the error path, and on failure the game
 calls `elias_theme_destroy` and gives up.
+
+##### Arity is not two just because a script method takes two arguments
+
+The script method `elias::start(int, int)` takes two, and the C function takes
+**nine** -- `add esp, 0x24` after the call, nine pushes before it. The same
+mismatch runs through the family: `set_level` is seven and `change_key` is
+three where the script shows two, one and one. Reading the script binding's
+arity onto the C function is the mistake, and it is not a cosmetic one: a
+harness that calls `elias_theme_start(theme, 1)` gets error **3** and spends a
+while looking for the cause in the wrong place, which is exactly what happened
+here.
+
+MSVC's folded cleanups make this worse rather than better -- `change_key`'s
+twelve bytes turn up inside the `add esp, 0x28` after `set_level`, so the
+cleanup after a call is the total of that call and any earlier one that was
+deferred. **Count the pushes.**
+
+##### The source protocol, which is the whole of how audio gets in
+
+`elias_theme_start`'s second argument is a function pointer, and that is where
+the audio comes from. elias calls it with an opcode and the opaque handle the
+resolve callback returned:
+
+```
+int source_callback(int op, void *handle, void *arg3, int arg4)
+```
+
+| op | what gate.exe does with it |
+|---|---|
+| 3 | prepare the source; fail the whole call if it returns false |
+| **1** | **read `arg4` samples into `arg3`**, returning how many were really read |
+| 2 | seek |
+| 4 | finish, and release |
+
+Two things that read straight off the instructions and would be guesses
+otherwise. **The samples are 16-bit**: elias advances the shortfall pointer
+with `lea edi, [edi + eax*2]`, two bytes per sample. And **elias zero-fills a
+short read itself** (`rep stosd` / `rep stosw` over the remainder), so a host
+that runs out of audio gets silence rather than stale buffer, and need not pad.
+
+**So the handle is opaque to elias and means whatever the host decides.** That
+is the part worth having: `gate.exe` returns a pointer to its own object whose
+`+0x1c` holds a reader with a vtable, and elias never looks inside -- it only
+hands the pointer back to the callback it was given. Any harness may define
+its own handle, and the only contract is the four opcodes above.
+
+##### Driven from outside the game, with no installs
+
+Proven rather than argued, and it needs nothing fetched: 32-bit PowerShell
+lives in `SysWOW64` on every 64-bit Windows and `csc.exe` ships with the .NET
+Framework, so `csc -platform:x86` builds a 32-bit harness that can load a
+32-bit DLL. Python cannot, on this machine, because the only Python here is
+64-bit.
+
+What that harness gets, against `The Gate`'s own `elias.dll`:
+
+```
+elias_set_memory_allocator(alloc, free)   -- host allocators, called 372 times
+elias_theme_create_from_xml(...)          -> 0, a live theme handle
+elias_theme_get_basic_info(...)           -> 44100, 2
+elias_theme_get_source_count(...)         -> 91
+elias_theme_enumerate_sources(...)        -> 0
+elias_theme_destroy(theme)                -> 0, and 372 frees: no leak
+```
+
+**Three of those are cross-checks rather than outputs.** `44100, 2` is
+`boss.epro`'s own `sample_rate` and `channels`; **91** is exactly the number of
+`filename` attributes in that file, counted independently; and the allocator
+being entered at all proves the two function pointers were taken as declared.
+
+`enumerate_sources` returns **15** when the callback declines a source, and
+stops at the first one -- so that is the host-refused code, worth knowing
+before reading a 15 as something structural.
+
+The remaining gap is narrow and named: **five of `start`'s nine arguments.**
+Args 1, 2, 5 and 6 are the theme, the callback and the script's level and
+maximum; args 3, 4, 7, 8 and 9 come from fields of the game's own wrapper
+object (`+0x34`, `+0x38`, `+0x40` and a byte at `+0x3c`), and what those hold
+has not been read yet. Until they are, `start` answers 3 and no audio is
+pumped.
 
 ##### elias never opens a file, and that is the whole design
 
@@ -3088,6 +3170,33 @@ layered to build intensity, with stingers fired over the top.
 each one names, **0 are missing from the pack**, and of the pack entries in
 each theme's folder, **0 are unreferenced**. So the theme data recovers whole,
 and a port has everything it needs from the game side.
+
+#### ...and the engine's own validator agrees, which is the cross-check
+
+The vocabulary above was derived from five shipped themes, and five samples
+cannot say which attributes are *required* or which combinations are illegal.
+`elias.dll` answers both, in 31 message-shaped strings that are its XML
+validator talking:
+
+| the validator says | so |
+|---|---|
+| `No theme element was found.` | `<theme>` is the root, as the data shows |
+| `No <bars\|channels\|mode\|sample rate\|tempo\|time signature> attribute was specified for the theme.` | **all six are mandatory**; `volume` draws no such message, so it is optional |
+| `There are no tracks in the theme.` | at least one track |
+| `One or more tracks in the theme are missing their id attribute.` | `id` is mandatory per track |
+| `Both a default agility element and a default agility_points element was specified.` | **`agility` and `agility_points` are mutually exclusive** |
+| the same, for `rendezvous` | the `<rendezvous>` block has its own pair, under the same rule |
+| `The default pickup element has a missing beats attribute.` | and `progression` likewise needs `mode` |
+| `One or more of the beat elements ... is missing their point attribute.` | `<beat>` requires `point` |
+
+The exclusion is the part the data could not have given: `horror_2` uses
+`agility_points` with twelve `<beat point="...">` children while the other
+four use a scalar `agility value="..."`, and nothing in five files says
+whether a theme may carry both. The engine says no.
+
+So the format is specified from two independent directions that agree -- the
+themes a composer actually shipped, and the validator that accepted them --
+which is the same shape as checking a reader against a tail that lands on EOF.
 
 #### How the script drives it, read out of the recovery
 
