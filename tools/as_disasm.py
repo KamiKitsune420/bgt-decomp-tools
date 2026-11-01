@@ -124,6 +124,15 @@ OPERAND_ROLES: Dict[str, Dict[int, str]] = {
     #         if (arg1 != 0) FindFunction(arg1 - 1);
     "ALLOC": {0: "objtype", 1: "ctorfunc"},
     "FREE": {1: "objtype"}, "REFCPY": {0: "objtype"}, "ObjType": {0: "objtype"},
+    # `RefCpyV` is `PSF dest` + `REFCPY`, so its second operand is the same
+    # object type `REFCPY` and `FREE` carry -- and it had no role at all, so it
+    # printed as a bare index. Checked rather than assumed: all 3,456 of them in
+    # two titles resolve to a type, and in every one of the 2,807 cases where the
+    # slot is also freed the type AGREES with the paired `FREE`, which is the
+    # cross-check that makes it evidence instead of a small integer landing
+    # inside a table. `bgt roundtrip` compares named operands BY NAME, so
+    # without this a rebuild's reordered type table read as a changed constant.
+    "RefCpyV": {1: "objtype"},
 
     "JMP": {0: "jump"}, "JZ": {0: "jump"}, "JNZ": {0: "jump"},
     "JS": {0: "jump"}, "JNS": {0: "jump"}, "JP": {0: "jump"}, "JNP": {0: "jump"},

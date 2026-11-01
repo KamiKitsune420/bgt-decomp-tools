@@ -1788,8 +1788,8 @@ trip gains two more byte-identical bodies:
 
 | | edit distance | of the original | bodies identical |
 |---|---|---|---|
-| before | 9,446 | 33.1% | 30 / 137 |
-| after | **9,282** | **32.5%** | **32 / 137** |
+| before | 8,298 | 29.1% | 30 / 137 |
+| after | **8,100** | **28.4%** | **34 / 137** |
 
 Modest against the two changes before it, and it is the first one here
 that is about *meaning* rather than shape: the others removed statements
@@ -1988,7 +1988,7 @@ checks say:
 | Super Egg Hunt | 5,294 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
 | Paladin of the Sky | 23,440 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
 | Psycho Strike | 24,428 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 174,597 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
+| Crazy Party | 174,597 | 14 | 0 | yes | 90,145 | 14, every one a DANGLING `goto` |
 | Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
@@ -3005,12 +3005,31 @@ found by reading what it said rather than by inspection:
   PshVPtr 3 ; PshVPtr 0 ; ADDSi piano::piano_pool ; REFCPY ; FREE 3
   ```
 
-  The whole constructor recovers as `filepath = string(); this.reset();`,
-  so **the 500-slot sound pool is never created** and the 500 survives
-  nowhere. The lost-call mechanism cannot help: putting
-  `sound_pool(500);` back as a statement hands the pool to nobody. The
-  number has to go on the member's *declaration*, exactly as the sized
-  array factory's length does one entry below.
+  The constructor recovered as `filepath = string(); this.reset();`, so
+  **the 500 survived nowhere** and the member was left to the default
+  construction the compiler generates. The lost-call mechanism cannot
+  help: putting `sound_pool(500);` back as a statement hands the pool to
+  nobody, and assigning it would copy a different object into the member
+  rather than store the one the original stored.
+
+  **Fixed, by putting the number where the array length already goes.**
+  `_member_array_sizes` is the hook -- the sized-array factory's length
+  survives only on the declaration for exactly the same reason -- and it
+  takes a second shape now: a call feeding `STOREOBJ ; PshVPtr ; PshVPtr
+  ; ADDSi ; REFCPY` into a member that is declared BY VALUE, whose callee
+  is that member's own type, with a constant argument. The declaration
+  comes out `sound_pool piano_pool(500);`.
+
+  Each of those three conditions is what keeps it to the one member that
+  loses something, and the sweep is why: of the 38 constructor bodies in
+  the corpus with a one-argument call feeding this shape, Paladin's two
+  are the array-length form and all 35 of Crazy Party's are **handle**
+  members, which are a real assignment and are rendered. Run over the
+  five titles, the rule now names **exactly one member in Manamon 1 and
+  nothing anywhere else** -- Paladin's two `input_recorder` arrays and
+  Crazy Party's five `CarteCombat`/`LumiereCoucher` arrays are the
+  pre-existing length form, every one of them an array. Anything that
+  is not a constant is left alone rather than guessed at.
 
   **Swept across all five titles**, constructor bodies where a `CALL`
   with at least one argument is followed by `STOREOBJ` and a `REFCPY`
@@ -3724,8 +3743,8 @@ move at all**:
 
 | | instructions added or lost | of the original's 28,564 | bodies identical |
 |---|---|---|---|
-| before | 20,036 | 70.1% | 29 / 137 |
-| after | **15,124** | **52.9%** | 29 / 137 |
+| before | 19,504 | 68.3% | 29 / 137 |
+| after | **13,950** | **48.8%** | 29 / 137 |
 
 and the module the engine wrote went from 119,103 bytes to 110,501 against
 the original's 106,166 -- oversize from **+12.2% to +4.1%**. Quoting the
@@ -3735,8 +3754,8 @@ exact-match count alone would have reported that fix as worthless.
 
 | title | bodies paired | identical | with slots | edit distance | of the original |
 |---|---|---|---|---|---|
-| Super Egg Hunt | 137 / 210 | 29 | 29 | 15,124 | 52.9% |
-| Paladin of the Sky | 798 / 926 | **256** | 255 | 74,725 | 58.2% |
+| Super Egg Hunt | 137 / 210 | 29 | 29 | 13,950 | 48.8% |
+| Paladin of the Sky | 798 / 926 | **271** | 270 | 72,029 | 56.1% |
 
 Paladin pairs 798 bodies and **loses none** -- the only labels in the
 rebuilt module that are not in the original are its six generated
@@ -3751,6 +3770,44 @@ inherited from the commit they were written at. The column is still the
 expensive one -- asking costs a dialog on somebody's screen -- but on a
 title that compiles cleanly the dialog is the success one the driver
 dismisses, which is a cost worth paying once per measurement.
+
+### Every figure above was overstated, and by one cause
+
+**A correction, and the direction it runs in is the useful part.** The
+distances first published for all of this were 3 to 6% too high and the
+identical-body counts too low -- Paladin's 256 was 271 -- and one
+unmapped operand is the whole of it.
+
+`RefCpyV` is `PSF dest` + `REFCPY`, so its second operand is the same
+object type that `REFCPY` carries in its first and `FREE` in its second.
+Both of those are mapped in `as_disasm.OPERAND_ROLES`; **`RefCpyV` had
+no role at all**, so it printed as a bare index -- and this comparison
+resolves a named operand BY NAME precisely because a rebuild reorders
+every table. Unmapped, the type index read as a changed constant, so
+every handle copy in every body counted as a difference. On Super Egg
+Hunt that is **1,182 of the 9,282** instruction-edits last reported.
+
+It is `{1: "objtype"}` now, and the evidence is a cross-check rather
+than a resolution: **all 3,456 `RefCpyV` operands in two titles resolve
+to a type, and in every one of the 2,807 cases where the slot is also
+freed the type AGREES with the paired `FREE`.** That matters because
+resolving alone is weak evidence -- `ChkNullV`'s slot, `AllocMem`'s size
+and `PshListElmnt`'s byte offset all "resolve to a type" too, being
+small integers landing inside a table, and none of them is one. That is
+this file's own rule about a resolver that returns a placeholder,
+arriving from the measuring end.
+
+| Super Egg Hunt | edit distance | of the original | bodies identical |
+|---|---|---|---|
+| session start | 19,504 | 68.3% | 29 / 137 |
+| after the dead handle | 13,950 | 48.8% | 29 / 137 |
+| after the scratch-slot fold | 8,298 | 29.1% | 30 / 137 |
+| after signedness | **8,100** | **28.4%** | **34 / 137** |
+
+Every point re-derived from the same stored builds, so the series is one
+measurement rather than four. `bgt libcheck` is unmoved by the mapping
+(43/46 on this title), which is the check that says the disassembler's
+other readers do not depend on the gap.
 
 ### A low ratio means MISALIGNMENT, not a defect
 
@@ -3776,6 +3833,56 @@ reading, never to rank how wrong they are, and read the delta and the diff
 before concluding anything. The same caution the rest of this file gives
 about `libcheck` scores applies here with more force, because this
 comparison is per instruction and a one-instruction phase shift is total.
+
+### Splitting the residue: what could change behaviour, and what is spelling
+
+The distance is two things added together and the fixes for them are
+nothing alike, so the residue has to be split before any more is spent
+on it. Per differing body, five multisets from each side's bytecode --
+the callees by name, the string literals, the numeric constants, the
+globals touched, the members touched -- and **both sides are bytecode,
+which is what makes this cleaner than the text audits.** Those compare
+an escape against the byte it escapes and a number against its
+spelling, and need three rules to undo it; here `"a"` is `"a"` and `30`
+is `30` on both sides by construction.
+
+Super Egg Hunt, 137 paired bodies:
+
+| | bodies | |
+|---|---:|---|
+| byte-identical | 34 | 24.8% |
+| same content, different plumbing | 83 | 60.6% |
+| **content differs** | **20** | **14.6%** |
+
+So **117 of 137 bodies do the same things to the same values**, and
+twenty could differ in behaviour. That is the number worth working on,
+and it is a seventh of what the instruction count suggests.
+
+**The plumbing has to be excluded or the answer is meaningless.** Asked
+with object lifecycle calls counted -- `string::$beh0`, `$beh2`,
+`opAssign`, the string factory -- it says 53 bodies differ, and almost
+all of that is a string local the source never declared being
+constructed, assigned and destroyed. Our plumbing differing from the
+original's plumbing is not a behaviour difference.
+
+Of the twenty, three shapes recur and two are explained:
+
+- **`check_motd` duplicates a literal, and it is free.** The original
+  keeps the base URL in a string local read twice; the recovery folds
+  the literal into both reads. Same bytes, one extra construction --
+  the designed cost of restricting the scratch-slot fold to repeatable
+  values, visible here for the first time.
+- **`cabinet::mode_check` gains `cabinet::count` and the constants 48
+  and 6**, which is the retained switch range guard below, reconstructed
+  as source. Behaviour-neutral and unfaithful, exactly as recorded.
+- **Five bodies where the ORIGINAL reads a global or member more times
+  than the rebuild** -- `check_time_objects` is `-6` globals and `-4`
+  members. A repeated read collapsed into one is safe where nothing
+  changed in between, which is what `_stale_fold` is for; it is **not
+  established** that this is all it is. `chicken::walk` reads clean and
+  the original still makes two more reads each of `chicken::x` and
+  `chicken::y` than our source, and why is not known. That is the one
+  unexplained shape and the next thing to read.
 
 ### What dominates the remaining distance, and it is one shape
 
@@ -3875,7 +3982,7 @@ them added because the first form broke a title:
 ##### The shape that forced the third condition
 
 Without it the rule is much bigger -- Crazy Party **190,735 -> 162,719
-lines**, Egg Hunt's round-trip edit distance 15,124 -> 8,293 -- and it
+lines**, Egg Hunt's round-trip edit distance 13,950 -> 7,145 -- and it
 duplicates calls, because the duplicate-read counter cannot see these
 reads. Manamon 1's `handle_beta_registration`:
 
@@ -3936,11 +4043,11 @@ built here, measured against their own originals:
 
 | | edit distance | of the original | bodies identical |
 |---|---|---|---|
-| Super Egg Hunt, before this session | 20,036 | 70.1% | 29 / 137 |
-| ...after the dead-handle fix | 15,124 | 52.9% | 29 / 137 |
-| ...after this | **9,446** | **33.1%** | **30 / 137** |
-| Paladin, after the dead-handle fix | 74,725 | 58.2% | 256 / 798 |
-| ...after this | **39,019** | **30.4%** | **269 / 798** |
+| Super Egg Hunt, before this session | 19,504 | 68.3% | 29 / 137 |
+| ...after the dead-handle fix | 13,950 | 48.8% | 29 / 137 |
+| ...after this | **8,298** | **29.1%** | **30 / 137** |
+| Paladin, after the dead-handle fix | 72,029 | 56.1% | 271 / 798 |
+| ...after this | **36,799** | **28.7%** | **292 / 798** |
 
 Both still `compiled cleanly`. Super Egg Hunt's distance has more than
 halved across the session and Paladin's has very nearly halved in one
@@ -4156,7 +4263,7 @@ fixes. What the chain decomposes for is that **every string literal is
 constructed into a NAMED scratch slot**, so a value mentioning one is
 stale by this rule. And asked of the goal rather than of taste, the
 round trip says it buys nothing: Super Egg Hunt's edit distance goes
-**15,124 -> 15,133**, nine instructions the wrong way, because the
+**13,950 -> 13,959**, nine instructions the wrong way, because the
 compiler recombines what the decomposition split.
 
 So: safe, one confirmed defect fixed, 1,567 lines of readability spent,
@@ -5500,6 +5607,70 @@ Two corrections of detail. **The 200 is bodies, not rows**: 302 rows in
 class, renders its `round` perfectly and is reported for a different
 callee entirely -- a `random(8, 15)`. So that body was evidence against
 my *mechanism* and never against the verdict.
+
+#### Fixed: the refusal's stated reason was not true
+
+`TapisRoulantBonus::placeZone` recovers its escalator positions now:
+
+```
+before:  @local_28 = array<int>();                      // EMPTY
+after:   int[] __nvgt_list_29_478 = {0, int(round(double((local_6 / 2)), 0)), local_6};
+         @local_28 = __nvgt_list_29_478;
+```
+
+so the loop over it places escalators and `random(0, length())` is a
+real range again. The guard refused any element naming a frame slot on
+the grounds that *"the declaration is hoisted to the top of the body, so
+a slot name in it reads a value the slot does not hold yet"* -- and **a
+generated list local is not hoisted.** It is emitted where the list
+factory is called, which is after every element has been written, so the
+slot names are valid there. The claim was never checked; the output
+shows `string[] __nvgt_list_19_1320 = {...};` sitting in place in every
+title that has one.
+
+**`bgt oracle` is what says so without an engine run of a whole title**,
+and the shape took two tries. Written with locals initialised from
+constants it was **inert** -- every element constant-folds, so no
+element names a slot, the guard never fires and it passed with the
+refusal and without it. That is the third inert shape this file has
+recorded writing, and the fix is to make the value one the decompiler
+cannot fold: a PARAMETER, which renders as `arg0` and is exactly what
+the guard matched on.
+
+```
+lifted:   int[] __nvgt_list_5_32 = {0, local_1, (local_1 * 3), (local_1 + (local_1 * 3))};
+refused:  @local_4 = array<int>();
+```
+
+-- and the four reads that follow then index an empty array, which is
+the same `Index out of bounds` the existing list shapes throw. The two
+recoveries were compared as TEXT rather than by running the second one,
+because running it puts a BGT runtime-error box on somebody's screen,
+which this file records as a cost and which I paid once before
+remembering.
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,294 | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,440 | 0 | verified | 6,952 |
+| Psycho Strike | 24,428 | 2 | verified | 6,406 |
+| Crazy Party | 174,547 -> **174,665** | 14 | verified | 90,145 -> **90,148** |
+
+Crazy Party's row is the list fix measured **on its own**, from the base
+before the signedness change rather than after it, because the run that
+would have measured the two together was stopped by the host for system
+memory. So the standings keep that title at 174,597 -- the last figure
+from one run of everything -- and adding 118 to it would be arithmetic
+rather than a measurement. The attributable part is what is quoted: this
+change costs 118 lines and three restored calls on the one title that has
+a refused list, and nothing anywhere else.
+| Manamon 1 | 83,363 | 0 | verified | 26,482 |
+
+Super Egg Hunt and Paladin are **byte-identical** -- neither has a
+refused list -- and Crazy Party is the only title with any, so the
+scope is one title and 118 lines. Its three extra calls are the `round`
+calls that went with the empty array, `bgt oracle` is 52/52, and the
+suite passes.
 
 #### One `round` row is real, and it is a different defect
 
@@ -7088,6 +7259,96 @@ The general lesson is the one this file keeps relearning, in both directions.
 **A clean compile measured nothing here** -- all three bugs compiled -- and
 neither did the diagnostic count on the two rejected fixes. Running the result
 found the bugs; a *different* metric, the goto count, rejected the cures.
+
+# A residual `goto` is a DANGLING goto, in every title
+
+This file has carried Crazy Party's 14 and Psycho Strike's 2 as flow the
+structurer labels rather than forcing into a shape it does not have.
+**There are no labels.** Asked of all four files that hold them --
+`CarteCombat` 4, `part_6` 6, `Jeu` 2, `CombattantSauvage` 2 -- not one
+`L....:` is emitted, and the same is true of Psycho Strike's two in
+`home::reset_rebels`.
+
+It is true by construction, which is why it is worth stating: the
+structurer has **two** sites that write `goto L{t:04x};` and **none**
+that writes a label. Its `label` event is skipped with `i += 1`.
+
+So the sixteen are not labelled flow; they are jumps left pointing at
+nothing, and the block holding each target was structured away. Both
+kinds are one compiler error per line -- AngelScript has no `goto` -- so
+an error count never told them apart, and nothing here asked.
+`bgt recover` asks now: `dangling goto` sits beside `dangling else` in
+the report and in `recovery.json`, scoped per file because that is how
+the structurer names and emits labels.
+
+**The sixteen were counted by inspection, not by that check**, and the
+distinction is worth keeping: every `goto` target in all four Crazy
+Party files and both Psycho Strike ones was compared against every
+label those files emit, and there are none. The check reproduces it on
+Psycho Strike; the run that would have it report on Crazy Party was
+stopped by the host for system memory, so that one figure is owed.
+### The shape, and an attempt that was worse than the goto
+
+Both titles' gotos are the compiler's **bottom-tested loop**, which this
+file already documents: an unconditional forward `JMP` to the condition,
+the condition last, and a conditional back edge above the body.
+`home::reset_rebels` is the clearest:
+
+```
+local_1 = 0;
+goto L0044;                       // the entry jump to the condition
+...body...
+local_1++;
+local_2 = rebels.get_length();    // the condition's own materialisation
+goto L0004;                       // the conditional back edge
+```
+
+`_find_latch` declines it, and the reason is one line: a statement in the
+condition block is accepted only if it has no `(` in it, *"anything that
+calls something is not [the materialisation], and still rules the loop
+out"*. But `for (i = 0; i < rebels.length(); i++)` **calls `length()`
+every iteration**, and the compiler parks the result in a slot there.
+
+Narrowing that to "a call there is the condition's own if the CONDITION
+READS WHAT IT ASSIGNS" does recognise the loop, and Psycho Strike goes
+**2 residual gotos -> 0**. It was still reverted, because the loop it
+writes is wrong:
+
+```
+local_1 = 0;
+for (; local_1 < local_2; local_1++) {      // local_2 is the BOUND
+    local_2 = (arg0 ? 1 : 0);               // ...and the body's flag
+```
+
+The `local_2 = rebels.get_length();` that set the bound is gone, and slot
+2 serves both the bound and the condition flags, so `local_2` starts at 0
+and **the loop never runs**. That trades a visible failure for a silent
+wrong program, which is the one trade this file refuses -- *"half-emitting
+a construct is worse than refusing it, because the damage lands somewhere
+else"*.
+
+**The shape that would work is named rather than guessed at**: keep the
+condition block inside the loop and break out of it,
+
+```
+while (true) {
+    local_2 = rebels.get_length();
+    if (!(local_1 < local_2)) break;
+    ...body...
+    local_1++;
+}
+```
+
+which loses nothing and needs no slot to serve two purposes. It is a
+different emission from any the structurer has, so it is the next
+attempt and not this one.
+
+And `reset_rebels` has a second defect that the goto was hiding, worth
+recording because it is this file's own signature: its condition reads
+`if ((local_2 != 0) && (local_2 != 0))` -- one reused slot carrying both
+operands of a short-circuit chain, which is the `use_screen_reader`
+collapse. Structuring the loop does not fix that, and fixing that does
+not structure the loop.
 
 # Repacking
 

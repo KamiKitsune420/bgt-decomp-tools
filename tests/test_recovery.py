@@ -1252,6 +1252,57 @@ def test_sections_of_one_file_balance_together():
     assert bgt_project.unbalanced([first, second]) == []
 
 
+def test_a_goto_with_no_label_is_told_apart_from_a_residual_one():
+    """A residual `goto` is a statement the structurer chose; a `goto` to a
+    label that is never emitted means the block holding the target was
+    structured away and the jump left pointing at nothing.
+
+    Both are one compiler error per line -- AngelScript has no `goto` -- so
+    an error count never told them apart, and nothing here asked. All
+    fourteen of Crazy Party's residual gotos turn out to be this: four files,
+    fourteen targets, and **not one label emitted in any of them.**
+    """
+    dangling = bgt_project.Section(
+        kind="class", name="a",
+        text="void f() {\n    goto L0075;\n}\n")
+    dangling.path = "includes/a.bgt"
+    assert bgt_project.dangling_goto([dangling]) == [
+        ("includes/a.bgt", "goto L0075;")]
+
+
+def test_a_goto_whose_label_is_emitted_is_not_dangling():
+    section = bgt_project.Section(
+        kind="class", name="a",
+        text="void f() {\n    goto L1;\n    x();\nL1:\n    y();\n}\n")
+    section.path = "includes/a.bgt"
+    assert bgt_project.dangling_goto([section]) == []
+
+
+def test_a_label_is_only_a_label_at_the_end_of_its_line():
+    """`Jeu::lanceMenu(1);` starts with `Jeu:` and is not a label, which a
+    pattern stopping at the first colon would have taken for one -- and a
+    spurious label makes a real dangling goto look resolved."""
+    section = bgt_project.Section(
+        kind="class", name="a",
+        text="void f() {\n    goto Jeu;\n    Jeu::lanceMenu(1);\n}\n")
+    section.path = "includes/a.bgt"
+    assert bgt_project.dangling_goto([section]) == [
+        ("includes/a.bgt", "goto Jeu;")]
+
+
+def test_the_label_search_is_per_file():
+    """A label in one file does not resolve a goto in another: the
+    structurer names a label for a position inside one body, and a body is
+    never jumped to from outside its own file."""
+    a = bgt_project.Section(kind="class", name="a",
+                            text="void f() {\n    goto L1;\n}\n")
+    a.path = "includes/a.bgt"
+    b = bgt_project.Section(kind="class", name="b",
+                            text="void g() {\nL1:\n    y();\n}\n")
+    b.path = "includes/b.bgt"
+    assert bgt_project.dangling_goto([a, b]) == [("includes/a.bgt", "goto L1;")]
+
+
 def test_a_dangling_else_shows_up_as_an_imbalance_and_is_named():
     """The arm's closing brace has no opener, so the file is short a `{`.
 

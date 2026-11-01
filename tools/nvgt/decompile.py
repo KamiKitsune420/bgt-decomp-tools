@@ -742,12 +742,37 @@ def _mask_strings(line: str) -> str:
 
 
 def _member_array_sizes(c: TypeInfo) -> dict:
-    """Lengths the constructor's generated prologue gives array members.
+    """What a member's declaration has to carry because its store is dropped.
 
     `double[] down_count(256);` compiles to the length factory called in every
     constructor and stored into the member. That store is generated code and
     is dropped, so re-emitting the property declaration is what has to carry
     the length -- and it is the only place it can go.
+
+    **And the same is true of a by-value member constructed with an
+    argument**, which is the one member in the five-title corpus where this
+    was losing something. Manamon 1's `piano`:
+
+        PshC4 500 ; CALL <global>::sound_pool ; STOREOBJ 3
+        PshVPtr 3 ; PshVPtr 0 ; ADDSi piano::piano_pool ; REFCPY ; FREE 3
+
+    The whole prologue is dropped as generated code -- correctly, since no
+    source statement produces it -- so the constructor recovered as
+    `filepath = string(); this.reset();` and **the 500 survived nowhere**.
+    The lost-call mechanism cannot help: putting `sound_pool(500);` back as a
+    statement hands the pool to nobody, and assigning it would copy a
+    different object into the member rather than store the one the original
+    stored. The number belongs on the declaration, exactly as the array
+    length does.
+
+    Three things keep it narrow, and the corpus sweep is why each is needed:
+    across the five titles there are 38 constructor bodies with a
+    one-argument call feeding this shape, and only this one loses anything.
+    Paladin's two are the array-length form above; all of Crazy Party's
+    thirty-five are **handle** members, which are a real assignment and are
+    rendered. So the member must be by VALUE, the callee must be that
+    member's own type (its factory), and the argument must be a constant --
+    anything else is left alone rather than guessed at.
     """
     shape = ["STOREOBJ", "PshVPtr", "PshVPtr", "ADDSi", "REFCPY"]
     out = {}
@@ -773,6 +798,28 @@ def _member_array_sizes(c: TypeInfo) -> dict:
                            if previous.name == "PshC4" else None)
             if out[name] is None:
                 del out[name]
+
+    by_value = {name: dt for name, dt, _flags in c.properties
+                if dt.obj_type is not None and not dt.is_object_handle}
+    for f in list(c.constructors) + list(c.factories):
+        code = f.bytecode or []
+        for k, ins in enumerate(code):
+            if ins.name not in ("CALL", "CALLSYS") or ins.func_ref is None:
+                continue
+            if len(ins.func_ref.param_types or ()) != 1:
+                continue
+            if [i.name for i in code[k + 1:k + 1 + len(shape)]] != shape:
+                continue
+            name = (code[k + 4].prop_name or "").split(".")[-1]
+            dt = by_value.get(name)
+            if dt is None or name in out:
+                continue
+            if ins.func_ref.name != dt.obj_type.name:
+                continue              # not this member's own factory
+            previous = code[k - 1] if k else None
+            if previous is None or previous.name != "PshC4":
+                continue              # only a constant; never a guess
+            out[name] = str(_s32(previous.dw_arg))
     return out
 
 
@@ -3216,8 +3263,6 @@ class FuncDecompiler:
         # empty-array rendering, which is wrong in a different way; it is
         # the rendering this had before the list was recovered at all, and
         # a list that does not compile is worse than one that is empty.
-        if any(_SLOT_NAME.fullmatch(item) for item in items):
-            return None
         tname = ret.format().removeprefix("const ").rstrip("@&").strip()
         local = f"__nvgt_list_{off}_{pos}"
         self._stmt(f"{tname} {local} = " + "{" + ", ".join(items) + "};")

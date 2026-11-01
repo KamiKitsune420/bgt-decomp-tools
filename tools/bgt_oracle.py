@@ -590,6 +590,40 @@ int list_in_a_global()
     return total;
 }
 
+// An initialiser list whose elements are EXPRESSIONS over locals, not
+// literals. That shape was refused outright -- the guard said an element
+// naming a frame slot reads a value the slot does not hold yet, because the
+// declaration is hoisted above the slot's write -- and refusing it left
+// `array<int>()`, an EMPTY array. Crazy Party's `TapisRoulantBonus::placeZone`
+// is the case: `{0, centreX, maxX}` came out empty, so no escalators were
+// placed on that minigame's map and `random(0, length())` became
+// `random(0, 0)`.
+//
+// The declaration is not in fact hoisted -- a generated list local is emitted
+// where the factory is called, which is after every element has been written
+// -- so the slot names are valid there. This shape is what says so: it
+// compiles, and the values are the ones the expressions computed rather than
+// whatever the slots held earlier.
+// **It takes a PARAMETER, and that is the whole of what makes it a check.**
+// Written with locals initialised from constants the first time, every
+// element constant-folds, so no element ever names a frame slot, the guard
+// never fires and the shape passed with the refusal in place and without it
+// -- inert, which is the trap this command exists to avoid and which this
+// file already records paying for twice. A parameter cannot be folded: it
+// renders as `arg0`, which is exactly what the guard matches on.
+int list_of_expressions(int seed)
+{
+    int half = seed * 2;
+    int whole = half * 3;
+    int[] values = {0, half, whole, half + whole};
+    int total = values.length() * 10000;
+    total += values[0] * 1000;
+    total += values[1] * 100;
+    total += values[2] * 10;
+    total += values[3];
+    return total;
+}
+
 // Global initialisation ORDER: a global initialised from another global. A
 // split that moves a declaration compiles perfectly and changes this, which
 // is the whole reason `verify` exists.
@@ -655,6 +689,7 @@ void main()
     report += "list_of_strings=" + list_of_strings() + "|";
     report += "list_of_ints=" + list_of_ints() + "|";
     report += "list_in_a_global=" + list_in_a_global() + "|";
+    report += "list_of_expressions=" + list_of_expressions(1) + "|";
     call_into_a_dead_local();
     call_into_a_dead_local_per_arm(true);
     call_into_a_dead_local_per_arm(false);

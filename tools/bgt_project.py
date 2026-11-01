@@ -138,6 +138,7 @@ class Project:
                  "%-22s %d" % ("residual gotos", s.get("gotos", 0)),
                  "%-22s %s" % ("unbalanced files", s.get("unbalanced", 0)),
                  "%-22s %s" % ("dangling else", s.get("dangling_else", 0)),
+                 "%-22s %s" % ("dangling goto", s.get("dangling_goto", 0)),
                  "%-22s %s" % ("split verified", "yes" if s.get("verified") else "NO")]
         if s.get("calls_checked") is not None:
             # The one check that needs no BGT at all, and the only one a
@@ -1101,6 +1102,55 @@ def unbalanced(sections: List["Section"]) -> List[Tuple[str, int]]:
     return out
 
 
+def dangling_goto(sections: List["Section"]) -> List[Tuple[str, str]]:
+    """`goto L` where `L:` is never emitted.
+
+    A residual `goto` is already counted, and this is a different and worse
+    thing: a `goto` is at least a statement the structurer chose, where a
+    `goto` to a label that does not exist means the block holding the target
+    was structured away and the jump left pointing at nothing. Both are one
+    compiler error per line -- AngelScript has no `goto` at all -- so the
+    error count never told them apart, and nothing here asked.
+
+    **All fourteen of Crazy Party's residual gotos are this**, which is why
+    the question is worth asking: `CarteCombat` 4, `part_6` 6, `Jeu` 2,
+    `CombattantSauvage` 2, and **not one label is emitted in any of the four
+    files.** This file had them recorded as irreducible flow that stays
+    labelled rather than being forced into a shape it does not have. They
+    are not labelled at all.
+
+    Scoped per FILE rather than per function, because that is how the
+    structurer's labels are named and emitted, and a label is only ever
+    referred to from inside its own body.
+    """
+    targets: Dict[str, List[Tuple[str, str]]] = {}
+    labels: Dict[str, set] = {}
+    for section in sections:
+        for line in section.text.splitlines():
+            stripped = line.strip()
+            found = _GOTO_RE.match(stripped)
+            if found:
+                targets.setdefault(section.path, []).append(
+                    (found.group(1), stripped))
+                continue
+            found = _LABEL_RE.match(stripped)
+            if found:
+                labels.setdefault(section.path, set()).add(found.group(1))
+    bad: List[Tuple[str, str]] = []
+    for path, wanted in targets.items():
+        have = labels.get(path, set())
+        for name, line in wanted:
+            if name not in have:
+                bad.append((path, line))
+    return bad
+
+
+#: `goto L0075;` and the label it wants. The structurer names a label for the
+#: bytecode position it stands at, so the two spellings have to agree.
+_GOTO_RE = re.compile(r"^goto\s+([A-Za-z_]\w*)\s*;")
+_LABEL_RE = re.compile(r"^([A-Za-z_]\w*)\s*:\s*$")
+
+
 def dangling_else(sections: List["Section"]) -> List[Tuple[str, str]]:
     """`else` arms with no `if` above them.
 
@@ -1429,6 +1479,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         "data_packs": [dict(pack, tags=[tag.hex() for tag in pack.get("tags") or ()])
                        for pack in packs],
         "dangling_else": len(dangling_else(sections)),
+        "dangling_goto": len(dangling_goto(sections)),
     }
     for pack in packs:
         if pack.get("error"):
