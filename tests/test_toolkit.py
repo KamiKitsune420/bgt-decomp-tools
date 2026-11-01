@@ -2164,6 +2164,41 @@ def test_libcheck_engine_types_declines_rather_than_guessing():
     assert bgt_libcheck.calls("f.open(p, m);", frozenset(["file"])) == ["open"]
 
 
+def test_libcheck_skips_a_source_file_that_is_its_own_program():
+    """A file declaring `void main()` is a program, so none of it is library
+    code.
+
+    Game authors keep their dev tools in the same folder as the game's
+    includes. `constant velocity` keeps `matcher.bgt` -- a standalone
+    brace-counting utility the game never includes -- and its `main()`
+    paired against the GAME's `main()`, scoring 0.00 for a difference that
+    is simply two unrelated programs. `cs` keeps four such tools.
+
+    The whole FILE goes, not just `main`: a tool declares helpers too, and
+    a helper of a different program is no more this game's library code
+    than its entry point is.
+
+    BGT's own `include/` declares no `main` at all, so this cannot move a
+    score measured against the engine's library -- which is checked, since
+    the rule only ever makes the comparison see less.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        lib = os.path.join(folder, "helpers.bgt")
+        tool = os.path.join(folder, "matcher.bgt")
+        with open(lib, "w", encoding="latin1") as fh:
+            fh.write("int add(int a, int b)\n{\nreturn a + b;\n}\n")
+        with open(tool, "w", encoding="latin1") as fh:
+            fh.write(
+                "void main()\n{\nalert(\"t\", \"u\");\n}\n"
+                "int helper_of_the_tool()\n{\nreturn 1;\n}\n")
+        found = bgt_libcheck.library_functions([folder])
+    # The library file is read...
+    assert "<global>::add" in found
+    # ...and nothing from the program is, not even its helper.
+    assert "<global>::main" not in found
+    assert "<global>::helper_of_the_tool" not in found
+
+
 def test_libcheck_does_not_invent_a_call_from_a_subscript():
     """A subscript that merely precedes a paren names no callee.
 

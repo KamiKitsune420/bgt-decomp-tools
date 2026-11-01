@@ -202,13 +202,40 @@ def source_functions(text: str) -> Dict[str, List[str]]:
     return dict(funcs)
 
 
+#: An entry point. A file that declares one is a program of its own, so
+#: nothing in it is library code -- see `library_functions`.
+_DECLARES_MAIN = re.compile(r"(?<!\w)void\s+main\s*\(\s*\)", re.M)
+
+
 def library_functions(include_dirs: Sequence[str]) -> Dict[str, List[str]]:
+    """Every function the include folders declare, by `owner::name`.
+
+    **A file that declares `void main()` is skipped**, because it is a
+    program rather than library code. BGT's own `include/` has no such file
+    and the rule changes nothing there; a GAME's source folder is full of
+    them, and that is the oracle this tool is most valuable against.
+
+    `constant velocity` keeps `matcher.bgt` in its `includes/` -- a
+    standalone brace-counting dev tool the game never includes -- so its
+    `main()` paired against the GAME's `main()` and scored 0.00 for a
+    difference that is two unrelated programs. `cs` keeps four such tools
+    (`pack_creator`, `pack_extracter`, `!releaser`,
+    `!copy_pack_to_clipboard`), and the author of both leaves them there on
+    purpose: they are how the packs get built.
+
+    Skipping the whole FILE rather than just `main` is the point. Such a
+    tool declares helpers too, and a helper of a different program is no
+    more this game's library code than its entry point is.
+    """
     out: Dict[str, List[str]] = collections.defaultdict(list)
     for folder in include_dirs:
         for path in sorted(glob.glob(os.path.join(folder, "*.bgt"))):
             with open(path, encoding="latin1") as fh:
-                for label, bodies in source_functions(fh.read()).items():
-                    out[label].extend(bodies)
+                text = fh.read()
+            if _DECLARES_MAIN.search(text):
+                continue
+            for label, bodies in source_functions(text).items():
+                out[label].extend(bodies)
     return dict(out)
 
 

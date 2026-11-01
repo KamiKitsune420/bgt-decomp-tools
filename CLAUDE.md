@@ -7806,6 +7806,88 @@ never became one. That is the first time a residual goto has been shown to
 cost a *call* rather than only a compiler error -- the goto is the visible
 failure and the lost condition is the quiet one underneath it.
 
+## A second one, and it needed no executable at all
+
+`constant velocity` is the same author's, two years later, and it arrived
+as **source with no executable** -- 3,456 lines across `game.bgt` and 16
+includes. That is not a smaller version of the rage room exercise, it is a
+different one: the module has to be *made* before it can be recovered, so
+the chain is the toolkit's own end to end.
+
+```bash
+bgt compile game.bgt --build release      # 938,878 bytes, compiled cleanly
+bgt recover game.exe -o recovered/
+bgt libcheck recovered/game_bytecode.bin game.exe --decompiler \
+             --include <the real includes>
+```
+
+| | |
+|---|---|
+| functions compared | 95 |
+| call sequence identical | **94** |
+| call sequence close (>= 80%) | 1 |
+| call sequence differs | **0** |
+| string literals identical | **95** |
+
+and the recovery: 11 classes, 45 functions, 32 globals, 157 bodies, 3,883
+lines, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0
+unbalanced files, a verified split and **1,771 calls read back**.
+
+**Nothing in it is a decompiler defect**, and both rows that were not
+identical were worth running down rather than assuming:
+
+- `dynamic_menu_pro::run_extended` calls the menu callback. The source
+  writes `callback_handle(this, callback_data)` and the recovery writes
+  `local_30(local_32, callback_data)` -- the compiler's own alias of the
+  member, which it loads into a slot twice, once for the null test and
+  once for the call. **This looked like a serious bug for about ten
+  minutes**, because a `grep -B4` window showed `local_30` being read by
+  `if (local_30 !is local_31)` and assigned only *after* it, which would
+  make the test `null !is null` and mean the callback never fires. The
+  assignment is there, four lines further back than the window reached.
+  A narrow window is not a reading, and the fix for that is to widen it
+  before writing anything down.
+- `<global>::main` scored **0.00**, and that one was the checker's.
+
+### A source file that declares `main()` is a PROGRAM, not a library
+
+`bgt libcheck` reads every `*.bgt` in the folders it is given and pairs by
+`owner::name`. Against BGT's own `include/` that is exactly right. Against
+a **game's** source folder it is not, because that is where authors keep
+their tools: `constant velocity` ships `matcher.bgt`, a standalone
+brace-and-quote counter the game never includes, and it has a `main()`.
+So the tool's `main` paired against the GAME's `main` and the report
+showed a 0.00 row whose two sides are unrelated programs:
+
+```
+source:    input_box, open, read, string_split, length, string_contains, alert, ...
+recovered: show_game_window, mainmenu
+```
+
+The whole **file** is skipped now, not just its `main`. A tool declares
+helpers too, and a helper of a different program is no more this game's
+library code than its entry point is. `cs` keeps four such files
+(`pack_creator`, `pack_extracter`, `!releaser`,
+`!copy_pack_to_clipboard`), so this is the normal case and not a quirk of
+one title.
+
+| | before | after |
+|---|---|---|
+| constant velocity | 94 / 96, **1 differs** | 94 / 95, **0 differ** |
+| rage room | 290 / 292, 0 differ | 290 / 292, 0 differ |
+| Super Egg Hunt | 44 / 47 | 44 / 47 |
+| Paladin of the Sky | 39 / 47 | 39 / 47 |
+| Psycho Strike | 147 / 149 | 147 / 149 |
+
+The corpus cannot move and that is checked rather than assumed: **BGT's
+`include/` declares no `main` in any file**, so the rule has nothing to
+skip there. rage room does not move either, because its own `matcher.bgt`
+sits beside the game rather than inside `includes/`.
+
+**Both ground-truth titles now report 0 differing functions**, which is
+the first time this project has been able to say that about a whole game's
+own code.
+
 ## And a recovery is not the game's source, which is the real headline
 
 272 of 292 is the first number in this project that compares a recovery
