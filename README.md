@@ -372,6 +372,16 @@ like the rest of the project.
 
 ---
 
+## Credits
+
+- **KamiKitsune420 (Adel Spence)** -- author and maintainer.
+- **Kalahami** -- contributor.
+
+The NVGT recovery half is adapted from beyond sight tech's
+`nvgt-source-recovery`; see [NOTICE.md](NOTICE.md).
+
+---
+
 ## License
 
 [MIT](LICENSE.md): Copyright KamiKitsune420 (Adel Spence). The NVGT recovery
