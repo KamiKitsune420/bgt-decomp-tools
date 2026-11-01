@@ -1990,11 +1990,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 5,296 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 23,438 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Super Egg Hunt | 5,302 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
+| Paladin of the Sky | 23,442 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
 | Psycho Strike | 24,431 | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
-| Crazy Party | 174,682 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
-| Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
+| Crazy Party | 175,334 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
+| Manamon 1 | 83,406 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Psycho Strike's goto column is 0 now**, which takes its two
@@ -5748,13 +5748,17 @@ rather than tuned:
   bytecode and confirms from `MakeFunctionCall`. An operator counts only
   when it **assigns**: `opAdd` returns a new value and leaves its
   receiver alone.
-- **It counts only for a value that IS a slot**, and that narrowing is
-  measured rather than assumed. Counted for a computed value as well,
-  every string literal's scratch slot becomes a write -- so
+- **For a computed value it counts only where the slot is NAMED**, and
+  both halves of that are measured. Counted for every slot, every
+  string literal's scratch slot becomes a write -- so
   `(arg1 + local_1)`, which merely mentions one, stops folding, and
   Paladin's `map::deserialize` gains **56 lines** of literals pushed
-  into slots for no correctness at all. Kept to `kind == "var"`, the
-  same title moves by **two** lines in one body.
+  into slots for no correctness at all. Not counted at all, a value
+  whose text reads a named slot folds past the statement that rebuilt
+  it, which is a base loading at its own health value -- see **A value
+  that reads a NAMED slot after that slot is rewritten** below. The
+  narrowing this file prescribed twice is the one that holds: a scratch
+  slot is an unnamed temp, and a named slot is one the source declared.
 
 | title | lines | goto | split | calls |
 |---|---|---|---|---|
@@ -6352,6 +6356,171 @@ costs a feature. The gap is also the purity analysis declining to
 claim something it cannot prove, and it is the right side of that trade:
 a statement that does nothing costs a line, and a lost call costs a
 feature.
+
+### A value that reads a NAMED slot, after that slot is rewritten
+
+Every fold rule above asks the question at a READ of a temp. Two
+whole classes of value never reach one, and both are the same defect:
+a value whose *text* names a slot the source declared, read after
+that slot has been rewritten. The compiler writes a reused slot and
+consumes it as it goes, so the writes and the uses interleave, and
+rendering the slot's NAME means every use gets whatever it held last.
+
+#### One: the value is bound, and the slot is rebuilt by a behaviour
+
+Rule ten records a behaviour write -- an object slot filled through a
+pushed address, which no opcode names -- and counted it **only for a
+value that IS a slot**. `cs`'s `load_bases` is what that cost, and it
+was the last row keeping that title's recovery from its author's
+source:
+
+```
+source:     base@ b = base(stn(parts[0]), stn(parts[1]),
+                           stn(parts[2]), name, owner, code);
+
+recovered:  local_16 = local_14[0];
+            local_16 = local_14[1];
+            local_16 = local_14[2];
+            ... eight lines of file opens ...
+            local_16 = local_3.read(0.0);        // the HEALTH file
+            @local_24 = base(double(int(stn(local_16))),
+                             double(int(stn(local_16))),
+                             double(int(stn(local_16))), ...);
+```
+
+Three `stn` calls, each rendered with the slot's name, and by the call
+the slot holds the health file's contents -- so **a base's three
+coordinates were all its health value**, and every base in a saved
+game loaded in the same place. It comes out as
+`base(double(local_15), double(local_17), double(local_18), ...)` now,
+with `health = local_21`, which is the source.
+
+Super Egg Hunt's is a save-slot mix-up of the same shape:
+
+```
+before:  local_6 = ("M" + 6);
+         local_6 = ("M" + 7);
+         if (int((double(int(stn(decrypt(read_string(local_6), h2))))
+                  + stn(decrypt(read_string(local_6), h_key)))) == 311)
+
+after:   local_6 = ("M" + 6);
+         local_17 = double(int(stn(decrypt(read_string(local_6), h2))));
+         local_6 = ("M" + 7);
+         local_17 += stn(decrypt(read_string(local_6), h_key));
+         if (int(local_17) == 311)
+```
+
+-- the source adds what is stored under `M6` and `M7`, and the
+recovery read `M7` twice, so the "allmixedup" trophy was tested
+against a total it could never reach.
+
+#### Two: the value is on the STACK and was never bound at all
+
+`_snapshot_pushed` is the other half, and no rule here could have
+reached it: these values are read by the CALL, which pops them off the
+simulated stack and renders them at the call site, so there is no read
+of a temp to ask about.
+
+```
+local_17 = parts[6] ; CALL stn ; push
+local_17 = parts[5] ; CALL stn ; push
+...   six times
+CALL safezone
+```
+
+Each pushed value is `stn(local_17)` -- a call whose text names the
+slot -- so the recovery built
+`safezone(stn(local_17) x6)`: **six bounds that are one number**, for
+every safe zone and every platform in every map of that game. It now
+reads
+
+```
+local_17 = local_13[6];
+double __nvgt_held_17_264 = stn(local_17);
+...
+@local_16 = safezone(stn(local_17), __nvgt_held_17_328,
+                     __nvgt_held_17_312, __nvgt_held_17_296,
+                     __nvgt_held_17_280, __nvgt_held_17_264);
+```
+
+Three things keep it narrow, and the first is what makes it safe at
+all:
+
+- **Only a value still waiting on the stack can be affected.** Once
+  the call has consumed its arguments there is nothing to snapshot, so
+  an ordinary reused scratch slot is untouched -- which is why three of
+  the five titles do not move by a line.
+- **A value that IS the slot is written as whatever the slot held**,
+  usually another slot's name, and the recursion is free: if that slot
+  is written while this value still waits, the same rule fires again.
+- **A value whose type is not known is left alone** rather than
+  declared wrongly. An undeclared name does not compile at all, where
+  a stale read does.
+
+#### Swept, which is how both halves were sized
+
+A call that reads one slot for two or more of its arguments, with that
+slot written more than once just above. It is `bgt signatures`' ninth
+shape now rather than a scratch script, for the reason every other one
+is in there: the class cannot come back unnoticed, and a signature for
+a fixed bug class should read 0.
+
+| title | before | after the first half | after both |
+|---|---|---|---|
+| cs server | 38 | 32 | **0** |
+| Crazy Party | **181** | -- | **31** |
+| Manamon 1 | 2 | -- | **0** |
+| Super Egg Hunt | 0 | 0 | 0 |
+| Paladin of the Sky | 0 | 0 | 0 |
+| Psycho Strike | 0 | 0 | 0 |
+
+Crazy Party's 181 are mostly its localisation lookups:
+`lng(local_7, local_13, local_4, local_7, local_7, local_7, local_7)`,
+where the source passes a key and then four empty strings, and all
+five render as the key -- so every localised string in that game was
+padded with its own key.
+
+**And its 31 survivors are the author's own**, which is the sweep
+being a lead rather than a verdict, exactly as this file keeps saying.
+Every one is a `setZone` or a `getJt` passing one coordinate twice --
+`setZone(t, local_38, 1, local_38, local_7 - 1, ...)` is a vertical
+wall at `local_38`, and a minigame map is full of them. The *fix* is
+narrower than the sweep by construction: it fires only where a write
+really lands between the push and the call, which a wall's two equal
+coordinates never have.
+
+The sweep had to be bracket-matched rather than written as a regex, and
+that is worth a line: a pattern with one level of nesting in it cannot
+see `base(double(int(stn(local_16))), ...)`, which is exactly the shape
+at issue, so the first version reported 9 rows where there are 38 and
+under-reported the baseline it was meant to measure.
+
+#### What they cost
+
+| title | lines | goto | split | calls | bodies given up |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,296 -> **5,302** | 0 | verified | 1,608 | 0 |
+| Paladin of the Sky | 23,438 -> **23,442** | 0 | verified | 6,952 | 0 |
+| Psycho Strike | 24,431 | 0 | verified | 6,406 | 0 |
+| Crazy Party | 174,682 -> **175,334** | **0** | verified | 90,148 | 0 |
+| Manamon 1 | 83,363 -> **83,406** | 0 | verified | 26,482 | 0 |
+| cs server | 10,787 -> **10,876** | 0 | verified | 3,018 | 0 |
+
+Psycho Strike is byte-identical, Super Egg Hunt and Paladin move by
+the holds the first half gives back and by nothing for the second, and
+not one residual goto, dangling goto, dangling `else`, unbalanced
+file, passthrough, body error, split check or call count moves
+anywhere. Against the games with source, **`cs`'s server reaches 194
+of 196**, with one difference left -- `base::lockpick`, whose
+recovered body matches its source line for line when the two are read
+side by side, so what differs is the comparison's ordering rather than
+the recovery.
+
+Paladin's four lines are the hotel receptionist's greeting, and they
+are a faithfulness gain rather than a fix: the floor name is taken
+where the bytecode takes it, before the cabin name is built, instead
+of both being folded into one concatenation. Both read the same two
+map names, so nothing observable changes.
 
 ### Twelve: a call nobody reads has still RUN, and it closed the file first
 
@@ -8365,9 +8534,50 @@ on EOF yet:
 
 The probe is the one to finish on, because its source is known: it reads
 both globals and both functions and stops near the end, so the remaining
-error is in one of the last fields rather than in the shape. Screaming
-Strike stops at 0x1A, inside the first global's init function, which is
-the same block seen earlier.
+error is in one of the last fields rather than in the shape.
+
+**Screaming Strike's 0x1A is not inside a function**, which is what
+this said and is worth correcting, because it points somewhere else
+entirely. Read byte by byte, 0x1A is the boundary of the FIRST global
+property's record:
+
+```
+00        noDebugInfo = 0
+00        enums     = 0
+00        classes   = 0
+00        funcdefs  = 0
+33        51 global properties        <- and the game has 51
+6e 0e     'itemComingTime'            <- tagged: new string, 14 bytes
+00        the empty string
+40 42     eu = 66
+00 00
+01        <- the reader wants a function tag here
+66 ...    <- and `f`, a function record, begins at 0x1B
+```
+
+So the record holds **exactly one byte more** before its initialisation
+function than this reader expects, and the `f` at 0x1B is what says
+where that function really starts -- a much narrower question than "the
+debug block is wrong". Which field owns the byte is the open part: the
+`40 42` reads as a *back-reference* to saved data type 66, which cannot
+exist at the first property, so either the namespace string is not
+there (this build predates `namespace`, which BGT 1.0 has no keyword
+for) or its `ReadDataType` is shaped differently. Settling it means
+reading `ReadGlobalProperty` out of this build, which is the rule this
+file opens with and the one thing the Ghidra import would not do.
+
+Two things about the tooling that cost time here, both worth knowing
+before the next attempt:
+
+- **`as_module.py` takes the executable from `BGT_EXE`, not argv.**
+  Passed as a second path it is parsed as a module, and the tool
+  reports `neither dialect parses a coherent module head` -- which
+  reads as a verdict about the game rather than about the PE file it
+  was handed.
+- **Without an opcode table there is no tail walk at all**, so this
+  module "parses" with 0 enums, 0 classes and no error. The refusal is
+  only visible with the table, and that asymmetry is what made the
+  stopping point look like a detection failure.
 
 **Nothing here changes a release build.** The debug block returns
 immediately when `noDebugInfo` is 1, the `detect` fallback needs a module

@@ -1338,6 +1338,12 @@ class FuncDecompiler:
         #: value-returning calls made for their effect, written out by
         #: `_flush_pending_call`, as (position, statement text)
         self.flushed_calls: list[tuple[int, str]] = []
+        #: the last value assigned to each NAMED slot, so a pushed value
+        #: that merely IS the slot can be written as what it held
+        self.slot_values: dict[int, Atom] = {}
+        #: generated locals holding a pushed value whose slot was about
+        #: to be rewritten, by name
+        self.held_pushed: set[str] = set()
         #: every rendered call's text -> the position it ran at, for
         #: `_value_origin`. `invocations` is the impure subset of it.
         self.call_sites: dict[str, int] = {}
@@ -1655,7 +1661,74 @@ class FuncDecompiler:
         tn = (dt.format() if dt else "").replace("&", "").strip()
         self.events.append(Event("stmt", self._pos(), (tn, f"{self.name_of(off)};")))
 
+    def _snapshot_pushed(self, off: int) -> None:
+        """A value already pushed must not read this slot after it is written.
+
+        The compiler builds each argument of a call through one scratch slot
+        and pushes as it goes, so the writes and the pushes interleave:
+
+            local_17 = parts[6] ; CALL stn ; push
+            local_17 = parts[5] ; CALL stn ; push
+            ... six times ...
+            CALL safezone
+
+        Each pushed value is `stn(local_17)`, a call whose TEXT names the
+        slot, so by the call every argument reads whatever the slot held
+        last: `safezone(stn(local_17), stn(local_17), ...)`, six bounds that
+        are one number. `cs`'s map loader does it for every safe zone and
+        every platform in every map.
+
+        It is `_stale_fold`'s question asked of a value that never reached a
+        slot at all. No rule in this file reached it: `_stale_fold` is asked
+        at a READ of a temp, and these values are read by the call, which
+        pops them off the stack and renders them there.
+
+        **Only a value still waiting on the stack can be affected**, which is
+        what keeps this narrow -- by the time the call has consumed its
+        arguments there is nothing to snapshot, so an ordinary reused scratch
+        slot is untouched.
+        """
+        if not self.stack:
+            return
+        name = self.name_of(off)
+        for i, at in enumerate(self.stack):
+            if at.is_ptr or at.kind in ("const", "typeid", "null", "this"):
+                continue
+            if name not in _IDENT.findall(_mask_strings(at.text)):
+                continue
+            self.stack[i] = self._hold_pushed(off, at)
+
+    def _hold_pushed(self, off: int, at: Atom) -> Atom:
+        """Take a pushed value into a local of its own, before the write.
+
+        A value that IS the slot can be written as whatever the slot held --
+        usually another slot's name -- and the recursion is free, because if
+        that slot is written while this value still waits the same rule fires
+        again. Anything computed needs a local: writing the expression at the
+        call would RUN it there, which is the fold defect this file spends
+        twelve rules on.
+
+        A value whose type is not known is left alone rather than declared
+        wrongly: an undeclared name does not compile at all, where a stale
+        read does.
+        """
+        held = self.slot_values.get(off)
+        if at.kind == "var" and held is not None and _is_repeatable(held):
+            return held
+        dt = at.data_type or self.var_types.get(off)
+        tn = (dt.format() if dt else "").replace("&", "").strip()
+        if not tn:
+            return at
+        name = "__nvgt_held_%d_%d" % (off, self._pos())
+        while name in self.held_pushed:
+            name += "b"
+        self.held_pushed.add(name)
+        self._append_stmt(tn, f"{name} = {at.text};")
+        return Atom("var", name, at.dw_size, data_type=dt)
+
     def _emit_assign(self, off: int, a: Atom) -> None:
+        #: A value pushed from this slot has to be taken before the write.
+        self._snapshot_pushed(off)
         # The statement supersedes any expression still aliased to this slot.
         # A folded short-circuit is bound to its slot so later reads see the
         # whole value; left there after the slot is assigned again, every
@@ -1689,6 +1762,7 @@ class FuncDecompiler:
             dt = self.var_types.get(off)
             prefix = "@" if dt is not None and dt.is_object_handle else ""
             self._append_stmt("", f"{prefix}{name} = {a.text};")
+        self.slot_values[off] = a
 
     def _pos(self) -> int:
         return self.instrs[self.k].pos
@@ -2679,21 +2753,36 @@ class FuncDecompiler:
                 names = {value.text.lstrip("@")}
             else:
                 names = set(_IDENT.findall(_mask_strings(value.text)))
-            #: **A behaviour write counts only for a value that IS a slot.**
-            #: An object slot is filled by a constructor through a pushed
-            #: address, so `behaviour_writes` is the only record of it -- and
-            #: a string copied out of one keeps that slot's NAME, which is
-            #: exactly the value that goes stale when the slot is rebuilt
-            #: (`skill::will_fail`, where `if (reason != "")` became
+            #: **A behaviour write always counts for a value that IS a
+            #: slot.** An object slot is filled by a constructor through a
+            #: pushed address, so `behaviour_writes` is the only record of
+            #: it -- and a string copied out of one keeps that slot's NAME,
+            #: which is exactly the value that goes stale when the slot is
+            #: rebuilt (`skill::will_fail`, where `if (reason != "")` became
             #: `if (local_3 != local_3)`).
             #:
-            #: Counting it for a COMPUTED value as well was measured and is
-            #: much too broad: every string literal in a body is constructed
-            #: into a scratch slot, so `(arg1 + local_1)` -- which merely
-            #: mentions one -- stopped folding, and Paladin's
-            #: `map::deserialize` gained 56 lines of literals pushed into
-            #: slots for no correctness at all.
-            behaviour = self.behaviour_writes if value.kind == "var" else {}
+            #: For a COMPUTED value it counts where the slot is NAMED, and
+            #: both halves of that are measured. Counting every slot is much
+            #: too broad: every string literal in a body is constructed into
+            #: a scratch slot, so `(arg1 + local_1)` -- which merely mentions
+            #: one -- stopped folding, and Paladin's `map::deserialize`
+            #: gained 56 lines of literals pushed into slots for no
+            #: correctness at all. Counting none of them is the defect below.
+            if value.kind == "var":
+                behaviour = self.behaviour_writes
+            else:
+                #: ...and for a COMPUTED value, only a behaviour write into
+                #: a NAMED slot. The 56 lines that measurement rejected were
+                #: every string literal's scratch slot, and those are
+                #: unnamed temps. A named slot is one the source declared,
+                #: and a value whose text reads it goes stale when it is
+                #: rebuilt: `cs`'s `load_bases` passed a base's three
+                #: coordinates as its health value, because `local_16` had
+                #: been rewritten five times by the call. This is the
+                #: narrowing this file prescribed twice and nobody tried.
+                behaviour = {slot: writes
+                             for slot, writes in self.behaviour_writes.items()
+                             if self.is_named(slot)}
             if any(any(ran[0] < write <= self._pos()
                        for write in (tuple(self.slot_writes.get(slot_of[name], ()))
                                      + tuple(behaviour.get(slot_of[name], ()))))

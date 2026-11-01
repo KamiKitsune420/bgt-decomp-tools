@@ -149,8 +149,18 @@ class DoubleAssignTests(unittest.TestCase):
                 "local_3 = 2;\n"
                 "local_3 = 3;\n"
                 "f(local_3, local_3);\n")
-        self.assertEqual([(k, n) for k, n, _b in bgt_signatures.scan(text)],
+        rows = [(k, n) for k, n, _b in bgt_signatures.scan(text)]
+        self.assertEqual([r for r in rows if r[0] == "double_assign"],
                          [("double_assign", 2)])
+        #: ...and this fixture is the `same_argument` shape as well,
+        #: which is not a clash: the two are the write side and the call
+        #: side of one defect, so a snippet that shows both has both.
+        #: `double_assign` fires where the reads are in a statement of
+        #: any kind; `same_argument` only where they are ARGUMENTS of
+        #: one call, which is what made a safezone's six bounds one
+        #: number.
+        self.assertEqual([r for r in rows if r[0] == "same_argument"],
+                         [("same_argument", 4)])
 
 
 class IdentityCastTests(unittest.TestCase):
@@ -268,6 +278,69 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(bgt_signatures.main([root, "--detail", "nosuch"]), 2)
         self.assertEqual(bgt_signatures.main([root, "--detail", "tautology"]), 0)
         self.assertEqual(bgt_signatures.main([root, "--strict"]), 1)
+
+
+class SameArgumentTests(unittest.TestCase):
+    """One call reading one slot for several of its arguments.
+
+    The compiler builds each argument through one scratch slot and consumes
+    it as it goes, so the writes and the uses interleave -- and rendering
+    the slot's NAME gives every argument whatever it held last. `cs`'s map
+    loader built a safezone whose six bounds are one number, and
+    `load_bases` passed a base's three coordinates as its health value.
+    """
+
+    SIX = """\
+        local_17 = local_13[6];
+        local_17 = local_13[5];
+        local_17 = local_13[4];
+        local_17 = local_13[3];
+        local_17 = local_13[2];
+        local_17 = local_13[1];
+        @local_16 = safezone(stn(local_17), stn(local_17), stn(local_17), stn(local_17), stn(local_17), stn(local_17));
+"""
+
+    def test_six_bounds_that_are_one_number(self):
+        self.assertIn("same_argument", kinds(self.SIX))
+
+    def test_the_sweep_sees_through_a_RUN_of_conversions(self):
+        """`base(double(int(stn(local_16))), ...)` is the shape at issue, and
+        a pattern with one level of nesting in it cannot see the call at
+        all: written that way this reported 9 rows on that server where
+        there are 38, and under-reported the baseline it was measuring."""
+        text = ("        local_16 = local_14[0];\n"
+                "        local_16 = local_14[1];\n"
+                "        local_16 = local_14[2];\n"
+                "        @local_24 = base(double(int(stn(local_16))), "
+                "double(int(stn(local_16))), double(int(stn(local_16))), "
+                "local_26);\n")
+        self.assertIn("same_argument", kinds(text))
+
+    def test_passing_one_value_twice_is_not_a_hit_without_the_writes(self):
+        """The writes above are what make a repeat a defect rather than the
+        author doing it on purpose -- `CapturePapillon::setZone` passes one
+        coordinate twice and may well be deliberate."""
+        text = ("        local_15 = local_12;\n"
+                "        this.terrain.setZone(local_31, local_14, local_15, "
+                "local_14, local_15, local_26, true);\n")
+        self.assertEqual(kinds(text), [])
+
+    def test_a_single_argument_call_is_not_swept(self):
+        text = ("        local_17 = a[1];\n"
+                "        local_17 = a[2];\n"
+                "        f(stn(local_17));\n")
+        self.assertNotIn("same_argument", kinds(text))
+
+    def test_the_fixed_shape_does_not_fire(self):
+        """What the decompiler writes now: each value taken into a local of
+        its own before the slot is rewritten."""
+        text = ("        local_17 = local_13[6];\n"
+                "        double __nvgt_held_17_264 = stn(local_17);\n"
+                "        local_17 = local_13[5];\n"
+                "        double __nvgt_held_17_280 = stn(local_17);\n"
+                "        @local_16 = safezone(stn(local_17), "
+                "__nvgt_held_17_280, __nvgt_held_17_264);\n")
+        self.assertEqual(kinds(text), [])
 
 
 if __name__ == "__main__":

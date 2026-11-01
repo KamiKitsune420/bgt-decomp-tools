@@ -17,6 +17,7 @@ signature below is here because a real, reported bug left it behind:
 | `identity_cast` | `double(int(x))`: a value converted twice and changed by neither |
 | `bare_read` | a statement that only reads -- the borrowed handle hoisted out of its guard |
 | `duplicated_call` | the same call text three or more times in one statement |
+| `same_argument` | one call reading one slot for several arguments -- a safezone whose six bounds are one number |
 
 **A hit is a lead, not a verdict**, and the discipline is the same as for
 `bgt audit`: the original wrote some of these itself. Paladin's `battle`
@@ -75,6 +76,7 @@ _ELSE_EMPTY = re.compile(r"^\s*(?:\}\s*)?else\s*\{\s*\}\s*$")
 _STOCK_MARKER = "BGT's own copy of this file"
 
 KINDS = ("self_identical", "tautology", "empty_arm", "two_empty_arms",
+         "same_argument",
          "double_assign", "identity_cast", "bare_read", "duplicated_call")
 
 #: How many times one call text has to appear in a single statement before it
@@ -103,6 +105,68 @@ def _empty_else(lines: List[str], j: int) -> bool:
         return True
     return (bool(re.match(r"^(?:\}\s*)?else\s*\{\s*$", here))
             and j + 1 < len(lines) and lines[j + 1].strip() == "}")
+
+
+#: A call's name and the text between its brackets, found by bracket
+#: matching rather than by a pattern. A pattern with one level of nesting in
+#: it cannot see `base(double(int(stn(local_16))), ...)`, which is exactly
+#: the shape `same_argument` is for: written that way the sweep reported 9
+#: rows on `cs`'s server where there are 38, and under-reported the very
+#: baseline it was meant to measure.
+_NAME_OPEN = re.compile(_IDENT + r"\(")
+#: ...and the slot an argument reads, through any run of conversions:
+#: `local_16`, `stn(local_17)`, `double(int(stn(local_16)))`.
+_WRAP = re.compile(r"^" + _IDENT + r"\((.*)\)$")
+_SLOT = re.compile(r"^((?:local|arg)_?\d+)$")
+#: a write to a slot, which `_ASSIGN` nearly is -- but a HANDLE is
+#: reassigned with `@`, and `_ASSIGN` is shared with `double_assign`,
+#: whose own measurement should not move for this. Manamon 1's two
+#: rows are handle writes, and without the `@` they read as none.
+_SLOT_WRITE = re.compile(r"^\s*@?(" + _IDENT + r")\s*=\s*[^=].*;\s*$")
+
+
+def _calls(line: str):
+    for m in _NAME_OPEN.finditer(line):
+        depth, i = 0, m.end() - 1
+        while i < len(line):
+            if line[i] == "(":
+                depth += 1
+            elif line[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    yield m.group(0)[:-1], line[m.end():i]
+                    break
+            i += 1
+
+
+def _split_args(text: str) -> List[str]:
+    out, depth, cur = [], 0, ""
+    for ch in text:
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+            continue
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _arg_slot(text: str) -> str | None:
+    text = text.strip()
+    for _ in range(8):
+        got = _SLOT.match(text)
+        if got:
+            return got.group(1)
+        got = _WRAP.match(text)
+        if not got:
+            return None
+        text = got.group(1).strip()
+    return None
 
 
 def _norm(text: str) -> str:
@@ -171,6 +235,35 @@ def scan(text: str) -> List[Tuple[str, int, str]]:
                         break
                     if _ASSIGN.match(lines[j]):
                         break
+
+        #: One call reading ONE slot for two or more of its arguments,
+        #: where that slot is written more than once just above. The
+        #: compiler builds each argument through one scratch slot and
+        #: consumes it as it goes, so the writes and the uses interleave,
+        #: and rendering the slot's NAME gives every argument whatever it
+        #: held last: `cs`'s map loader built `safezone(stn(local_17) x6)`,
+        #: six bounds that are one number, and `load_bases` passed a base's
+        #: three coordinates as its health value.
+        #:
+        #: The writes are what make a repeat a defect rather than the author
+        #: passing one value twice -- `CapturePapillon::setZone` passes one
+        #: coordinate twice and may well be deliberate.
+        for callee, inner in _calls(line):
+            args = _split_args(inner)
+            if len(args) < 2:
+                continue
+            slots = [s for s in (_arg_slot(a) for a in args) if s]
+            dup = {s for s in slots if slots.count(s) > 1}
+            if not dup:
+                continue
+            writes = 0
+            for prev in lines[max(0, i - 14):i]:
+                got = _SLOT_WRITE.match(prev)
+                if got and got.group(1) in dup:
+                    writes += 1
+            if writes > 1:
+                hit("same_argument", i)
+                break
 
         counts: Dict[str, int] = {}
         for m in _CALL_TEXT.finditer(line):

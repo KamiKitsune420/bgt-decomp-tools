@@ -511,10 +511,11 @@ class FoldSafetyTests(unittest.TestCase):
         failure reason was never spoken and `unknown_gift::give` took its
         `else` arm whatever the reason was.
 
-        It counts only for a value that IS a slot, and the narrowing is
-        measured: counting it for a computed value too made every string
-        literal's scratch slot stale, and Paladin's `map::deserialize`
-        gained 56 lines of literals pushed into slots for no correctness.
+        For a computed value it counts where the slot is NAMED, and both
+        halves of that are measured: counting every slot made every string
+        literal's scratch slot stale and Paladin's `map::deserialize` gained
+        56 lines for no correctness, while counting none of them passed a
+        base's three coordinates as its health value in `cs`.
         """
         from decompile import Atom, DataType
 
@@ -551,10 +552,13 @@ class FoldSafetyTests(unittest.TestCase):
 
         # The value IS slot 3, and slot 3 was rebuilt in between.
         self.assertTrue(sim("var")._stale_fold(1))
-        # A computed value that merely mentions it still folds: that is
-        # every string literal's scratch slot, and refusing them all cost
-        # 56 lines in one body for nothing.
-        self.assertFalse(sim("call")._stale_fold(1))
+        # A computed value counts too, because slot 3 here is NAMED -- which
+        # is the narrowing this file prescribed and the two tests below
+        # pin from both sides. This assertion was `assertFalse` while the
+        # rule was "only a value that IS a slot", on the measurement that
+        # counting every slot cost 56 lines in one Paladin body: those were
+        # string literals' scratch slots, which are unnamed temps.
+        self.assertTrue(sim("call")._stale_fold(1))
         # And with no behaviour write recorded, nothing changes.
         bare = sim("var")
         bare.behaviour_writes = {}
@@ -621,6 +625,47 @@ class FoldSafetyTests(unittest.TestCase):
         # ...nor does one recorded after the read.
         sim.flushed_calls = [(60, "local_1.close();")]
         self.assertFalse(sim._stale_fold(4))
+
+    def test_a_computed_value_reading_a_NAMED_slot_goes_stale(self):
+        """Rule ten counts a behaviour write -- an object slot filled through
+        a pushed address -- and counted it only for a value that IS a slot.
+
+        `cs`'s `load_bases` is what that cost: three `stn(local_16)` calls,
+        each rendered with the slot's name, and by the call the slot holds
+        the health file's contents. **A base's three coordinates were all
+        its health value**, and every base in a save loaded in the same
+        place.
+        """
+        from decompile import Atom, DataType
+        value = Atom("call", "int(stn(local_16))", data_type=DataType())
+        sim = self._sim(instrs=[Instr(pos=90, op=0, name="RET", bc_type="",
+                                      size=1)], k=0,
+                        temps={5: value}, temp_bound={5: (20, 1)},
+                        var_names={16: "local_16"},
+                        var_types={5: DataType()}, duplicate_binds=set(),
+                        cond_spans=[], back_edges=[],
+                        stmt_count=2, stmt_texts=["a();", "b();"])
+        sim.behaviour_writes = {16: [40]}
+        self.assertTrue(sim._stale_fold(5))
+
+    def test_a_computed_value_reading_an_UNNAMED_slot_still_folds(self):
+        """The half that was measured and rejected: every string literal is
+        constructed into a scratch slot, so counting those made
+        `(arg1 + local_1)` -- which merely mentions one -- stop folding, and
+        Paladin's `map::deserialize` gained 56 lines for no correctness at
+        all. A scratch slot is an unnamed temp; a NAMED slot is one the
+        source declared."""
+        from decompile import Atom, DataType
+        value = Atom("call", "int(stn(local_16))", data_type=DataType())
+        sim = self._sim(instrs=[Instr(pos=90, op=0, name="RET", bc_type="",
+                                      size=1)], k=0,
+                        temps={5: value}, temp_bound={5: (20, 1)},
+                        var_names={},                 # slot 16 is not named
+                        var_types={5: DataType()}, duplicate_binds=set(),
+                        cond_spans=[], back_edges=[],
+                        stmt_count=2, stmt_texts=["a();", "b();"])
+        sim.behaviour_writes = {16: [40]}
+        self.assertFalse(sim._stale_fold(5))
 
     def test_a_behaviour_write_is_the_receiver_pushed_last(self):
         """Only a `PSF` immediately before the call counts.
@@ -2136,3 +2181,79 @@ class DeclarationOutranksTheAtomTests(unittest.TestCase):
         fields = set(Atom.__dataclass_fields__)
         self.assertIn("dw_size", fields)
         self.assertNotIn("stack_size", fields)
+
+
+class PushedValueTests(unittest.TestCase):
+    """A value already on the stack, and the slot it reads is rewritten.
+
+    The compiler builds each argument of a call through one scratch slot and
+    pushes as it goes, so `local_17 = parts[6] ; CALL stn ; push` six times
+    leaves six copies of `stn(local_17)` waiting -- and the call renders them
+    all with whatever the slot held last. `cs`'s map loader built a safezone
+    whose six bounds are one number, and a platform the same, for every map.
+
+    No fold rule could reach it: `_stale_fold` is asked at a READ of a temp,
+    and these values are read by the call, which pops them off the simulated
+    stack and renders them there.
+    """
+
+    def _fd(self, **attrs):
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.events, fd.stmt_count, fd.stmt_texts = [], 0, []
+        fd.stack, fd.slot_values, fd.held_pushed = [], {}, set()
+        fd.var_names, fd.var_types = {17: "local_17"}, {}
+        fd.declared, fd.temps, fd.temp_bound = set(), {}, {}
+        fd.consumed_temps, fd.mixed_boolean_slots = set(), set()
+        fd.k, fd.instrs = 0, [None]
+        fd._pos = lambda: 264
+        fd._order_out_arguments = lambda text: None
+        for name, value in attrs.items():
+            setattr(fd, name, value)
+        return fd
+
+    def test_a_pushed_call_that_reads_the_slot_is_taken_into_a_local(self):
+        from decompile import Atom, DataType
+        fd = self._fd()
+        pushed = Atom("call", "stn(local_17)", 1, data_type=DataType())
+        fd.stack.append(pushed)
+        fd._snapshot_pushed(17)
+        self.assertEqual(fd.stack[0].kind, "var")
+        self.assertTrue(fd.stack[0].text.startswith("__nvgt_held_17_"))
+        self.assertEqual(len(fd.events), 1)
+        self.assertIn("= stn(local_17);", fd.events[0].data[1])
+
+    def test_a_pushed_value_that_does_not_read_the_slot_is_left_alone(self):
+        from decompile import Atom, DataType
+        fd = self._fd()
+        for atom in (Atom("const", "7", 1),
+                     Atom("call", "stn(local_9)", 1, data_type=DataType()),
+                     Atom("var", "local_4", 1, data_type=DataType())):
+            fd.stack = [atom]
+            fd._snapshot_pushed(17)
+            with self.subTest(text=atom.text):
+                self.assertIs(fd.stack[0], atom)
+        self.assertEqual(fd.events, [])
+
+    def test_a_pushed_value_with_no_known_type_is_left_alone(self):
+        """An undeclared name does not compile at all, where a stale read
+        does -- so a value this cannot declare is not held."""
+        from decompile import Atom
+        fd = self._fd()
+        pushed = Atom("call", "stn(local_17)", 1)      # no data_type
+        fd.stack.append(pushed)
+        fd._snapshot_pushed(17)
+        self.assertIs(fd.stack[0], pushed)
+        self.assertEqual(fd.events, [])
+
+    def test_a_pushed_value_that_IS_the_slot_takes_what_the_slot_held(self):
+        """...and the recursion is free: if THAT slot is written while this
+        value still waits, the same rule fires again."""
+        from decompile import Atom, DataType
+        fd = self._fd()
+        fd.slot_values = {17: Atom("var", "local_4", 1,
+                                   data_type=DataType())}
+        fd.stack.append(Atom("var", "local_17", 1, data_type=DataType()))
+        fd._snapshot_pushed(17)
+        self.assertEqual(fd.stack[0].text, "local_4")
+        self.assertEqual(fd.events, [])
