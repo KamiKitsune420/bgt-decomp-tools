@@ -5874,14 +5874,45 @@ blind spots:
   and the next thing to touch that register is a `Cast`, whose handler
   overwrites it without flushing. `CpyVtoR4`'s handler *does* flush
   first -- its comment says why, "preserve its side effect before the
-  register is reused" -- so the rule exists, and the twenty-seven
-  sites that overwrite `value_reg` are served by twelve flushes
-  scattered across the handlers rather than by one place that owns the
-  question. `Cast` is one that is not served; how many of the other
-  twenty-five are is not established, and enumerating them is the
-  first thing the next attempt should do. The census is built on slot
-  binds, so it cannot see
-  this half: a coin's 2D position is never updated as it moves.
+  register is reused" -- so the rule exists and is scattered. The
+  census is built on slot binds, so it cannot see this half: a coin's
+  2D position is never updated as it moves.
+
+  **Enumerated, which this file set as the next step: 27 sites write
+  `value_reg`, and 16 of them have no flush above them that could
+  reach them.** A flush counts only when it sits above the site at an
+  indent no deeper than the branch the site is in -- which is what
+  separates an enclosing handler's flush from a sibling branch's, and
+  getting that wrong is why the figure took three readings:
+
+  | how "served" was read | answer |
+  |---|---|
+  | anything above it in the handler | 24 of 27 -- and it counts `STOREOBJ`'s clear for `Cast` |
+  | only inside the site's own branch | 5 of 27 -- and it misses the flush at the top of `_call` |
+  | above it, at no deeper an indent | **11 of 27** |
+
+  The 16 are the register LOADS (`LdGRdR4`, `CpyGtoV4`, `LDG`, `LDV`),
+  the two `TEST_OPS` sites, the three property loads (`LoadThisR`,
+  `LoadRObjR`, `LoadVObjR`), `PopRPtr`, `STOREOBJ`, `Cast`, `_refcpy`,
+  `_alloc` and the three in the constructor branch.
+
+  Two things that count stops short of, and both matter before acting
+  on it. A **clear** is not a flush: `pending_value_call = None`
+  discards the call, and five of the eleven "served" sites are
+  dominated by one of those -- legitimately, where the call's text is
+  already inside the expression being built, and not otherwise. And an
+  unserved overwrite only loses something when nothing else writes the
+  call out, which `_flush_pending_call` also does at a jump, at a
+  `RET` and at every statement -- so 16 is the number of places that
+  do not ask, not the number of lost calls. The census remains the
+  authority on what is actually lost.
+
+  So the enumeration supports the conclusion this file already drew --
+  one place should own the question -- and does not by itself say which
+  of the 16 to change. Flushing at every overwrite is the broad version
+  of a change this file records as tried and wrong at a *rebind*, where
+  it emitted every intermediate of a built-up expression *and* folded
+  it into the final statement.
 - **`pause_menu`: seven call sites, one text.** All six surviving
   `menu_add_item(local_5, local_4, false)` lines read identically, and
   the seventh -- the only one whose result is bound to a slot -- is
@@ -6453,7 +6484,7 @@ promoting the return slot emits its assignment and the `return` vanishes,
 so the function ends `local_0 = local_4;` and would not compile. That is
 attempt 4, reverted.
 
-#### Fixed -- and the four layers that order names are all INERT
+#### Fixed -- and the four layers that order prescribes are all INERT
 
 The order recorded above was *teach the promotion to keep the
 `return` first, then count the flush, then the three layers*. All four
