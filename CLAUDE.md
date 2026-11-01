@@ -2364,6 +2364,86 @@ source, rage room and Screaming Strike -- have an embedded pack of
 `string_compress` being registered and undocumented: provable, and not
 yet a changed report.
 
+#### The two reference LAYERS, and the Remarks `bgt_api` throws away
+
+`references/` has two halves, and the split is the one this file already
+derives from the registration strings:
+
+| layer | pages | what it is |
+|---|---|---|
+| `foundation_layer` | 305 | the engine's own API |
+| `helper_layer` | 116 | the script classes in `include/*.bgt` |
+
+The helper layer says so outright: *"functions and objects that are
+included as part of the BGT distribution, but that are stored as separate
+scripts that should be included in a main script"*. That is exactly the
+nine documented-but-unregistered types this file identifies by the absence
+of a factory registration, named by the documentation instead of inferred.
+
+**The signatures were never the valuable part of these pages.** `bgt_api`
+reads a declaration per page and drops the prose, and the prose is where
+the semantics are -- 267 `Remarks` blocks in the foundation layer and 91
+in the helper layer, 187 KB that nothing here had read. `string_mid` being
+1-based does not show in `string string_mid(string, int, int)`, which is
+why it took a probe.
+
+##### `"*"` is documented a second time, under the pack functions
+
+`set_sound_storage` and `get_sound_storage` both describe it: *"If you
+pass * to this function, the engine will attempt to look for sounds in a
+pack file that has been included into the program itself"*, and the getter
+returns `*` to say so. So the embedded-pack gap above is documented in two
+independent places, and `get_sound_storage()` returning `*` is a second
+way a module can be seen to want one.
+
+##### `get_last_error` is reset by EVERY engine call
+
+*"the error is reset for every new call to an engine function or object
+method, so you should retrieve the error code before making any other
+calls"* -- and *"not affected by calls to any of your own functions or
+methods"*.
+
+That is a **precisely documented invalidation rule** for the one class of
+staleness this file declines to model. `_stale_fold` ends with *"A bare
+call's result can still go stale through engine state -- `reserve_slot()`
+hands out a different slot each time -- but that is the duplication case
+... and not guessed at here"*. `get_last_error()` is the same shape with
+the rule written down: a value built from it is invalidated by any engine
+call and by nothing else.
+
+Not acted on, because no title in the corpus has one that moved -- and
+finding that out cost the session's **fourth** instrument failure. A grep
+said the cs client's source held 5 and its recovery 10, which looked
+exactly like a folded call run twice. It is not: AngelScript's property
+accessors mean a registered `get_X()` may be written `X`, so that author
+writes `last_error` and the recovery writes `::get_last_error()` -- the
+same call, two spellings, and the grep counted one of them. (The `::` is
+the recovery being right about something subtle: `downloader` declares its
+own `get_last_error()` method, so the global needs qualifying.)
+
+##### Three more that change how a recovered body should be read
+
+- **`assert` does nothing in a release build and always returns true.**
+  Every `assert` in a shipped game's module is dead code that a recovery
+  faithfully reproduces, and it only ever ran for the author.
+- **`random` clamps rather than erroring**: *"If max is less than or equal
+  to min, min will be returned"*, over a range of plus or minus
+  999,999,999. So a recovered `random(x, x)` is not a bug.
+- **`random_set_state` really does reproduce a series**, which settles how
+  bad the lost call in Crazy Party's `Partie::synchroRandom` is: that
+  function exists to burn draws so a client's generator lines up with the
+  host's, and with its one `random` call dropped the loop advanced nothing.
+  The documentation confirms the generator is a pure function of its state,
+  so the desynchronisation is total rather than probabilistic.
+
+One more worth keeping for the fold rules: **`garbage_collect`'s page says
+destructor timing is not dependable** -- *"you should not depend on a
+destructor of any given class being called at any specific time"* -- but
+only for the garbage-collected types, which are *"arrays and script
+defined classes"*. A `sound` is reference counted, so its destruction IS
+deterministic, which is what makes the borrowed-handle fold's
+object-lifetime argument sound for exactly the types it was argued about.
+
 #### Four things the tutorials confirm that were derived the hard way
 
 None of these changes any code. They are worth recording because each was
@@ -6339,9 +6419,41 @@ value type is parked in `temps` and the method returns **before setting
 answers False -- not because nothing ran but because it cannot tell.
 
 That is the same defect this file records as *"a copy-constructed temp had
-no bind position"*, in a second place, and the fix looks like one line.
-It is deliberately not taken here: two changes in flight is a measurement
-of neither, which this session has already paid for once.
+no bind position"*, in a second place -- and it is **three** lines deep,
+not one. The attempt is recorded here because each layer of it was a
+separate wrong guess and the next person should start from the bottom.
+
+1. **Record the bind position** on the return-slot shortcut. Necessary and
+   not sufficient: nothing changed.
+2. **Ask the question at the read.** Two sites render `return <temp>;`
+   straight out of `temps` and neither asked `_stale_fold` -- the third
+   read path in this file to skip it. Routed through one `_returned_temp`
+   helper: still nothing changed.
+3. **`_stale_fold` opens with `if off <= 0: return False`, and the return
+   slot IS 0** for a global function and -1 for a method. So every return
+   value was excluded by construction. Relaxed for the return slot only:
+   still nothing changed.
+
+What finally showed the cause was instrumenting rather than guessing a
+fourth time: **`stmt_count` is 0 from entry to `RET` in that body.** Every
+statement in `file_get_contents` is a discarded value-returning call --
+`open` answers `bool`, `close` answers `bool`, the `read` is returned --
+so every one goes out through `_flush_pending_call`, which appends an
+event and never touches the counter. Each fold-safety rule compares
+`bound[1]` against `stmt_count`, so in a body like this one *nothing can
+ever be seen to have run*.
+
+Making the flush count fixes the ORDER and breaks something else:
+promoting the return slot emits its assignment and the `return` vanishes,
+so the function ends `local_0 = local_4;` and would not compile. That is
+attempt 4, reverted.
+
+So the order to take it in is: teach the promotion to keep the `return`
+first, then count the flush, then the three layers above. Four of the
+server's rows wait on it -- `file_get_contents`, `base::load_vault`,
+`load_bases` and `file_put_contents` -- and `get_file_size`,
+`get_file_size_b`, `teamload`, `map::mapload` and the client's two are
+already right.
 
 ### Eleven: a snapshot of a MEMBER is stale once that member is assigned
 
