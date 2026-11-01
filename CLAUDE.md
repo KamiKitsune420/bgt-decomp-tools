@@ -8654,6 +8654,29 @@ The probe is the one to finish on, because its source is known: it reads
 both globals and both functions and stops near the end, so the remaining
 error is in one of the last fields rather than in the shape.
 
+**Its head decodes by hand, and confirms the shape this reader has.**
+`int enemy_max = 50;` is the probe's first global, byte for byte:
+
+```
+00        noDebugInfo = 0
+00        enums     = 0
+00        classes   = 0
+00        funcdefs  = 0
+00        typedefs  = 0
+02        2 global properties
+6e 09     'enemy_max'
+00        namespace: the empty string
+00        datatype: v = 0, so a new one follows
+40 44     eu = 68 -- `int` in the legacy token numbering, which the
+          IR converts with `t + (t>=36) + (t>=64)` to the newer 70
+00        the datatype's one flags byte
+66 ...    'f', the initialisation function
+```
+
+So the record really is `str(name) str(ns) datatype ReadFunction` with
+the saved-datatypes back-reference, and the error at 0x2D5 is in one of
+the debug block's last fields rather than anywhere above it.
+
 **Screaming Strike's 0x1A is not inside a function**, which is what
 this said and is worth correcting, because it points somewhere else
 entirely. Read byte by byte, 0x1A is the boundary of the FIRST global
@@ -8676,13 +8699,39 @@ property's record:
 So the record holds **exactly one byte more** before its initialisation
 function than this reader expects, and the `f` at 0x1B is what says
 where that function really starts -- a much narrower question than "the
-debug block is wrong". Which field owns the byte is the open part: the
-`40 42` reads as a *back-reference* to saved data type 66, which cannot
-exist at the first property, so either the namespace string is not
-there (this build predates `namespace`, which BGT 1.0 has no keyword
-for) or its `ReadDataType` is shaped differently. Settling it means
-reading `ReadGlobalProperty` out of this build, which is the rule this
-file opens with and the one thing the Ghidra import would not do.
+debug block is wrong".
+
+**And it has one leading count FEWER than the probe**, which the two
+dumps side by side give away: the probe spends five zero bytes on
+enums, classes, funcdefs and typedefs before its global count, and this
+module spends four. 51 is the number of globals the game has and the
+string after it is a global's name, so the 0x33 is the global count and
+**this build writes no typedef section at all** -- a per-build field
+like every other one here, in a 2013 BGT with 394 registrations,
+between 1.0's 240 and 1.3's 432.
+
+Trialled against the EOF landing, as every per-build field here is:
+no typedef section, no namespace in a property record, and a datatype
+with no back-reference takes the walk from **0x1B to 0x53E** of
+0x5D33, stopping on the second property's name tag.
+
+**That is not evidence, and saying so is the point.** 1,300 bytes for
+the initialiser of an `int` is implausible, so that read is
+over-running and swallowing records -- and this file's own history is a
+signature model that *"parsed at 92.5% while being wrong about three
+separate fields, because in the common case two counts were zero and
+the layout happened to coincide"*. A trial that walks further is not a
+trial that walks correctly. The datatype candidate is refuted outright
+by the probe above: `00 40 44 00` is v=0, then token 68, then flags, so
+dropping the back-reference would read that `00` as a token of 0.
+
+So the next step is the one this file opens with rather than another
+trial: `asCReader::ReadGlobalProperty` and `ReadDataType` out of
+**this** build. The Ghidra import died with `OutOfMemoryError` at the
+4G heap, and the fix for that is already recorded here -- **import the
+PE stub, not the executable**, since half the file is the encrypted
+overlay and the string and switch analyzers grind through it for
+nothing. `bgtlib.read_trailer` gives the split.
 
 Two things about the tooling that cost time here, both worth knowing
 before the next attempt:
