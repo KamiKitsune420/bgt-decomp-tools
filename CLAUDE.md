@@ -2094,10 +2094,10 @@ checks say:
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
 | Super Egg Hunt | 5,302 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 23,442 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | 24,431 | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
-| Crazy Party | 175,334 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
-| Manamon 1 | 83,407 | 0 | 0 | yes | 26,483 | **not measured -- wrong engine** |
+| Paladin of the Sky | 23,396 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Psycho Strike | 24,419 | **0** | 0 | yes | 6,407 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
+| Crazy Party | 174,780 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
+| Manamon 1 | 83,371 | 0 | 0 | yes | 26,484 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Psycho Strike's goto column is 0 now**, which takes its two
@@ -2119,7 +2119,9 @@ every one of the 14 this file recorded was a `goto`, and AngelScript
 has none. Re-deriving the compiler's own verdict still costs a modal
 dialog on somebody's screen and has not been spent.
 
-**Four of the six rows are from one run of the code as it stands**, which this
+**Five of the six rows are from one run of the code as it stands**, and
+the four collapsed-guard rows and the signed-comparison row were
+measured into it rather than left to go stale -- which is what this
 table has rarely been able to say. It carried a mixture of rows from
 different commits for most of this project's life, and the two largest
 titles were a lower bound rather than a measurement, because the run that
