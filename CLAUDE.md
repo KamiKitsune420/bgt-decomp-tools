@@ -7242,13 +7242,16 @@ condition reading one of them twice. The text is enough to be sure --
   which rebels get removed is wrong. Finding it twice over, from two
   unrelated instruments, is the cross-validation this project runs on.
 
+**All three are fixed** -- see **Fixed, in two halves** below, where
+`double_assign` reaches 0 on all three titles.
+
 One more is read and is NOT a collapse: Manamon 1's `paladine`
 constructor reads `get_possessive(this.name)` twice in one sentence,
 which is the same value both times and is what the author wrote. Its
 FIRST assignment -- the sentence about the spirit horse -- looks
 unread, which is a different question and wants its own look.
 
-##### The fourth rejection, which fixes two of them and breaks a third
+##### Fixed, in two halves -- and the fourth attempt is why it is narrow
 
 `_conditionally_bound` carries the argument already -- *"a
 short-circuit merge slot is never one of these, however much it looks
@@ -7256,33 +7259,12 @@ like one... promoting it makes each operand's computation an
 unconditional statement, so every term is overwritten before the `if`
 reads it"* -- and the guard that acts on it lives in `_diamond_bind`,
 which `_conditionally_bound` reaches only **after** its `cond_spans`
-test. So the argument was made and not applied to the half that fires
-first.
+test. So the argument was made and never applied to the half that fires
+first, which is the half these three guards go through.
 
-Exempting `short_circuit_slots` at the top of `_conditionally_bound`
-brings both Paladin guards back as the source must have had them:
-
-```
-gift::get_gift   if (!is_in_party(for_character) && (for_character != ""))
-the save loader  if (!is_registered() && (difficulty == 2))
-```
-
-and **the lines go down**, which no previous attempt in this family
-managed: a forced operand slot costs an assignment per term as well as
-a wrong condition.
-
-| title | lines | goto | split | calls |
-|---|---|---|---|---|
-| Super Egg Hunt | 5,302 (byte-identical) | 0 | verified | 1,608 |
-| Paladin of the Sky | 23,442 -> **23,395** | 0 | verified | 6,952 |
-| Psycho Strike | 24,431 -> 24,427 | 0 | verified | 6,406 |
-| cs server | 10,876 -> **10,196** | 0 | verified | 3,018 |
-
-`bgt oracle` 52/52, the server still 194 of 196 against its author's
-source, Paladin's `double_assign` rows 2 -> 0.
-
-**And it breaks Psycho Strike's `find_likely_request`**, which is why
-it is not taken:
+**The fourth attempt exempted every slot in `short_circuit_slots`**, and
+that is too much. It fixed both Paladin guards and broke Psycho Strike's
+`find_likely_request`:
 
 ```
 before:  int local_1 = -1;
@@ -7297,11 +7279,18 @@ after:   if (-1 == -1) { if (arg0.loyalty <= 0) { } else { ... } }
 ```
 
 -- the `|| true` defect, re-made from a new direction, in a function
-that decides what a character asks for. Slot 1 is an ordinary source
-variable carried past the whole condition **and** the slot the
-compiler used as the merge's destination.
+that decides what a character asks for.
 
-Two narrowings were tried and neither separates the two bodies:
+**The separating fact is which END of the merge a slot is.** A
+destination may be a source variable the compiler REUSED, because the
+merge's result *is* that variable's value -- slot 1 above is the slot its
+`||` stores into. An arm-only slot cannot be: it holds a piece of the
+right-hand operand and exists only while that operand is computed. So
+`_short_circuit_slots` keeps `merge_dests` as it goes, `merge_operands`
+is the difference, and the fold rules exempt the second only.
+
+Two narrowings were tried before that one and neither separates the two
+bodies, which is worth recording because both sound right:
 
 - **Read past the merge.** A variable carries its value onward, so
   something reads it there. `find_likely_request`'s slot IS the merge's
@@ -7311,22 +7300,96 @@ Two narrowings were tried and neither separates the two bodies:
   true of the gift's operand slot, whose left-hand half is computed
   before the jump.
 
-So the two must be satisfied together, and the pre-pass does not hold
-enough to do it. The real difference is that one slot is a source
-variable the compiler **reused** as a merge destination, which is the
-same question as *"did the source NAME this slot?"* that this whole
-file is organised around being unable to answer -- see **Which slots
-the source NAMED**, where the engine supplies an asymmetry and not a
-test.
+##### The second half: a merge LABEL may carry the arm's scope cleanup
 
-That makes four measured rejections in this family, and this is the
-first one with two bodies that any fifth attempt must satisfy at once.
-`tests/nvgt/test_regressions.py` pins the guard's position so the
-record is not lost.
+The exemption fixed two of the three and not `home::reset_rebels`, and
+the reason was one instruction upstream of every fold rule: **that
+merge was not in the pre-pass set at all.**
 
-##### How far the gift one was traced, so the next attempt starts here
+`_short_circuit_slots` looks for `<jump> ; SetV dest,0|1 ; JMP merge`
+and then asks whether the instruction *at* `merge` loads `dest`. An arm
+that indexes an array borrows a handle, so the arm's scope releases it
+before the merge reads anything -- the same reason this file records for
+a `break`, which emits its destructors before its own `JMP`:
 
-`gift::get_gift`'s bytecode is a textbook `&&` merge:
+```
+    JLowNZ -> L1 ; SetV4 2,0 ; JMP -> L2
+L1: ... opIndex ; RefCpyV 3 ; ... ; CpyVtoV4 2,4
+L2: FREE 3            <- the merge LABEL: the borrowed array handle
+    CpyVtoR4 2        <- ...and the load, one instruction on
+```
+
+So the label was read, the load was missed, and slot 2 was forced to be
+a variable -- in a body where it serves the loop bound **and** both
+operands of the `&&`:
+
+```
+before:  local_2 = rebels.get_length();
+         if (local_1 >= local_2) break;
+         local_2 = (arg0 ? 1 : 0);
+         local_2 = ((local_2 == 0) ? 1 : 0);
+         local_2 = (!rebels[local_1].former_rebel ? 1 : 0);
+         if ((local_2 != 0) && (local_2 != 0)) { } else { ...remove... }
+
+after:   for (; local_1 < rebels.get_length(); local_1++) {
+             if (!arg0 && !rebels[local_1].former_rebel) continue;
+             rebels[local_1].reset();
+```
+
+**The loop came back with it**, which is the second time in this file a
+collapsed condition turns out to have been hiding a `for` header: the
+bound was in the same slot, so folding the operands away let
+`_find_latch` see it.
+
+Only cleanup that cannot touch the destination is skipped -- a `FREE` or
+`ClrVPtr` of *another* slot, and the markers that compile to nothing. A
+`FREE` of the destination is not cleanup before the merge, it is the end
+of the value's life, so the run stops there.
+
+##### What the pair cost
+
+| title | lines | goto | split | calls |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,302 (byte-identical) | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,442 -> **23,396** | 0 | verified | 6,952 |
+| Psycho Strike | 24,431 -> **24,419** | 0 | verified | 6,406 |
+| Crazy Party | 175,334 -> **174,780** | 0 | verified | 90,148 |
+| Manamon 1 | 83,407 -> **83,371** | 0 | verified | 26,483 -> 26,484 |
+| cs server | 10,876 -> **10,139** | 0 | verified | 3,018 |
+
+**Crazy Party's goto count does not move**, which is the number this
+family is judged by: the three earlier rejections took it 14 -> 30, -> 44
+and -> 90, and this file's own undertaking was that if it moved, the change
+came out with its number. It is 0 before and after, with 90,148 calls read
+back and the split still verified. Manamon 1's one extra call read back is
+a call site the text now spells once rather than folding, not a call that
+was missing.
+
+The two halves are separable, because the cheap titles were measured
+at each: the exemption alone is Paladin 23,400 and Psycho Strike 24,431,
+and the merge locator takes those to 23,396 and 24,419.
+
+**`double_assign` reaches 0 on all three cheap titles** -- Paladin 2 -> 0,
+Psycho Strike 1 -> 0, Super Egg Hunt already 0 -- which is the whole of
+what that sweep had left after its own narrowing, and every one of the
+three was a real collapsed guard. Nothing else in `bgt signatures` moves
+but Paladin's `identity_cast`, 2 -> 3, and that row is the save loader
+reading `facing = int8(int(...))` in one expression where it used to
+route the same chain through a scratch variable: the same program, one
+line shorter, and the weakest of the nine shapes (see **...and the
+identity casts**).
+
+Every `bgt audit` comparison is identical before and after on both
+titles that can be audited here -- Paladin 25 call rows and 2 constant
+rows, Psycho Strike 41 and 2 -- `bgt oracle` is 52/52, and the four
+games that came with their own source hold exactly: the `cs` server 194
+of 196, its client 216 of 218, rage room 291 of 292 and constant
+velocity 94 of 95, with 0 differing on all but the server's one.
+
+##### The trace that found it, worth repeating rather than re-deriving
+
+`gift::get_gift`'s bytecode is a textbook `&&` merge, and reading it was
+not what answered the question:
 
 ```
 CALL is_in_party ; CpyRtoV4 7 ; NOT 7      ; the LEFT operand, in slot 7
@@ -7338,38 +7401,14 @@ L6: ... string::opEquals ; CpyRtoV4 7 ; NOT 7
 L7: CpyVtoR4 8 ; JLowZ                     ; the merge
 ```
 
-The destination is slot 8 and both operands pass through slot 7, which
-is the shape `_short_circuit_slots` is written for -- and the pattern it
-matches, `<JUMP> ; SetV dest,0|1 ; JMP merge`, is present here.
-
-Traced rather than reasoned about, two things are known and the third is
-not:
-
-- **What promotes slot 7 is `_conditionally_bound`** -- rule two, the
-  value computed on one path and read past the join. That is *correct in
-  itself*: the second value really is computed only inside the arm, and
-  the rendered condition really does read slot 7 after it.
-- **So the defect is upstream of the fold rules.** Had the merge been
-  folded, nothing would read slot 7 past the arm at all; the read exists
-  because the arms were emitted as statements.
-- **`_begin_bool_merge` claims one merge in that body and declines others
-  at its first shape test** (`setv.name` / `jump.name`), which is as far
-  as this got. Whether the merge above is the one claimed, or reaches the
-  recogniser at all, is the next question -- the JZ handler tries
-  `_begin_bool_merge`, then `_begin_value_merge`, then `_branch`, and a
-  jump already inside `skip_indexes` never arrives.
-
-The trace is one command, and worth repeating rather than re-deriving:
-`sys.settrace` on `_begin_bool_merge`, recording the line each call
-returns from, over `ModuleDecompiler._body` for the one function. That is
-how the `_conditionally_bound` answer above was got, after two wrong
-guesses from reading the code.
-
-So the narrowing turns a hundred rows of noise into a two-dozen-row
-pointer at the one defect class this file has three measured rejections
-against (`_short_circuit_slots` is a shape test by necessity, and every
-merge whose shape it does not match becomes a forced variable). That is
-what a signature is for.
+What promotes slot 7 is `_conditionally_bound` -- rule two, the value
+computed on one path and read past the join -- and that was found with
+`sys.settrace` on the method, recording the line each call returns from,
+over `ModuleDecompiler._body` for the one function. **Two guesses from
+reading the code came first and both were wrong**, which is the whole
+argument for the trace: a fold rule's answer depends on four tables and
+a position, and the method that fires is not the one that looks
+likeliest.
 
 #### ...and `duplicated_call` was counting CONVERSIONS
 
@@ -7400,8 +7439,10 @@ over-reports in a way that is obvious once a row is read, and the
 narrowing is always a question the text can answer (is this the
 destination? is this a conversion? is the slot ever read? is there
 anything between the branch and its target?). What is left after all
-four is **three real defects**, all of one class, and they are listed
-above.
+four is **three real defects**, all of one class -- and all three are
+fixed, which is the sweep doing the job it was built for: nine text
+shapes, read end to end, pointing at one defect class that four earlier
+attempts had been aimed at from the wrong end.
 
 And the instrument needed its own correction, which is the usual one:
 asked of `jump_target == 0` it answered **0 for every title**,

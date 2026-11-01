@@ -236,6 +236,10 @@ class FoldSafetyTests(unittest.TestCase):
         # for; the behaviour case sets it.
         sim.behaviour_writes = {}
         sim.short_circuit_slots = set()
+        # ...of which the OPERAND slots are the ones the fold rules
+        # exempt. A real decompiler derives this by taking the merge
+        # destinations out; empty here, and a case about it sets it.
+        sim.merge_operands = set()
         sim.var_names = {}
         # `_stale_global` asks which of the module's globals a value
         # reads. A real decompiler always has this; empty here so a case
@@ -626,43 +630,35 @@ class FoldSafetyTests(unittest.TestCase):
         sim.flushed_calls = [(60, "local_1.close();")]
         self.assertFalse(sim._stale_fold(4))
 
-    def test_the_SHORT_CIRCUIT_exemption_stays_where_it_is(self):
-        """The fourth rejected attempt at the collapsed-guard family, pinned
-        so the fifth starts from the measurement.
+    def test_a_merge_OPERAND_is_exempt_and_a_DESTINATION_is_not(self):
+        """Which half of a short-circuit the fold rules may leave alone.
 
         `_conditionally_bound` carries the argument in its own docstring --
         promoting a merge's operand makes each term an unconditional
         statement, after which the condition reads one slot twice -- and the
-        guard that acts on it sits in the DIAMOND half, below the
-        `cond_spans` test which fires first. Moving it to the top fixes two
-        real bugs and causes a third:
+        guard that acted on it sat in the DIAMOND half, below the
+        `cond_spans` test, which fires first. So the argument was made and
+        not applied to the half that fires first, and two shipped guards
+        were collapsed by it:
 
-            fixed   gift::get_gift     !is_in_party(c) && c != ""
-            fixed   the save loader    !is_registered() && difficulty == 2
-            broke   find_likely_request (Psycho Strike)
+            gift::get_gift     !is_in_party(c) && c != ""
+            the save loader    !is_registered() && difficulty == 2
 
-        and the costs went the right way too -- Paladin -47 lines, the `cs`
-        server -680, Super Egg Hunt byte-identical, no goto or call count
-        moved. What it breaks is `int local_1 = -1;` carried past the whole
-        condition in a slot the compiler ALSO used as the merge's
-        destination, so its conditional stores folded away and the `return`
-        came out `(arg0.bordum >= 100) || false`.
+        **Exempting every slot in `short_circuit_slots` is too much**, and
+        the measurement that says so is Psycho Strike's
+        `find_likely_request`: `int local_1 = -1;` is a source variable the
+        compiler reused as the merge's DESTINATION, so exempting it folded
+        the conditional stores away and the `return` came out
+        `(arg0.bordum >= 100) || false` -- the `|| true` defect, re-made from
+        a new direction. An arm-only slot cannot be a source variable: it
+        holds a piece of the right-hand operand and exists only while that
+        operand is being computed.
 
-        Two narrowings were tried and neither separates the cases:
-
-        * **read past the merge** -- a variable carries its value onward, so
-          something reads it there. `find_likely_request`'s slot is the
-          merge's own destination, so its last read IS the merge, and it
-          qualifies as the compiler's.
-        * **written outside every arm** -- true of `local_1 = -1`, and also
-          true of the gift's operand slot, whose left-hand half is computed
-          before the jump.
-
-        So the two bodies must be satisfied together, and the pre-pass does
-        not hold enough to do it: the real difference is that one slot is a
-        source variable the compiler reused as a merge destination, which is
-        the same question as "did the source NAME this slot?" that this whole
-        file is organised around not being able to answer.
+        Two narrowings were tried before this one and neither separates the
+        two bodies: a read past the merge (`find_likely_request`'s slot IS
+        the destination, so its last read is the merge itself) and a write
+        outside every arm (true of `local_1 = -1` and of the gift's operand
+        slot alike).
         """
         import decompile
         with io.open(decompile.__file__, encoding="utf-8") as fh:
@@ -672,14 +668,23 @@ class FoldSafetyTests(unittest.TestCase):
             cut = body[body.index("    def %s" % name):]
             return cut[:cut.index("    def ", 4)]
 
-        #: the exemption lives in `_diamond_bind`, which `_conditionally_bound`
-        #: reaches only AFTER its `cond_spans` test -- which is what makes
-        #: this a record of the rejection rather than of the fix.
-        self.assertIn("self.short_circuit_slots", method("_diamond_bind"))
+        #: the exemption fires FIRST, above the `cond_spans` test...
         head = method("_conditionally_bound")
-        self.assertNotIn("short_circuit_slots", head)
-        self.assertLess(head.index("self.cond_spans"),
-                        head.index("_diamond_bind"))
+        self.assertLess(head.index("self.merge_operands"),
+                        head.index("self.cond_spans"))
+        #: ...and reads the operands, never the whole set.
+        self.assertNotIn("self.short_circuit_slots", head)
+        #: `_diamond_bind` keeps the broad set, which is right there: a
+        #: diamond's two stores are the two arms, so a destination written
+        #: on both paths is not a conditional bind in the first place.
+        self.assertIn("self.short_circuit_slots", method("_diamond_bind"))
+
+        #: ...and an operand really is exempt where the whole slot set is
+        #: not. `test_a_short_circuits_scratch_slots_are_found_from_the_
+        #: bytecode` is where the two halves are separated from real
+        #: instructions.
+        self.assertFalse(
+            self._sim(merge_operands={11})._conditionally_bound(6, 11))
 
     def test_a_computed_value_reading_a_NAMED_slot_goes_stale(self):
         """Rule ten counts a behaviour write -- an object slot filled through
@@ -920,6 +925,67 @@ class FoldSafetyTests(unittest.TestCase):
         # of its reads instead. Taking it cost Super Egg Hunt three
         # duplicated calls, one of them a confirmation prompt asked twice.
         self.assertNotIn(3, slots)
+        # And the two kinds are kept apart, because the fold rules may
+        # exempt an operand and must not exempt a destination: slot 2 is
+        # where the merge's value arrives, slot 1 is a piece of the
+        # right-hand operand. See `_conditionally_bound`.
+        self.assertEqual(sim.merge_dests, {2})
+        self.assertEqual(slots - sim.merge_dests, {1})
+
+    def test_a_merge_LABEL_may_carry_the_arms_scope_cleanup(self):
+        """The load is not always the instruction the `JMP` lands on.
+
+        An arm opens a scope, so the compiler releases whatever that scope
+        borrowed before the merge reads anything -- the same reason a `break`
+        emits its destructors before its own `JMP`. Psycho Strike's
+        `home::reset_rebels` indexes an array in its right-hand operand, so
+        its merge label is `FREE 3` and the load sits one instruction on:
+
+            JLowNZ -> arm ; SetV4 2,0 ; JMP -> merge
+            arm: ... opIndex ; RefCpyV 3 ; ... ; CpyVtoV4 2,4
+            merge: FREE 3 ; CpyVtoR4 2
+
+        Reading the label alone missed the merge entirely, so slot 2 was
+        forced to be a variable -- and it serves the loop bound *and* both
+        operands of the `&&`, so the condition collapsed to
+        `if ((local_2 != 0) && (local_2 != 0))` and which rebels get removed
+        is wrong. With it the body is
+        `if (!arg0 && !rebels[i].former_rebel) continue;`, and the loop comes
+        back as the `for` its bound was hiding.
+
+        **Only cleanup that cannot touch the destination is skipped.** A
+        `FREE` of the destination itself is not cleanup before the merge, it
+        is the end of the value's life, so the run stops there.
+        """
+        from decompile import FuncDecompiler
+
+        def op(name, pos, w_arg=0, w_arg2=0, dw_arg=0, jump_target=None):
+            return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                         w_arg=w_arg, w_arg2=w_arg2, dw_arg=dw_arg,
+                         jump_target=jump_target)
+
+        def build(free_slot):
+            instrs = [
+                op("CpyVtoR4", 0, w_arg=2),
+                op("JLowNZ", 1, jump_target=4),
+                op("SetV4", 2, w_arg=2, dw_arg=0),
+                op("JMP", 3, jump_target=6),
+                op("RefCpyV", 4, w_arg=3),
+                op("CpyVtoV4", 5, w_arg=2, w_arg2=4),
+                op("FREE", 6, w_arg=free_slot),      # the merge LABEL
+                op("CpyVtoR4", 7, w_arg=2),          # ...and the load
+                op("RET", 8),
+            ]
+            sim = object.__new__(FuncDecompiler)
+            sim.instrs = instrs
+            sim.pos_of = {i.pos: k for k, i in enumerate(instrs)}
+            return sim._short_circuit_slots()
+
+        #: the borrowed handle: cleanup, so the merge is found behind it
+        self.assertIn(2, build(3))
+        #: ...and the destination's own release is not skipped, so a slot
+        #: whose life ends at the label is not read as a merge.
+        self.assertNotIn(2, build(2))
 
 
     def test_an_object_slot_an_arm_constructs_belongs_to_that_arm(self):
@@ -1469,6 +1535,10 @@ class DiamondBindTests(unittest.TestCase):
         sim.jmp_spans = [(5, 10)]
         sim.slot_writes = {11: [4, 6]}
         sim.short_circuit_slots = set()
+        # ...of which the OPERAND slots are the ones the fold rules
+        # exempt. A real decompiler derives this by taking the merge
+        # destinations out; empty here, and a case about it sets it.
+        sim.merge_operands = set()
         sim.back_edges = []
         sim.k = 4                                  # reading at pos 10
         for name, value in attrs.items():

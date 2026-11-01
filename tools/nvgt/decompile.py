@@ -252,6 +252,20 @@ def _jump_target(ins: Instr) -> int:
     return ins.pos + 2 + _s32(ins.dw_arg)
 
 
+#: Scope cleanup the compiler emits at the end of an arm: releasing what the
+#: arm borrowed, the loop's own suspend point, and the two markers that
+#: compile to nothing. None of it can change the slot a merge stores its
+#: value in, so none of it hides a merge -- see `_merge_load`.
+#:
+#: **Every name here is one the instruction set declares.** `LABEL` and
+#: `Block` are the compiler's own pseudo-instructions and are gone before a
+#: module is written, so listing them would be a claim about the stream that
+#: no build supports -- the `IncVi`/`INCi` lesson, which cost a measurement
+#: that measured nothing. `VarDecl` and `ObjInfo` are real, in the forks that
+#: declare 203 opcodes rather than 200.
+_ARM_CLEANUP = ("FREE", "ClrVPtr", "SUSPEND", "JitEntry", "VarDecl", "ObjInfo")
+
+
 _FLIP = {"<=": ">", ">=": "<", "<": ">=", ">": "<=", "==": "!=", "!=": "==",
          "is": "!is", "!is": "is"}
 # Longest first, so `<=` is not read as `<` and `!is` not as `is`.
@@ -1262,6 +1276,11 @@ class FuncDecompiler:
         # bytecode alone -- a slot that holds an `&&` is never one of the
         # source's own locals.
         self.short_circuit_slots = self._short_circuit_slots()
+        #: The OPERAND slots: what an arm writes, with the merge
+        #: destinations taken out. The fold rules exempt these and not the
+        #: destinations -- see `_short_circuit_slots`, which fills
+        #: `merge_dests` as it goes.
+        self.merge_operands = self.short_circuit_slots - self.merge_dests
         forced |= prefix_forced - self.short_circuit_slots
         #: branch instructions a merged switch chain consumed, which the
         #: simulation must not emit. Filled by `_dense_switch_pattern`,
@@ -3116,6 +3135,23 @@ class FuncDecompiler:
         it but at or before this read, then the store is skipped on the other
         path while the read happens either way.
         """
+        #: **A merge's OPERAND slot is never one of these.** `(a && b)` is
+        #: two stores to one slot on mutually exclusive paths and a read
+        #: after the join, which is this shape exactly -- and promoting one
+        #: makes each term an unconditional statement, after which the
+        #: condition reads whichever ran last. `_diamond_bind` has carried
+        #: that argument since the borrowed-handle work; this is the same
+        #: argument in the half that fires first, and Paladin's gift
+        #: eligibility and its save loader's difficulty guard are what it
+        #: costs: `if ((local_7 != 0) && (local_7 != 0))`.
+        #:
+        #: **Destinations are deliberately not exempt.** A destination may be
+        #: a source variable the compiler reused -- Psycho Strike's
+        #: `find_likely_request` keeps `int local_1 = -1;` in the slot its
+        #: `||` stores into, and exempting it folded the conditional stores
+        #: away and returned `(arg0.bordum >= 100) || false`.
+        if off is not None and off in self.merge_operands:
+            return False
         now = self._pos()
         if any(branch < bind_pos < join <= now
                for branch, join in self.cond_spans):
@@ -5181,6 +5217,42 @@ class FuncDecompiler:
         self.skip_indexes.update((self.k + 1, self.k + 2))
         return True
 
+    def _merge_load(self, merge_idx: int, dest: int) -> int:
+        """Where a merge's value is read, which is not always the label.
+
+        `_short_circuit_slots` looks for `<jump> ; SetV dest,0|1 ; JMP merge`
+        and then asks whether the instruction AT `merge` loads `dest`. Psycho
+        Strike's `home::reset_rebels` is that shape with one instruction in
+        between:
+
+            JLowNZ -> L1 ; SetV4 2,0 ; JMP -> L2
+            L1: ... opIndex ... RefCpyV 3 ; ... ; CpyVtoV4 2,4
+            L2: FREE 3            <- the arm's borrowed array handle
+                CpyVtoR4 2        <- ...and the load, one further on
+
+        The arm opened a scope, so the compiler releases what that scope
+        borrowed before the merge reads anything -- the same reason a `break`
+        emits its destructors before its own `JMP`. Reading the label alone
+        therefore missed the merge, and slot 2 was forced to be a variable in
+        a body where it serves the loop bound *and* both operands of the
+        `&&`, so the condition collapsed to
+        `if ((local_2 != 0) && (local_2 != 0))`: which rebels get removed is
+        wrong.
+
+        Only cleanup that cannot touch `dest` is skipped (`_ARM_CLEANUP`). A
+        `FREE` of `dest` itself is not cleanup before the merge, it is the end
+        of that value's life, so the run stops there.
+        """
+        index = merge_idx
+        while index + 1 < len(self.instrs):
+            op = self.instrs[index]
+            if op.name not in _ARM_CLEANUP:
+                break
+            if op.name in ("FREE", "ClrVPtr") and _s16(op.w_arg) == dest:
+                break
+            index += 1
+        return index
+
     def _short_circuit_slots(self) -> set[int]:
         """Slots the compiler carries a short-circuit `&&` / `||` value through.
 
@@ -5215,8 +5287,18 @@ class FuncDecompiler:
         forced name, which the fold rules and the duplicate-fold count still
         guard; a false negative costs a condition its meaning, which nothing
         downstream can see.
+
+        **The two kinds are kept apart in `merge_dests`**, because the fold
+        rules may exempt the operands and must not exempt a destination: a
+        destination may be a source variable the compiler REUSED, since the
+        merge's result is that variable's value. Psycho Strike's
+        `find_likely_request` is one -- `int local_1 = -1;` lives in the slot
+        its `||` stores into -- and exempting it folded the conditional
+        stores away and returned `(arg0.bordum >= 100) || false`.
         """
         slots: set[int] = set()
+        #: filled as we go, so one call to this method answers both
+        self.merge_dests: set[int] = set()
         for k, ins in enumerate(self.instrs):
             if ins.name not in JUMP_OPS or k + 2 >= len(self.instrs):
                 continue
@@ -5229,7 +5311,7 @@ class FuncDecompiler:
             if merge_idx is None:
                 continue
             dest = _s16(setv.w_arg)
-            merge_ins = self.instrs[merge_idx]
+            merge_ins = self.instrs[self._merge_load(merge_idx, dest)]
             loads_dest = (merge_ins.name in ("CpyVtoR4", "CpyVtoR8")
                           and _s16(merge_ins.w_arg) == dest)
             stores_dest = (merge_ins.name in ("CpyVtoV4", "CpyVtoV8")
@@ -5237,6 +5319,13 @@ class FuncDecompiler:
             if not (loads_dest or stores_dest):
                 continue
             slots.add(dest)
+            #: **A destination may be a source variable the compiler
+            #: REUSED**, since the merge's result is that variable's value.
+            #: An arm-only slot cannot be: it holds a piece of the
+            #: right-hand operand and exists only while it is computed. The
+            #: fold rules may exempt the second and not the first -- see
+            #: `merge_operands`.
+            self.merge_dests.add(dest)
             arm_idx = self.pos_of.get(_jump_target(ins))
             if arm_idx is None:
                 continue
