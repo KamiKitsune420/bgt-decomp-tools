@@ -2328,6 +2328,110 @@ before reading networking code in a recovered game -- `cs` drives
 author working around a missing wrapper, it is the only interface there
 has ever been.
 
+#### An embedded pack is referred to as `*`, and nothing here handles it
+
+The packaging tutorial documents a feature the chain at the top of this
+file already half knows about -- the `"<n> "` field is *"the size of an
+optional embedded pack"* -- without recording what a script does with it:
+
+- `#include "packname.dat"` embeds a pack **inside the executable**. The
+  engine decides for itself whether an include is a script or a pack, and
+  **at most one pack per game** may be included.
+- the script then names it `"*"`: `set_sound_storage("*")`,
+  `pack_file::open("*")`.
+- run from source, `"*"` means the pack file on disk under the name the
+  `#include` gave; compiled, it means the copy inside the program.
+
+`bgt recover` cannot follow that. It finds packs by taking names out of the
+module's string constants and keeping the ones that name a file beside the
+executable with `SFPv` magic -- and `"*"` names no file, so such a title
+would report *"loads assets through set_sound_storage and no pack was
+found"* while the pack sat inside the executable it was handed.
+`bgtlib.unpack_file` already returns the bytes as `embedded_pack`, and
+`bgt unpack` already writes them out; **the recovery path never reads that
+field at all.**
+
+What a correct recovery needs is all three of: the pack written beside the
+project, an `#include` naming it, and the script left saying `"*"` -- and
+the original `#include`'s filename is not recoverable, because it was a
+directive rather than a string constant, so the written name is this
+tool's choice.
+
+**It is latent across the whole corpus**, which is the honest way to put
+it: all ten titles here -- the five standings titles, the three with
+source, rage room and Screaming Strike -- have an embedded pack of
+**0 bytes**. So this is a documented shape with no sample, exactly like
+`string_compress` being registered and undocumented: provable, and not
+yet a changed report.
+
+#### Four things the tutorials confirm that were derived the hard way
+
+None of these changes any code. They are worth recording because each was
+reached from the bytecode or from a probe, and the manual says the same --
+which is the cheapest kind of cross-validation there is.
+
+- **A dictionary lookup that misses leaves your variable alone.** *"If you
+  delete or check an entry that doesn't exist, this will not cause any
+  syntax or runtime errors to occur, but the variable you are attempting to
+  use to retrieve the value will not change."* This file records the same
+  behaviour for a **type** mismatch, found through the `?&` TYPEID work and
+  the six Paladin save flags that stopped being restored. Same rule, the
+  other half of it.
+- **A parameterless base constructor is called automatically.** *"imagine
+  that the first thing a derived class constructor does is to call a
+  parameterless base class constructor. This happens automatically"*, and
+  `super(...)` is for choosing a different one. So the call audit's
+  commonest benign row -- `super()` where the bytecode names the base
+  constructor -- is benign by the language's own definition.
+- **Enums must be global.** *"enums have to be defined globally; they
+  cannot be defined inside a function"*, which is what makes `types.bgt` a
+  correct place to put every one of them.
+- **The nesting limit is 10,000 calls**, twice stated. That is exactly the
+  frame count in the `person::reset` stack overflow this file records, so
+  that trace was the engine hitting its documented ceiling rather than
+  anything stranger.
+
+#### The documented escape list does NOT include `\xNN`
+
+The tutorial's table is `\\`, `\"`, `\n`, `\r`, `\t` and nothing else.
+This toolkit writes every byte above 0x7F as `\xNN`, which is **not in
+it** -- and that is fine, because the engine was asked rather than the
+documentation: `"\xac\x71\x96"` compiles with no warning and produces
+those three bytes, while the octal `"\254"` is *"Invalid escape
+sequence"*. Had the manual been the authority here it would have said no
+to a spelling the engine accepts, which is worth knowing about the
+documentation's completeness before leaning on it for anything else.
+
+#### The manual's own example code ships inside real games
+
+The performance tutorial prints a `preload` class with `preload_add` and
+`reset_preloads`, for keeping sounds in memory so the pool can clone them.
+Paladin has all three. It is an **adaptation** rather than a copy -- a
+`dictionary` where the manual uses an array, plus an `alert` on failure --
+and `reset_preloads` is near enough verbatim.
+
+That makes the tutorials a second source of source nobody here wrote,
+after `include/*.bgt`. It is weaker than the library, because a game
+adapts an example where it merely *uses* a library file, so it is a
+reading aid rather than a scoring oracle. It does explain one round-trip
+row: `preload_all` scores **0.015**, which this file already attributes to
+a per-item string temp, and the body it is scoring is the manual's shape.
+
+#### ...and reading it needed its instrument checked, like everything else
+
+The help file is 421 pages of compiled HTML, so reading it meant flattening
+it to text, and the flattener ate **22,904 characters -- 7% of the manual,
+almost all of it inside the code examples.** `<[^>]+>` is not a tag
+pattern: the help file writes a raw `<` in its source, so
+`for(int x=0; x<50; x++)` lost everything from `<50` onward and the array
+chapter read as prose with the arrays missing.
+
+Nothing announced it. The text was fluent, the headings were right, and
+the only tell was a sentence that ran into the next chapter's title. That
+is the third instrument failure in one session, after `strings` not being
+installed and a measurement confounded by two changes at once -- and all
+three produced confident, plausible, wrong output rather than an error.
+
 #### Running a script from source is a DEBUG run
 
 Appendix H closes with it: *"When you run a BGT script from source, it is
