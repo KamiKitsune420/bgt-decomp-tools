@@ -1898,11 +1898,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 5,780 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 25,942 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | 25,870 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 190,735 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
-| Manamon 1 | 89,712 | 0 | 0 | yes | 26,481 | **not measured -- wrong engine** |
+| Super Egg Hunt | 5,262 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
+| Paladin of the Sky | 23,392 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Psycho Strike | 24,367 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 174,547 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
+| Manamon 1 | 83,318 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **All five rows are from one run of the code as it stands**, which this
@@ -3766,11 +3766,128 @@ rule in this file -- `_stale_fold` promotes it if it goes stale, and the
 duplicate-bind pass promotes it back to a variable if it is read twice.
 The safety net is the existing one; only the classification changes.
 
-**Not attempted here.** A fold change is where every expensive mistake in
-this file lives -- five rejected attempts with their measurements -- and
-the change above is the one being measured. It owes the same five-title
-table: lines, residual gotos, the split check, the call count, all three
-audits, `libcheck`, `bgt signatures` and the oracle.
+#### Done, and narrowed twice on the way
+
+`_reused_object_slot` is the rule, and it takes three things -- two of
+them added because the first form broke a title:
+
+1. **More than one construction site at the offset.** Read from the
+   instruction stream for the `PSF v ; CALLSYS $beh0` form, and
+   discovered during simulation for the `ALLOC` form, which is carried
+   into the next pass exactly as a duplicated bind is -- `ALLOC` names
+   its destination on the stack, so only a pass that has RUN knows it.
+2. **No `opAssign`-family write to the slot.** The engine only
+   re-assigns something already constructed, so a slot it re-assigns is
+   one the source declared. Without this, Manamon 1's `battle` came out
+   with four `local_27 = local_27;` no-ops and that title carried **51**
+   self-identical lines against the one it has.
+3. **A value that costs nothing to re-evaluate** -- in practice a
+   literal. This is the one that matters, and the measurement that
+   forced it is the worst kind of defect in this file.
+
+##### The shape that forced the third condition
+
+Without it the rule is much bigger -- Crazy Party **190,735 -> 162,719
+lines**, Egg Hunt's round-trip edit distance 15,124 -> 8,293 -- and it
+duplicates calls, because the duplicate-read counter cannot see these
+reads. Manamon 1's `handle_beta_registration`:
+
+```
+before:  local_9 = input_box("Registration", "Please enter the key ...");
+         if (local_9 == "" && ...) exit();
+         if (!varify_key(local_9)) { ... }
+         key = local_9;
+
+after:   if (input_box(...) == "" && ...) exit();
+         if (!varify_key(input_box(...))) { ... }
+         key = input_box(...);
+```
+
+-- **the player is asked for the key three times**, which is the
+`file_menu` defect again, and 111 more call sites across that title
+(`menu_get_item_name` +44, `input_box` +8, `url_get` +6). Slot 9 has six
+construction sites and no `opAssign`, so it looks exactly like scratch.
+
+**Why nothing promoted it back** is worth recording, because it is the
+same incompleteness this file records for the lost call: `fold_reads` is
+counted in `_read_temp`, and these reads never reach it, so a value read
+three times has no entry at all and the duplicate-bind pass has nothing
+to act on. Lowering the threshold for such binds was tried and is inert
+for the same reason.
+
+A literal cannot have that problem: re-evaluating it duplicates nothing.
+And it is where the mass is anyway, so the condition costs less than it
+sounds.
+
+##### And one attempt that was worse than both
+
+Taking the decision ONCE, before the simulation, by dropping the slot's
+name -- which is the tidier design, since routing a *named* slot's
+construction to `temps` leaves it half a variable. It is worse: an
+unnamed slot folds into every read, so Egg Hunt's call count went 1,608
+-> **1,669** and Paladin's 6,952 -> **7,000**. The half-measure is the
+one to keep, which is not the conclusion the design argument predicted.
+
+##### What it cost and what it fixed
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,780 -> **5,262** | 0 | verified | 1,608 |
+| Paladin of the Sky | 25,942 -> **23,392** | 0 | verified | 6,952 |
+| Psycho Strike | 25,870 -> **24,367** | 2 | verified | 6,406 |
+| Crazy Party | 190,735 -> **174,547** | **14** | verified | 90,145 |
+| Manamon 1 | 89,712 -> **83,318** | 0 | verified | 26,481 -> 26,482 |
+
+`local_N = "...";` lines: Super Egg Hunt **468 -> 20**, Paladin
+**2,281 -> 126**, Manamon 1 **6,493 -> 826**. Not one residual goto
+moves, every split verifies, all three `bgt audit` comparisons are
+identical on every title, `bgt libcheck --decompiler` holds at 39/46,
+43/46 and 144/148, and `bgt oracle` is **51/51**.
+
+**And the round trip is the number this was for.** Both titles that can be
+built here, measured against their own originals:
+
+| | edit distance | of the original | bodies identical |
+|---|---|---|---|
+| Super Egg Hunt, before this session | 20,036 | 70.1% | 29 / 137 |
+| ...after the dead-handle fix | 15,124 | 52.9% | 29 / 137 |
+| ...after this | **9,446** | **33.1%** | **30 / 137** |
+| Paladin, after the dead-handle fix | 74,725 | 58.2% | 256 / 798 |
+| ...after this | **39,019** | **30.4%** | **269 / 798** |
+
+Both still `compiled cleanly`. Super Egg Hunt's distance has more than
+halved across the session and Paladin's has very nearly halved in one
+change, which is the most any single change here has moved it.
+
+Two defects fall out of it, and neither was the target:
+
+- **Paladin's receptionist reports the right floor.** The wrong-floor
+  defect two sections up needed the stale-fold widening that was
+  rejected for costing 1,567 lines; it does not need it any more.
+  Folding the literal scratch slot away means slot 6 is no longer a
+  variable carrying two different map names, so each `world[...].name`
+  is rendered where it was computed:
+  `string_trim_left(improve_map_name(world[your_cabin].name), 6)` for the
+  room and `improve_map_name(world[your_floor].name)` for the floor,
+  which is the original.
+- **Manamon 1's pause menu gets its seventh item back.** This file
+  records it as one of the two lost calls *the census cannot see* --
+  masked because all six surviving `menu_add_item` lines read
+  identically. With each literal folded into its own call the texts are
+  distinct, nothing masks anything, and the body goes from six items to
+  seven: Party, Inventory, Manapedia, Save Game, Exit game, Unknown
+  Gifts, Options. **So the fix for that one was not the wider signal at
+  all**, and the signal is still worth building for the other half
+  (`coin::act`, which never reaches a slot).
+
+The cost is **five self-identical no-op lines** -- one in Paladin's
+`map::deserialize` and four in Manamon 1 -- where a literal construction
+folds and a following `opAssign` renders `local_1 = local_1;`. Harmless
+and ugly, and counted here rather than suppressed, because this file
+already records two `x = x;` lines that are the ORIGINAL's own and a
+blanket suppression would lose them. Manamon 1's `double_assign` goes
+**20 -> 14** in exchange, and Paladin's stays at 6 with the receptionist
+row replaced by a benign `arg0 = string_reverse(arg0);`.
 
 ### What it says the distance is MADE of
 

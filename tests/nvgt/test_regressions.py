@@ -114,6 +114,98 @@ class LoopExtentTests(unittest.TestCase):
         self.assertLess(lines.index("break;"), lines.index("after_the_loop();"))
 
 
+class ReusedObjectSlotTests(unittest.TestCase):
+    """A reused object slot is the compiler's scratch, not a variable.
+
+    `objVariableTypes` names every object slot, so the decompiler has a
+    declaration for each one and no way to tell which the source NAMED --
+    the gap this whole file works around. For an object the engine answers
+    it: a declared local is constructed ONCE where it is declared and
+    re-assigned with `opAssign` after that, while the compiler's scratch
+    slot is constructed afresh at every use.
+
+    Counted over the originals, `STR ; <factory> ; PshRPtr ; PSF v ;
+    CALLSYS ?` ends in `string::string(const string&in)` 544 times on Super
+    Egg Hunt and 2,759 on Paladin, against `string::opAssign` 2 and 20 --
+    while the recovery wrote 468 and 2,281 `local_N = "...";` lines, which
+    is the `opAssign` spelling.
+
+    Two of the three conditions are here because the first form broke a
+    title, and both are pinned below.
+    """
+
+    def _sim(self, construct=None, known=None, assigned=None):
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        sim.construct_sites = construct or {}
+        sim.known_construct_sites = known or {}
+        sim.assigned_slots = set(assigned or ())
+        return sim
+
+    @staticmethod
+    def _literal():
+        from decompile import Atom
+        return Atom("const", '"Product_Id"')
+
+    @staticmethod
+    def _a_call():
+        from decompile import Atom
+        return Atom("call", 'input_box("Registration", "the key")')
+
+    def test_one_construction_site_is_a_declared_local(self):
+        """Where it is declared. Nothing changes for these."""
+        sim = self._sim(construct={3: [10]})
+        self.assertFalse(sim._reused_object_slot(3, self._literal()))
+
+    def test_two_construction_sites_are_the_compiler_reusing_a_slot(self):
+        sim = self._sim(construct={3: [10, 44]})
+        self.assertTrue(sim._reused_object_slot(3, self._literal()))
+
+    def test_the_ALLOC_half_is_carried_from_the_PREVIOUS_pass(self):
+        """`ALLOC` names its destination on the STACK, so only a pass that
+        has run knows it -- and that is the commonest construction in the
+        corpus (`PSF 1 ; STR ... ; CALLSYS factory ; PshRPtr ; ALLOC`)."""
+        sim = self._sim(known={5: [71, 155, 204]})
+        self.assertTrue(sim._reused_object_slot(5, self._literal()))
+        # and the two halves add up rather than either one deciding alone
+        sim = self._sim(construct={5: [10]}, known={5: [71]})
+        self.assertTrue(sim._reused_object_slot(5, self._literal()))
+
+    def test_a_slot_the_engine_REASSIGNS_is_one_the_source_declared(self):
+        """`opAssign` only applies to a live object, so a slot it writes was
+        already constructed. Without this, Manamon 1's `battle` came out
+        with four `local_27 = local_27;` no-ops and that title carried 51
+        self-identical lines against the one it has."""
+        sim = self._sim(construct={27: [10, 44, 80, 120]}, assigned={27})
+        self.assertFalse(sim._reused_object_slot(27, self._literal()))
+
+    def test_a_value_that_is_not_free_to_RE_EVALUATE_is_refused(self):
+        """The condition that matters, and the measurement behind it is the
+        worst kind of defect in this file.
+
+        Manamon 1's `handle_beta_registration` keeps
+        `input_box("Registration", ...)` in a slot with six construction
+        sites and no `opAssign` -- so it looks exactly like scratch -- and
+        reads it three times. Folded, **the player is asked for the key
+        three times**, which is the `file_menu` defect again, with 111 more
+        call sites across that title.
+
+        Nothing promotes it back, because `fold_reads` is counted in
+        `_read_temp` and these reads never reach it, so a value read three
+        times has no entry for the duplicate-bind pass to act on. A literal
+        cannot have that problem: re-evaluating it duplicates nothing.
+        """
+        sim = self._sim(construct={9: [119, 154, 162, 321, 364, 415]})
+        self.assertFalse(sim._reused_object_slot(9, self._a_call()))
+        # ...and the same slot with a literal in it is still scratch
+        self.assertTrue(sim._reused_object_slot(9, self._literal()))
+
+    def test_no_value_at_all_falls_back_to_the_site_count(self):
+        """So a caller that cannot say keeps the old behaviour."""
+        sim = self._sim(construct={3: [10, 44]})
+        self.assertTrue(sim._reused_object_slot(3))
+
+
 class FoldSafetyTests(unittest.TestCase):
     """When a folded value stops being the value the bytecode computed.
 

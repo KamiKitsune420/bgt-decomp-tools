@@ -1039,6 +1039,22 @@ class FuncDecompiler:
         #: Writes through a behaviour, kept apart from the opcode ones
         #: because they answer a narrower question -- see below.
         self.behaviour_writes: dict[int, list[int]] = {}
+        #: Slot -> the positions a CONSTRUCTOR behaviour wrote it, which is a
+        #: narrower question than `behaviour_writes` answers and a different
+        #: one -- see `_reused_object_slot`. This half is the `PSF v ;
+        #: CALLSYS $beh0` form, which can be read off the instruction stream.
+        self.construct_sites: dict[int, list[int]] = {}
+        #: The same thing for the `ALLOC` form, which CANNOT be: its
+        #: destination is on the stack, so only the simulation knows it.
+        #: Filled as we go, and carried into the next pass by `_body`.
+        self.alloc_sites: dict[int, list[int]] = {}
+        #: What a previous pass found in `alloc_sites`. Empty on pass one,
+        #: which is why `_body` runs another pass when this is not.
+        self.known_construct_sites: dict[int, list[int]] = {}
+        #: Slots the engine re-assigns with `opAssign` or a compound form.
+        #: Such a slot was already constructed, so the source named it --
+        #: see `_reused_object_slot`.
+        self.assigned_slots: set[int] = set()
         for index, op in enumerate(self.instrs):
             if op.name in _SLOT_WRITE_OPS:
                 self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
@@ -1080,6 +1096,18 @@ class FuncDecompiler:
             if callee.startswith(("$beh", "_beh_")) or callee in _ASSIGN_OPS:
                 self.behaviour_writes.setdefault(
                     _s16(op.w_arg), []).append(op.pos)
+            if callee.startswith(("$beh", "_beh_")):
+                self.construct_sites.setdefault(
+                    _s16(op.w_arg), []).append(op.pos)
+            #: **A slot the engine RE-ASSIGNS was already constructed, so the
+            #: source declared it.** `opAssign` and its compound family only
+            #: apply to a live object; a temporary is constructed with the
+            #: value it is to hold and destroyed after its use. This is the
+            #: half of `_reused_object_slot` that keeps a real variable out
+            #: of it, and it is the engine's own distinction rather than a
+            #: threshold.
+            if callee in _ASSIGN_OPS:
+                self.assigned_slots.add(_s16(op.w_arg))
         #: (loop head, back edge) for every backward jump. A read inside the
         #: loop runs once per iteration, so a value computed before the loop
         #: cannot be folded into it -- the loop body may assign the slot, and
@@ -3317,6 +3345,68 @@ class FuncDecompiler:
     #: measurements in CLAUDE.md.
     BORROW_WINDOW = 4
 
+    def _reused_object_slot(self, off: int,
+                            value: Atom | None = None) -> bool:
+        """Is this object slot the compiler's scratch rather than a variable?
+
+        The same question `_borrowed_handle` asks about a handle, asked about
+        an object -- and the engine answers it. **A declared object local is
+        constructed ONCE, where it is declared, and re-assigned with
+        `opAssign` after that; the compiler's scratch slot is constructed
+        afresh at every use and destroyed after it.** So more than one
+        construction site at one offset is the compiler reusing a slot, and
+        each construction is a temporary's rather than an assignment to
+        something the source named.
+
+        Counted over the originals, the window `STR ; <factory> ; PshRPtr ;
+        PSF v ; CALLSYS ?` ends in `string::string(const string&in)` -- a
+        copy-construction -- 544 times on Super Egg Hunt and 2,759 on
+        Paladin, against `string::opAssign` 2 and 20 times. The recovery
+        wrote 468 and 2,281 `local_N = "...";` lines, which is the
+        `opAssign` spelling, for slots the engine constructed.
+
+        **The constructor alone does not decide it**, which was the first
+        and wrong reading: a declared local is initialised by a copy
+        construction too (`string s = "x";`). The number of construction
+        SITES is what separates them. Two sibling scopes each declaring a
+        local at one offset would give two sites and be folded, which is
+        behaviour-identical and reads better, so the error that costs
+        anything is the other one -- a single-site temporary staying a
+        variable, which is the behaviour this leaves untouched.
+
+        Nothing is dropped by answering yes: the value goes to `temps` with
+        `temp_bound` set, which puts it under every fold-safety rule in this
+        file. `_stale_fold` promotes it back if it goes stale, and the
+        duplicate-bind pass promotes it if it is read more than once.
+        """
+        if value is not None and not _is_repeatable(value):
+            # **Only a value that costs nothing to re-evaluate.** Folding a
+            # scratch slot's value into each of its reads is free for a
+            # literal and a duplicated CALL for anything else -- and the
+            # duplicate-read counter cannot see these reads, so nothing
+            # would promote it back.
+            #
+            # Manamon 1's `handle_beta_registration` is what that costs:
+            # slot 9 has six construction sites and no `opAssign`, so it
+            # looks like scratch, and it holds
+            # `input_box("Registration", "Please enter the key ...")` read
+            # three times. Folded, the player is asked for the key THREE
+            # TIMES -- the `file_menu` defect again, which this file records
+            # as the worst kind because it compiles and runs.
+            return False
+        if off in self.assigned_slots:
+            # The engine re-assigns it, so it was already constructed and
+            # the source named it. Manamon 1's `battle` is what this is for:
+            # slot 27 is constructed at several sites AND `+=`-ed, and
+            # without this it came out as four `local_27 = local_27;`
+            # no-ops -- 51 self-identical lines across that title, where
+            # the committed code has one.
+            return False
+        return (len(self.construct_sites.get(off, ()))
+                + len(self.known_construct_sites.get(off, ()))) > 1
+
+
+
     def _borrowed_handle(self, off: int) -> bool:
         """Is this `RefCpyV` only keeping an object alive for one expression?
 
@@ -3745,7 +3835,8 @@ class FuncDecompiler:
                     return
                 src = self._deref(args[0]) if copy_ctor else Atom(
                     "call", f"{typename}({', '.join(a.text for a in args)})")
-                if self.is_named(dst.offset):
+                if self.is_named(dst.offset) and not self._reused_object_slot(
+                        dst.offset, src):
                     self._emit_assign(dst.offset, src)
                 else:
                     self.consumed_temps.discard(dst.offset)
@@ -4008,11 +4099,21 @@ class FuncDecompiler:
             # write lies between a bind and a read, and every write before
             # the current position is already in.
             self.behaviour_writes.setdefault(dest.offset, []).append(self._pos())
-            if self.is_named(dest.offset):
+            # Only the simulation knows an `ALLOC`'s destination, so the
+            # site is recorded here for the NEXT pass to classify the slot.
+            self.alloc_sites.setdefault(dest.offset, []).append(self._pos())
+            # The atom as it really is, not as it is stored: `string(x)`
+            # where x is already a string renders as x, so the VALUE is
+            # whatever x was -- a literal is repeatable where a constructor
+            # call is not, and that is the whole test.
+            as_is = next((a for a in args if a.text == txt), None)
+            if self.is_named(dest.offset) and not self._reused_object_slot(
+                    dest.offset, as_is or Atom("call", txt)):
                 self._emit_assign(dest.offset, Atom("call", txt))
             else:
                 self.consumed_temps.discard(dest.offset)
                 self.temps[dest.offset] = Atom("call", txt)
+                self.temp_bound[dest.offset] = (self._pos(), self.stmt_count)
         elif dest is not None and dest.text:
             # destination is a property/global address (e.g. `wname = n`)
             self._stmt(f"{dest.text} = {txt};")
@@ -5889,19 +5990,39 @@ class ModuleDecompiler:
             # every selection.
             duplicates = {key for key, n in fd.fold_reads.items()
                           if n >= _fold_limit(fd, key)}
+            # An `ALLOC`'s destination is on the stack, so only a pass that
+            # has RUN knows which slots it constructs -- and a slot
+            # constructed more than once is the compiler's scratch rather
+            # than a variable (`_reused_object_slot`). So the sites found
+            # here are carried forward and a further pass is run for them,
+            # exactly as for a duplicated bind.
+            allocs: dict[int, list[int]] = {}
+            seeded: set[int] = set()
+            reused = {off for off, at in fd.alloc_sites.items() if len(at) > 1}
             rounds = 0
-            while rounds < 4 and (fd.var_names != initial_names or duplicates):
+            while rounds < 4 and (fd.var_names != initial_names or duplicates
+                                  or reused - seeded):
                 rounds += 1
                 discovered, types = dict(fd.var_names), dict(fd.var_types)
                 forced = set(fd.forced_slots)
                 carried = set(fd.duplicate_binds) | duplicates
+                for off, at in fd.alloc_sites.items():
+                    allocs[off] = list(at)
+                seeded |= reused
                 fd = FuncDecompiler(self.m, f, self.comments)
                 initial_names = dict(fd.var_names)
                 fd.var_names.update(discovered)
                 fd.var_types.update(types)
                 fd.forced_slots.update(forced)
                 fd.duplicate_binds = carried
+                fd.known_construct_sites = {off: list(at)
+                                            for off, at in allocs.items()}
                 ev = fd.run()
+                # Only slots this pass newly found, or the loop never
+                # terminates: `ALLOC` runs on every pass, so the same sites
+                # come back and re-adding them would spin.
+                reused = {off for off, at in fd.alloc_sites.items()
+                          if len(at) > 1}
                 # Only genuinely new ones, or this never reaches a fixed point:
                 # a promoted bind is no longer folded, so it stops being
                 # counted, and re-adding it would loop.
