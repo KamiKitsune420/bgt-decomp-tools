@@ -134,7 +134,11 @@ class Project:
                  "%-22s %d" % ("enums", s.get("enums", 0)),
                  "%-22s %d" % ("source lines", s.get("lines", 0)),
                  "%-22s %d" % ("unmodelled opcodes", s.get("passthrough", 0)),
-                 "%-22s %d" % ("bodies that failed", s.get("body_errors", 0)),
+                 "%-22s %d%s" % ("bodies that failed",
+                                 s.get("body_errors", 0),
+                                 "  (%d a DECOMPILER CRASH)"
+                                 % s.get("body_crashes", 0)
+                                 if s.get("body_crashes") else ""),
                  "%-22s %d" % ("residual gotos", s.get("gotos", 0)),
                  "%-22s %s" % ("unbalanced files", s.get("unbalanced", 0)),
                  "%-22s %s" % ("dangling else", s.get("dangling_else", 0)),
@@ -1141,6 +1145,33 @@ def unbalanced(sections: List["Section"]) -> List[Tuple[str, int]]:
     return out
 
 
+def body_crashes(sections: List["Section"]) -> List[Tuple[str, str]]:
+    """Bodies the decompiler RAISED on, as against ones it declined.
+
+    `_body` catches everything so that one bad body costs only itself, and
+    writes `// [decompiler error: <repr>]` in its place. Two very different
+    things arrive there. `UnstructuredSwitch` is a decision -- a jump table
+    neither matcher claimed, counted and documented -- and anything else is
+    an exception raised in this repository's own code.
+
+    They were one number, and that is how
+    `Atom(atom.kind, atom.text, atom.stack_size, ...)` survived: `Atom` has
+    `dw_size`, so the line raised `AttributeError` every time it was
+    reached, and the count read as a construct nobody had got to yet. On
+    `cs`'s server the body was `netloop`, the network dispatcher -- 119
+    distinct callees -- so the recovered server compiled and did nothing at
+    all when spoken to.
+    """
+    bad: List[Tuple[str, str]] = []
+    for section in sections:
+        for line in section.text.splitlines():
+            stripped = line.strip()
+            if ("decompiler error" in stripped
+                    and "UnstructuredSwitch" not in stripped):
+                bad.append((section.path, stripped.lstrip("/ ")))
+    return bad
+
+
 def dangling_goto(sections: List["Section"]) -> List[Tuple[str, str]]:
     """`goto L` where `L:` is never emitted.
 
@@ -1508,6 +1539,13 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         "lines": len(lines),
         "passthrough": source.count("/* OPCODE"),
         "body_errors": source.count("decompiler error"),
+        #: ...of which the ones this repository is at fault for. A body
+        #: given up on for a SHAPE is a counted limitation and names
+        #: itself `UnstructuredSwitch`; anything else is an exception
+        #: raised in the decompiler, and for as long as the two were one
+        #: number an `AttributeError` on a field that does not exist
+        #: read as a construct nobody had got to yet.
+        "body_crashes": len(body_crashes(sections)),
         "gotos": sum(1 for l in lines if l.strip().startswith("goto ")),
         "bodies": sum(1 for f in module.saved_functions if f.bytecode),
         "verified": verify(sections, order, source),
@@ -1554,6 +1592,12 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             "the concatenation check covers the decompiled sections; the "
             "%d file(s) above are the engine's own source by choice, not a "
             "reconstruction of it" % len(stock_used))
+    for path, line in body_crashes(sections)[:5]:
+        project.problems.append(
+            "%s: the decompiler RAISED on a body rather than declining a "
+            "shape -- %s. The body is missing from the project, and that is "
+            "a bug here rather than a construct nobody has got to yet"
+            % (path, line))
     if not project.stats["verified"]:
         project.problems.append(
             "the files do not concatenate back to the one-file source: "

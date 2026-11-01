@@ -1990,10 +1990,10 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 5,294 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 23,440 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | **24,431** | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
-| Crazy Party | 174,665 | 14 | 0 | yes | 90,148 | 14, every one a DANGLING `goto` -- **owed, see below** |
+| Super Egg Hunt | 5,296 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
+| Paladin of the Sky | 23,438 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Psycho Strike | 24,431 | **0** | 0 | yes | 6,406 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
+| Crazy Party | 174,682 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
 | Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
@@ -2006,10 +2006,15 @@ attempt that was worse than the goto**. The compiler column still says
 recovery's own contribution is now **zero**. Re-deriving the 32 costs a
 modal dialog on somebody's screen and has not been spent.
 
-**Crazy Party's row is OWED on the same change.** Its 14 are the
-residual gotos and they are all this one shape, so the fix should take
-them to 0 -- and the run that would say so was stopped by the host for
-system memory, twice. The row is left at 14 rather than guessed at.
+**Crazy Party's row is PAID, and the fix did take them to 0.** Its 14
+were the residual gotos, every one of them this shape, and the run
+that would say so was stopped by the host for system memory twice. Run
+since: **0 residual gotos and 0 dangling gotos**, with the split
+verified, 90,148 calls read back and 0 unmodelled opcodes. So that
+title's recovery contributes no compiler error of its own either --
+every one of the 14 this file recorded was a `goto`, and AngelScript
+has none. Re-deriving the compiler's own verdict still costs a modal
+dialog on somebody's screen and has not been spent.
 
 **Four of the six rows are from one run of the code as it stands**, which this
 table has rarely been able to say. It carried a mixture of rows from
@@ -6448,12 +6453,247 @@ promoting the return slot emits its assignment and the `return` vanishes,
 so the function ends `local_0 = local_4;` and would not compile. That is
 attempt 4, reverted.
 
-So the order to take it in is: teach the promotion to keep the `return`
-first, then count the flush, then the three layers above. Four of the
-server's rows wait on it -- `file_get_contents`, `base::load_vault`,
-`load_bases` and `file_put_contents` -- and `get_file_size`,
-`get_file_size_b`, `teamload`, `map::mapload` and the client's two are
-already right.
+#### Fixed -- and the four layers that order names are all INERT
+
+The order recorded above was *teach the promotion to keep the
+`return` first, then count the flush, then the three layers*. All four
+were built. **All four are inert**: with them in, every title that can
+be measured here renders byte-identical, `bgt libcheck` does not move,
+and `__nvgt_retval` -- the hold they emit -- appears nowhere in the
+corpus. They are removed rather than kept, because one of them relaxes
+the `off <= 0` guard that exists to refuse `this` and the frame's
+negative parameter space, and a condition with nothing behind it is a
+liability on the next title. The measurement stays, as a test, so the
+next reader starts from it instead of from the order.
+
+Instrumenting the body rather than guessing a fifth time gave the
+answer in one line:
+
+```
+DETAIL off 0 bound (43, 1) pos 52 value local_1.read(0.0)
+       pending [] receivers ['local_1'] stmt_count 1 pend_pos 39
+```
+
+The close ran at **39** and the bind is **43**, so by the time anything
+asks, the close is already behind the bind. And 43 is not where the
+read ran:
+
+```
+PSF 2 ; CALLSYS file::read       ; 25  -- the value
+PSF 4 ; PSF 2 ; opAssign         ; 33  -- string r = f.read();
+PshVPtr ; CALLSYS file::close    ; 39  -- f.close();
+PSF 0 ; PSF 4 ; opAssign         ; 43  -- return r;
+```
+
+**A copy of a value is not where the value ran**, and `temp_bound` was
+the only record of either -- so everything between the two became
+invisible, and the bytecode had those four source lines in the right
+order the whole time. The question belongs at the read of the slot the
+value was copied OUT of, which is why nothing done at the return slot
+could ever have fixed it.
+
+##### The two questions a bind is asked, and why they need two answers
+
+This is the whole of the fix, and getting it wrong cost a Paladin
+regression that is worth more than the fix itself.
+
+`Atom` carries an `origin` now -- where the value was computed -- and
+`_stale_fold` reads it as `ran`. **It is used for the invalidation
+window only.** Three other things are keyed on a bind and every one of
+them is about the STORE rather than the value:
+
+| asked of a bind | which position |
+|---|---|
+| has anything run that touches what this value reads? | the value **ran** |
+| is this store skipped on another path? (`_conditionally_bound`) | the **store** |
+| was this bind folded more than once? (`duplicate_binds`) | the **store** |
+| where does a promoted assignment go? (`_promote_temp`) | the **store** |
+
+Answering all four with the earlier position -- which is what writing
+the origin into `temp_bound` does -- made two unconditional stores in
+Paladin's `other_stuff` look conditionally bound, and the short-circuit
+chain they belong to collapsed:
+
+```
+before:  if ((local_6 != 0) || !world[local_9].ends_demo) {
+             init_events(world[local_9].name);
+
+after:   local_5 = 1;
+         local_5 = ((local_5 == 0) ? 1 : 0);
+         local_5 = (world[local_9].ends_demo ? 1 : 0);
+         local_5 = ((local_5 == 0) ? 1 : 0);
+         local_5 = local_5;
+         if ((((local_6 == 0) ? 1 : 0) == local_5) || (local_5 != 0)) {
+```
+
+-- each arm's computation emitted unconditionally and the guard reading
+one value, so **which maps get their events initialised changes**. That
+is the `use_screen_reader` defect, reached from a new direction, and it
+came with 155 lines of slot traffic on Super Egg Hunt as well. Split in
+two, Egg Hunt and Psycho Strike are **byte-identical** and Paladin
+loses two lines of dead copy.
+
+Three more things decide which values carry an origin at all, each
+measured:
+
+- **An origin already on the atom wins outright.** That is the whole
+  inheritance; the test below decides only whether to STAMP a value
+  that has none. Asking the test first threw away an origin a
+  conversion had carried.
+- **A conversion carries its source's origin**, because a conversion is
+  not a computation: `int(stn(local_16))` ran when `stn` ran.
+- **Only a value that really is a CALL is stamped, and `a.kind ==
+  "call"` is not that test.** That kind is what every computed
+  expression gets -- `(registered ? 1 : 0)` and `(count - 6)` among
+  them. `call_sites` is the record of every call the body rendered;
+  `invocations`, which `_lost_calls` reads, holds only the **impure**
+  ones, and purity has nothing to do with when a value ran.
+
+##### Counting the flush is the wrong lever, and cheaply shown
+
+A value-returning call whose result nothing consumes is written out by
+`_flush_pending_call`, which **did not advance `stmt_count`** -- so in
+a body where every statement is one of those, and this engine declares
+`open`, `close`, `seek` and `write` as returning `bool`, the counter
+stayed at 0 from entry to `RET` and nothing could ever be seen to have
+run. That is a real hole, and counting it does not close it: the
+counter advances when the statement is written **out**, which is later
+in simulation order than the position it is written **at**. So a value
+bound in between looked stale when nothing had run, and `main()` came
+out
+
+```
+local_5 = netport;
+n.setup_server(local_5, 20, 500);
+```
+
+The position was knowable all along. `flushed_calls` records
+`(position, text)` and `_stale_fold` asks about them by position,
+between where the value ran and where it is read -- the same shape as
+the pending-call admission beside it, and no counter moves.
+
+##### ...and a DESTRUCTOR is not a write
+
+Found on the way, while the four layers were still in: `cs`'s
+`list_members` and six more bodies gained a generated local holding a
+plain variable for nothing, because `behaviour_writes[1]` held position
+**142**, and 142 is `PSF 1 ; $beh2` -- the destructor the epilogue runs
+on every object local. `behaviour_writes` is the record of the writes
+no opcode names, and it was built from every `$beh`. A destructor is
+not one, which is the dual of a sentence this file already has:
+*"destructing a value is not reading it"*.
+
+**It is inert now** -- the holds it was fixing came from the layers --
+and it is kept anyway, for the reason the `FREE`-must-exist condition
+is kept: counting a destructor as a write is a wrong claim waiting for
+the first title that reads a value past a slot's end of life. The
+spelling trap is already paid for, too: `$beh2` in the module,
+`_beh_2_` as the disassembler prints it, which is the
+`%delegate_factory`/`$dlgte` lesson one more time.
+
+#### What it cost, measured
+
+Against the games that came with their own source, which is what
+decides this one:
+
+| | before | after |
+|---|---|---|
+| cs server | 189 / 196, **4 differ** | **193 / 196, 1 differs** |
+| cs client | 216 / 218, 0 differ | 216 / 218, 0 differ |
+| rage room | 290 / 292, 0 differ | **291 / 292**, 0 differ |
+| constant velocity | 94 / 95, 0 differ | 94 / 95, 0 differ |
+
+Five more of those authors' functions have their exact call sequence.
+What is left on the server is **one** difference and two near ones, and
+none of the three is this defect. `base::lockpick` differs by one
+`unlock()` moved across a `send` whose argument holds a `random`, and
+read side by side the recovered body matches its source line for line
+-- so the difference is in the comparison's ordering rather than in the
+recovery, which is the `control::focus` case this file already
+records. `check_items_around_me` is the same shape, and `load_bases`
+differs for the NAMED-slot defect below.
+
+And on the standings titles:
+
+| title | lines | goto | split | calls | bodies given up |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,296 | 0 | verified | 1,608 | 0 |
+| Paladin of the Sky | 23,440 -> **23,438** | 0 | verified | 6,952 | 0 |
+| Psycho Strike | 24,431 | 0 | verified | 6,406 | 0 |
+| Crazy Party | 174,686 -> **174,682** | **0** | verified | 90,148 | 0 |
+| Manamon 1 | 83,363 | 0 | verified | 26,482 | 0 |
+
+**Super Egg Hunt and Psycho Strike are byte-identical** and Paladin
+moves by two lines -- a dead `local_12 = local_6;` before
+`random_set_state`, now gone. Not one residual goto, dangling goto,
+dangling `else`, unbalanced file, passthrough, body error, split check
+or call count moves anywhere, and every `bgt audit` comparison is
+identical before and after.
+
+The six rows this was for are all right now -- `file_get_contents`,
+`file_put_contents`, `base::load_vault`, `load_bases`, `map::mapload`
+and `get_mapdata` -- and the first of them comes out as the source
+wrote it, with the slot named rather than held:
+
+```
+string file_get_contents(string arg0)
+{
+    file@ local_1;
+    string local_4;
+    @local_1 = file();
+    local_1.open(arg0, "rb");
+    local_4 = local_1.read(0.0);
+    local_1.close();
+    return local_4;
+}
+```
+
+#### What it uncovered next: an argument shuffled through a NAMED slot
+
+Diagnosed, swept, and **not fixed**, because it is a change of its own.
+
+The compiler shuffles each argument of a call through one scratch slot
+and pushes as it goes, so the writes and the pushes interleave. A push
+of a **named** slot pushes its NAME, and `_slot_atom` hands back
+`var_atom(off)` without asking anything -- so every argument reads
+whatever the slot held last:
+
+```
+local_9 = players[local_32].z;
+local_9 = players[local_32].y;
+local_9 = players[local_32].x;
+play2(local_12, local_16, int(local_9), int(local_9), local_14, ...);
+```
+
+The source is
+`play2("invopen", players[i].x, players[i].y, players[i].z, ...)`, so
+**every positional sound in that server plays with all three axes equal
+to x.** The map loader is worse: `safezone(stn(local_17) x6)`, and a
+`platform` the same -- six bounds that are one number. It is what the
+last two of that title's `libcheck` rows are, `load_bases` among them.
+
+It is `get_percent_of_range`, which this file records as the
+scratch-slot version of exactly this, asked of a slot the source
+NAMED. No rule here reaches one, because a named slot is not a temp.
+
+**Swept: 38 rows on that server alone**, by looking for a call that
+reads one slot for two or more of its arguments with that slot written
+more than once just above -- 38 before this change and 38 after, which
+is what says the two are separate defects rather than one.
+
+The sweep had to be bracket-matched rather than written as a regex, and
+that is worth a line: a pattern with one level of nesting in it cannot
+see `base(double(int(stn(local_16))), ...)`, which is exactly the shape
+at issue, so the first version reported 9 rows where there are 38 and
+under-reported the baseline it was meant to measure.
+
+The fix shape, for whoever takes it: at a write to a named slot,
+substitute every value already on the simulated stack that reads it
+with what the slot held. The recursion is free -- the substituted value
+is usually another named slot's name, and if that slot is written while
+this value is still on the stack the same rule fires again -- and a
+computed value needs a local of its own rather than a substitution,
+because writing the expression at the call would RUN it there.
 
 ### Eleven: a snapshot of a MEMBER is stale once that member is assigned
 
@@ -7841,18 +8081,20 @@ backward branch would be claimed as a loop.
 | Super Egg Hunt | 5,294 | 0 | 0 | verified | 1,608 |
 | Paladin of the Sky | 23,440 | 0 | 0 | verified | 6,952 |
 | Psycho Strike | 24,428 -> **24,431** | **2 -> 0** | **2 -> 0** | verified | 6,406 |
-| Crazy Party | **not measured** | 14 | 14 | -- | 90,148 |
+| Crazy Party | **174,686** | **14 -> 0** | **14 -> 0** | verified | 90,148 |
 | Manamon 1 | 83,363 | 0 | 0 | verified | 26,482 |
 | rage room | 8,673 -> **8,679** | **4 -> 0** | **4 -> 0** | verified | 2,376 -> **2,377** |
 
-**Crazy Party is OWED, and it is the row that matters most.** Its
+**Crazy Party is PAID, and it is the row that mattered most.** Its
 fourteen are what caught every over-broad structurer change this file
 records -- 14 -> 30 for a call-text threshold, 14 -> 44 for dropping the
 declaration-order rule, 14 -> 90 for forcing on the copy idiom -- and the
-run that would have given it was stopped by the host for system memory,
-twice in one session. So it is not quoted, and the undertaking is the one
-this file has made and paid before: if those fourteen move, the change
-comes out and is recorded as rejected with its number.
+run that would have given it was stopped by the host for system memory
+twice in one session, so it went in unquoted with an undertaking
+attached. Run since, on a quiet machine: **14 residual gotos -> 0, and
+14 dangling -> 0**, with the split verified, 90,148 calls read back, 0
+unmodelled opcodes and 0 bodies given up on. So this change takes the
+last residual goto out of the whole corpus.
 
 What can be said without it is narrower than a measurement and is not
 nothing: the new branch fires only where `_find_latch` previously
@@ -7953,6 +8195,62 @@ recording because it is this file's own signature: its condition reads
 operands of a short-circuit chain, which is the `use_screen_reader`
 collapse. Structuring the loop does not fix that, and fixing that does
 not structure the loop.
+
+# A body given up on may be a TYPO, not a shape
+
+`bodies that failed` counts the bodies the decompiler gave up on, and
+every entry this file has ever explained was a *construct*: a jump
+table neither matcher claimed, a switch chain that over-reached. So the
+count reads as "the structurer cannot shape this one" -- and one of
+them was a field that does not exist:
+
+```python
+return Atom(atom.kind, atom.text, atom.stack_size, data_type=dt)
+```
+
+`Atom` has `dw_size`. There is no `stack_size`, so that line raised
+`AttributeError` **every time it was reached** -- and `_body` catches
+everything so one bad body costs only itself, which turned a traceback
+into a count. The recovered file carried
+`// [decompiler error: AttributeError(...)]` where the body should be.
+
+The branch is the one that stops a bool atom which has outlived its
+value being wrapped as `(local_3 ? 1 : 0)` where `local_3` is declared
+`int` -- this file's own *"a declaration outranks an atom that outlived
+its value"* -- so it has been in since the Paladin menu work and had
+never once run.
+
+**What it cost is a whole feature of a whole game.** On `cs`'s server
+the body was `netloop`, the network dispatcher: every command a client
+can send, 119 distinct callees, 218 `send` calls, 102 `length` calls.
+The recovered server compiled, started, and did nothing at all when
+spoken to.
+
+| that server's recovery | before | after |
+|---|---|---|
+| lines | 6,695 | **10,787** |
+| calls read back | 1,875 | **3,018** |
+| `bgt audit --calls` | 2 bodies, **119** values | 1 body, 3 values |
+| `bgt audit --constants` | 1 body, **11** values | 0 bodies, 0 values |
+
+The three calls left are the `player` constructor's generated member
+construction, which this file already lists as benign, and the
+constant audit is clean.
+
+Two things worth keeping, and the second is the one that generalises:
+
+- **An audit found it, not a diagnostic.** `bgt audit --calls` reported
+  119 lost callees in one body, and 119 from one body is not a fold
+  defect, it is a missing body. No line count, goto count or compiler
+  diagnostic said anything: the project recovered with 0 residual
+  gotos, a verified split and one counted body error.
+- **A count that aggregates two causes hides the rarer one.** A body
+  given up on for a SHAPE is a documented limitation; a body given up
+  on because the decompiler raised is a bug in this repository. They
+  were one number. `body_crashes` tells them apart now -- the summary
+  says `bodies that failed 1  (1 a DECOMPILER CRASH)` and the crash is
+  a *problem* in `recovery.json` rather than a statistic -- and the
+  suite pins that no field name this file reads is absent from `Atom`.
 
 # A debug build keeps the names, and one shipped game is one
 

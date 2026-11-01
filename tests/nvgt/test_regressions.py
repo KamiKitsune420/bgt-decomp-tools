@@ -1,5 +1,6 @@
 """Run with python -m unittest -v test_regressions."""
 from pathlib import Path
+import io
 import subprocess
 import tempfile
 import unittest
@@ -246,6 +247,9 @@ class FoldSafetyTests(unittest.TestCase):
         # `file::close()` case. A real decompiler always has both fields.
         sim.pending_value_call = None
         sim.pending_value_call_pos = 0
+        # ...and the ones already written out, which `_stale_fold` asks
+        # about by position.
+        sim.flushed_calls = []
         for name, value in attrs.items():
             setattr(sim, name, value)
         return sim
@@ -555,6 +559,68 @@ class FoldSafetyTests(unittest.TestCase):
         bare = sim("var")
         bare.behaviour_writes = {}
         self.assertFalse(bare._stale_fold(1))
+
+    def test_the_ORIGIN_answers_staleness_and_not_WHERE_THE_STORE_IS(self):
+        """A bind is asked four questions and they want two answers.
+
+        Whether anything has run that touches what this value reads is about
+        the VALUE, so it takes the position the value ran at -- a copy
+        carries the text, and `cs`'s `file_get_contents` read a closed file
+        because the copy reset that position. Whether the store is skipped on
+        another path, whether this bind was folded twice, and where a
+        promoted assignment goes are all about the STORE.
+
+        Writing the origin into `temp_bound` answers all four with the
+        earlier position, and that made two unconditional stores in Paladin's
+        `other_stuff` look conditionally bound: the `||` chain they belong to
+        collapsed into
+        `if ((((local_6 == 0) ? 1 : 0) == local_5) || (local_5 != 0))`, so
+        which maps get their events initialised changed. It cost 155 lines of
+        slot traffic on Super Egg Hunt too; split in two, that title is
+        byte-identical.
+        """
+        from decompile import Atom, DataType
+        # The value RAN at 10, inside a branch that ends at 15. The store
+        # into this slot is at 30, outside it. The read is at 40.
+        value = Atom("call", "local_1.read(0.0)", data_type=DataType(),
+                     origin=(10, 0))
+        sim = self._sim(instrs=[Instr(pos=40, op=0, name="RET", bc_type="",
+                                      size=1)], k=0,
+                        temps={4: value}, temp_bound={4: (30, 1)},
+                        var_types={4: DataType()}, duplicate_binds=set(),
+                        cond_spans=[(5, 15)], back_edges=[],
+                        stmt_count=1, stmt_texts=["x();"])
+        # Asked of the store, the span does not reach it, and nothing else
+        # here touches `local_1`, so the fold stands.
+        self.assertFalse(sim._stale_fold(4))
+        # Asked of the origin -- which is what conflating the two does -- the
+        # span covers it and the fold is refused for a store that is not
+        # conditional at all.
+        self.assertTrue(sim._conditionally_bound(10))
+        self.assertFalse(sim._conditionally_bound(30))
+
+    def test_a_value_that_ran_before_a_mutating_call_is_stale(self):
+        """The other side of it, and the defect itself: the close ran at 39,
+        the copy into the slot read at 43, and `local_1.read(0.0)` folded
+        past it. A closed file reads empty."""
+        from decompile import Atom, DataType
+        value = Atom("call", "local_1.read(0.0)", data_type=DataType(),
+                     origin=(25, 0))
+        sim = self._sim(instrs=[Instr(pos=52, op=0, name="RET", bc_type="",
+                                      size=1)], k=0,
+                        temps={4: value}, temp_bound={4: (43, 1)},
+                        var_types={4: DataType()}, duplicate_binds=set(),
+                        cond_spans=[], back_edges=[],
+                        stmt_count=1, stmt_texts=["x();"])
+        sim.flushed_calls = [(39, "local_1.close();")]
+        self.assertTrue(sim._stale_fold(4))
+        # ...and a close recorded BEFORE the value ran does not count: the
+        # window runs from where the value ran to where it is read.
+        sim.flushed_calls = [(20, "local_1.close();")]
+        self.assertFalse(sim._stale_fold(4))
+        # ...nor does one recorded after the read.
+        sim.flushed_calls = [(60, "local_1.close();")]
+        self.assertFalse(sim._stale_fold(4))
 
     def test_a_behaviour_write_is_the_receiver_pushed_last(self):
         """Only a `PSF` immediately before the call counts.
@@ -1807,6 +1873,7 @@ class RecordedCallTests(unittest.TestCase):
 
         fd = object.__new__(FuncDecompiler)
         fd.invocations = {}
+        fd.call_sites = {}
         fd.purity = _Purity()
         fd.k, fd.instrs = 0, [None]
         fd._pos = lambda: 7
@@ -1825,6 +1892,7 @@ class RecordedCallTests(unittest.TestCase):
         fd._record_call(None, "handle.load(local_3)",
                         self._Named("load"), self._Ret(self._Named("bool")))
         self.assertEqual(fd.invocations, {"handle.load(local_3)": 7})
+        self.assertEqual(fd.call_sites, {"handle.load(local_3)": 7})
 
     def test_a_PURE_call_is_not_recorded(self):
         """Crazy Party computes `int(round(double((w - 1) / 2), 0))` twice per
@@ -1836,6 +1904,10 @@ class RecordedCallTests(unittest.TestCase):
                         self._Named("round"),
                         self._Ret(None))
         self.assertEqual(fd.invocations, {})
+        # ...and `call_sites` keeps it, because `_value_origin` asks when a
+        # value ran and purity has nothing to do with that.
+        self.assertEqual(fd.call_sites,
+                         {"round(double((local_6 / 2)), 0)": 7})
 
     def test_a_class_FACTORY_is_a_construction_not_a_call(self):
         """A member declared by value but held by reference is created by the
@@ -1846,3 +1918,221 @@ class RecordedCallTests(unittest.TestCase):
         fd._record_call(None, "sound_pool(500)", self._Named("sound_pool"),
                         self._Ret(self._Named("sound_pool")))
         self.assertEqual(fd.invocations, {})
+
+
+class ClosedBeforeReadTests(unittest.TestCase):
+    """A call made for its effect has RUN, and a copy of a value has not.
+
+    `cs`'s file helpers recovered as `close()` before `read()`, which reads
+    an empty string -- so that server's every load read nothing. Four
+    separate blindnesses had to be closed, and each of them is one of these.
+    """
+
+    def _fd(self, **attrs):
+        """A decompiler with only the fields these three methods read."""
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.events, fd.stmt_count, fd.stmt_texts = [], 0, []
+        fd.flushed_calls = []
+        # Every call this body rendered, which is how a value that really
+        # is a call is told from one that merely has the kind:
+        # `(registered ? 1 : 0)` is kind "call" too. `invocations` is the
+        # impure subset and would miss a pure one like `stn`.
+        fd.call_sites = {"local_1.read(0.0)": 25}
+        fd.pending_value_call = None
+        fd.pending_value_call_pos = 0
+        fd.temps, fd.temp_bound = {}, {}
+        fd.k, fd.instrs = 0, [None]
+        fd._pos = lambda: 40
+        for name, value in attrs.items():
+            setattr(fd, name, value)
+        return fd
+
+    # -- the flush -------------------------------------------------------
+    def test_a_flushed_call_is_recorded_by_position(self):
+        """`bool file::close() const` is called for its effect, so the call
+        is parked and written out later -- and nothing said it had run."""
+        fd = self._fd(pending_value_call="local_1.close()",
+                      pending_value_call_pos=39)
+        fd._flush_pending_call()
+        self.assertEqual(fd.flushed_calls, [(39, "local_1.close();")])
+        self.assertEqual(fd.events[0].pos, 39)
+
+    def test_counting_the_flush_is_NOT_how_it_is_recorded(self):
+        """The counter advances when the statement is written OUT, which is
+        later than the position it is written AT -- so counting it made a
+        value bound in between look stale when nothing had run, and `main()`
+        came out `local_5 = netport;` before a call that could take the
+        global. The position was knowable all along."""
+        fd = self._fd(pending_value_call="start_profiling()",
+                      pending_value_call_pos=3)
+        fd._flush_pending_call()
+        self.assertEqual(fd.stmt_count, 0)
+        self.assertEqual(fd.stmt_texts, [])
+
+    # -- the origin ------------------------------------------------------
+    def test_a_calls_origin_survives_a_copy_into_another_slot(self):
+        """The copy carries the text, so it must carry the position too.
+
+            PSF 2 ; CALLSYS file::read     ; 25 -- the value
+            PSF 4 ; PSF 2 ; opAssign       ; 33 -- string r = f.read();
+            PshVPtr ; CALLSYS file::close  ; 39 -- f.close();
+            PSF 0 ; PSF 4 ; opAssign       ; 43 -- return r;
+
+        Asked at the `RET` with a bind of 43, the close at 39 was already
+        behind it and the read folded past it.
+        """
+        from decompile import Atom
+        a = Atom("call", "local_1.read(0.0)")
+        fd = self._fd()
+        fd._pos = lambda: 25
+        self.assertEqual(fd._value_origin(a), (25, 0))
+        fd._pos = lambda: 43
+        fd.stmt_count = 4
+        self.assertEqual(fd._value_origin(a), (25, 0))
+
+    def test_only_a_CALL_carries_its_origin(self):
+        """A constant or a plain variable is the same value at both moments,
+        so widening the window for one of those can only make more folds
+        look stale without fixing anything."""
+        from decompile import Atom
+        fd = self._fd()
+        fd._pos = lambda: 25
+        for kind, text in (("const", "0"), ("var", "local_4"),
+                           ("global", "netport"), ("prop", "this.name"),
+                           # ...and the trap: this kind is what EVERY
+                           # computed expression gets, so the kind alone
+                           # reached every bool merge in the corpus.
+                           ("call", "(registered ? 1 : 0)")):
+            a = Atom(kind, text)
+            fd._value_origin(a)
+            fd._pos = lambda: 99
+            with self.subTest(kind=kind):
+                self.assertEqual(fd._value_origin(a), (99, 0))
+            fd._pos = lambda: 25
+
+    # -- and the four layers the recorded order named, which are inert --
+    def test_the_RETURN_SLOT_layers_were_not_where_the_fix_belonged(self):
+        """This file recorded an order to take the file-close bug in:
+        *teach the promotion to keep the `return`, then count the flush,
+        then* three layers at the return slot -- record its bind position,
+        ask `_stale_fold` at the `return`, relax the `off <= 0` exclusion.
+
+        All four were built, and **all four are inert**: with them in, the
+        four titles and the server render byte-identical and no
+        `__nvgt_retval` appears anywhere in the corpus. The value is copied
+        OUT of a slot into the return slot, so the question belongs at that
+        slot's own read, which is where `_value_origin` answers it. They are
+        removed rather than kept, because one of them relaxes a guard that
+        exists to refuse `this` and the frame's negative parameter space.
+
+        What remains is this test, so the next reader starts from the
+        measurement instead of the order.
+        """
+        import decompile
+        for name in ("_returned_temp", "_hold_return_value"):
+            self.assertFalse(hasattr(decompile.FuncDecompiler, name), name)
+        with io.open(decompile.__file__, encoding="utf-8") as fh:
+            self.assertIn("if off <= 0:", fh.read())
+
+    # -- the destructor --------------------------------------------------
+    def test_destructing_a_slot_is_not_writing_to_it(self):
+        """Built from a real module, because this is the PRODUCER side.
+
+        `behaviour_writes` is the record of the writes no opcode names -- an
+        object slot filled through a pushed address -- and it was built from
+        every `$beh`, the destructor among them. Every object local is
+        destructed in the epilogue, so a value copied out of a slot was
+        stale at every read past that slot's end of life, and the commonest
+        such read is the `return`: `cs`'s `list_members` and six more bodies
+        gained a generated local holding `local_1` for nothing.
+
+        `construct_sites` deliberately still counts both. It answers a
+        different question -- how many times this slot was constructed, for
+        `_reused_object_slot` -- and narrowing it is a separate change with
+        a measurement of its own.
+        """
+        from asreader import Function, Instr, Module
+        from decompile import FuncDecompiler
+
+        def ins(name, pos, w=0, fr=None):
+            return Instr(pos=pos, op=0, name=name, size=1,
+                         bc_type="asBCTYPE_W_ARG", w_arg=w, func_ref=fr)
+
+        def beh(name):
+            return Function(name=name, func_type=0, param_types=[])
+
+        body = [ins("PSF", 0, 1), ins("CALLSYS", 1, fr=beh("$beh0")),
+                ins("PSF", 2, 1), ins("CALLSYS", 3, fr=beh("$beh2")),
+                ins("RET", 4)]
+        f = Function(name="probe", func_type=1, param_types=[], bytecode=body)
+        fd = FuncDecompiler(Module(global_functions=[f]), f)
+        self.assertEqual(fd.behaviour_writes, {1: [0]})
+        self.assertEqual(fd.construct_sites, {1: [0, 2]})
+
+    def test_a_destructor_has_more_than_one_spelling(self):
+        """The `%delegate_factory`/`$dlgte` lesson: matching one spelling of
+        a behaviour matches silently."""
+        from decompile import DTORS, _DTOR_SPELLINGS
+        self.assertTrue(DTORS <= _DTOR_SPELLINGS)
+        for name in ("$beh2", "$beh3", "_beh_2_", "_beh_3_"):
+            with self.subTest(name=name):
+                self.assertIn(name, _DTOR_SPELLINGS)
+        for name in ("$beh0", "_beh_0_", "$beh1", "opAssign"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, _DTOR_SPELLINGS)
+
+
+class DeclarationOutranksTheAtomTests(unittest.TestCase):
+    """A bool atom that outlived its value, against a numeric declaration.
+
+    One slot serves several source locals, so the atom's type is the type of
+    the value the slot was last GIVEN, not the type it is declared with. A
+    bare slot name declared `int` must therefore not be wrapped as
+    `(local_3 ? 1 : 0)` -- the engine answers "Expression must be of boolean
+    type" -- and the declaration is the better witness about a name.
+
+    That branch existed and **crashed every time it was reached**: it read
+    `atom.stack_size`, and the field is `dw_size`. The body is given up on
+    and counted, so it read as one body the structurer could not shape
+    rather than as a typo. On `cs`'s server it was the whole network
+    dispatcher -- 119 calls, 218 of them `send` -- and on Paladin it is
+    reached as soon as a fold change puts a bool atom in that position.
+    """
+
+    def _fd(self):
+        from asreader import DataType, Function, Module
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.m = Module()
+        fd.fn = Function(name="probe")
+        fd.var_names = {3: "local_3"}
+        fd.var_types = {3: DataType(token_type=70)}
+        return fd
+
+    def test_a_numeric_declaration_is_kept_rather_than_wrapped(self):
+        from asreader import DataType
+        from decompile import Atom
+        fd = self._fd()
+        atom = Atom("var", "local_3", 1, data_type=DataType(token_type=67))
+        out = fd._normalize_arg(atom, DataType(token_type=70))
+        self.assertEqual(out.text, "local_3")
+        self.assertEqual(out.kind, "var")
+        self.assertEqual(out.dw_size, 1)
+
+    def test_a_name_with_no_numeric_declaration_is_still_wrapped(self):
+        """The other side of the same branch, which always worked."""
+        from asreader import DataType
+        from decompile import Atom
+        fd = self._fd()
+        atom = Atom("var", "local_9", 1, data_type=DataType(token_type=67))
+        out = fd._normalize_arg(atom, DataType(token_type=70))
+        self.assertEqual(out.text, "(local_9 ? 1 : 0)")
+
+    def test_every_atom_field_this_file_names_exists(self):
+        """A field name that does not exist raises where it is read, and a
+        per-body `except` turns that into a count rather than a traceback."""
+        from decompile import Atom
+        fields = set(Atom.__dataclass_fields__)
+        self.assertIn("dw_size", fields)
+        self.assertNotIn("stack_size", fields)

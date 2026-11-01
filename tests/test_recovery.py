@@ -1303,6 +1303,43 @@ def test_the_label_search_is_per_file():
     assert bgt_project.dangling_goto([a, b]) == [("includes/a.bgt", "goto L1;")]
 
 
+def test_a_body_the_decompiler_RAISED_on_is_told_apart_from_a_shape():
+    """`_body` catches everything, so one bad body costs only itself -- and
+    two very different things arrive there. `UnstructuredSwitch` is a
+    decision this file documents and counts; anything else is an exception
+    raised in this repository's own code.
+
+    They were one number, which is how
+    `Atom(atom.kind, atom.text, atom.stack_size, ...)` survived: `Atom` has
+    `dw_size`, so that line raised `AttributeError` every time it ran, and
+    the count read as a construct nobody had got to yet. On `cs`'s server
+    the body was `netloop` -- the network dispatcher, 119 distinct callees
+    -- so the recovered server compiled and did nothing when spoken to.
+    """
+    crash = bgt_project.Section(
+        kind="function", name="netloop",
+        text=("void netloop() {\n"
+              "    // [decompiler error: AttributeError(\"'Atom' object has"
+              " no attribute 'stack_size'\")]\n}\n"))
+    shape = bgt_project.Section(
+        kind="function", name="number_key_pressed",
+        text=("int number_key_pressed() {\n"
+              "    // [decompiler error: UnstructuredSwitch('a jump table"
+              " neither matcher claimed')]\n}\n"))
+    crash.path = shape.path = "includes/functions/part_0.bgt"
+    rows = bgt_project.body_crashes([crash, shape])
+    assert len(rows) == 1, rows
+    assert rows[0][0] == "includes/functions/part_0.bgt"
+    assert "stack_size" in rows[0][1]
+
+
+def test_a_clean_project_reports_no_crash():
+    section = bgt_project.Section(kind="function", name="f",
+                                  text="void f() {\n    g();\n}\n")
+    section.path = "includes/functions/part_0.bgt"
+    assert bgt_project.body_crashes([section]) == []
+
+
 def test_a_dangling_else_shows_up_as_an_imbalance_and_is_named():
     """The arm's closing brace has no opener, so the file is short a `{`.
 

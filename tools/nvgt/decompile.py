@@ -173,6 +173,10 @@ _ASSIGN_OPS = frozenset((
     "opModAssign", "opPowAssign", "opAndAssign", "opOrAssign", "opXorAssign",
     "opShlAssign", "opShrAssign", "opUShrAssign"))
 DTORS = {"$beh2", "$beh3"}
+#: the same two, in the spelling the disassembler prints -- the delegate
+#: factory's `%delegate_factory`/`$dlgte` lesson is that a behaviour has
+#: more than one name, and matching only one matches silently.
+_DTOR_SPELLINGS = frozenset(DTORS | {"_beh_2_", "_beh_3_"})
 
 
 def _s16(v: int) -> int:
@@ -418,6 +422,9 @@ class Atom:
     data_type: DataType | None = None
     list_index: int | None = None
     constant_bits: int | None = None
+    #: where this value was COMPUTED, for a call whose result gets
+    #: copied from slot to slot -- see `_value_origin`
+    origin: tuple[int, int] | None = None
     ternary: tuple[str, Atom, Atom] | None = None
 
 
@@ -1140,7 +1147,17 @@ class FuncDecompiler:
             #: A behaviour has two spellings (`$beh0` in the module, printed
             #: `_beh_0_`), and an operator only counts when it ASSIGNS: a
             #: `PSF` before `opAdd` is a receiver that is read, not written.
-            if callee.startswith(("$beh", "_beh_")) or callee in _ASSIGN_OPS:
+            #: **...but a DESTRUCTOR is not a write.** Every object local
+            #: is destructed in the epilogue, so counting `$beh2` made a
+            #: value copied out of a slot stale at every read past that
+            #: slot's end of life -- and the commonest such read is the
+            #: `return`. `cs`'s `list_members` and six more bodies gained a
+            #: generated local holding `local_1` for nothing. This file
+            #: already says the dual of it one place over: "destructing a
+            #: value is not reading it".
+            if ((callee.startswith(("$beh", "_beh_"))
+                 and callee not in _DTOR_SPELLINGS)
+                    or callee in _ASSIGN_OPS):
                 self.behaviour_writes.setdefault(
                     _s16(op.w_arg), []).append(op.pos)
             if callee.startswith(("$beh", "_beh_")):
@@ -1318,6 +1335,12 @@ class FuncDecompiler:
         #: bound, so `_stale_fold` can tell an immediate read from a later one
         #: and put the variable's assignment back where the value was computed.
         self.temp_bound: dict[int, tuple[int, int]] = {}
+        #: value-returning calls made for their effect, written out by
+        #: `_flush_pending_call`, as (position, statement text)
+        self.flushed_calls: list[tuple[int, str]] = []
+        #: every rendered call's text -> the position it ran at, for
+        #: `_value_origin`. `invocations` is the impure subset of it.
+        self.call_sites: dict[str, int] = {}
         #: statements emitted so far, and their text. Events are sorted by
         #: position at the end, not kept in append order, which is what lets a
         #: promotion insert its assignment where it belongs rather than here.
@@ -1510,6 +1533,14 @@ class FuncDecompiler:
         if (fr is not None and ret is not None and ret.obj_type is not None
                 and fr.name == ret.obj_type.name):
             return
+        #: **Every rendered call, pure or not**, because a second question
+        #: is asked of this record: WHEN did the value this text stands for
+        #: run? `_value_origin` needs that for any call, and purity has
+        #: nothing to do with it -- `stn`'s result still depends on the slot
+        #: it read, so a copy of it must keep the position it ran at. Gated
+        #: on `invocations` instead, `cs`'s `load_bases` shuffled its four
+        #: `stn` values back into one slot.
+        self.call_sites.setdefault(calltxt, self._pos())
         if self.purity.is_pure_call(ins):
             return
         self.invocations[calltxt] = self._pos()
@@ -1588,16 +1619,30 @@ class FuncDecompiler:
             if _needs_out_ref(self.fn.return_type):
                 self.consumed_temps.discard(off)
                 self.temps[off] = a
+                #: No bind position, deliberately. Recording one here, and
+                #: asking `_stale_fold` at the `return`, were two of the four
+                #: layers this file's notes prescribed for the file-close
+                #: bug; all four are inert, because the value is copied OUT
+                #: of another slot and the question belongs at that slot's
+                #: own read. `_value_origin` is where it is answered.
                 return
         if self.is_named(off):
             self._emit_assign(off, a)
         else:
             self.consumed_temps.discard(off)
             self.temps[off] = a
-            # Where this value was computed, and how much had been emitted by
-            # then. A fold is only safe while nothing has run in between --
-            # see `_stale_fold`.
+            # Where this slot was STORED, and how much had been emitted by
+            # then. Two different questions are asked of a bind and they want
+            # two different positions: whether the store is conditional, and
+            # where a promoted assignment goes, are about the store -- so
+            # this stays the store's own position. Whether anything has RUN
+            # since the value was computed is about the value, and
+            # `_value_origin` answers that one; `_stale_fold` reads it as
+            # `ran`.
             self.temp_bound[off] = (self._pos(), self.stmt_count)
+            # ...and stamp the value with where it ran, unless it carries a
+            # position already, so a later copy of it keeps that one.
+            self._value_origin(a)
             if a.text in self.invocations:
                 self.call_binds.append((self.invocations[a.text], a.text))
 
@@ -1908,11 +1953,18 @@ class FuncDecompiler:
             target = {"i": "int", "u": "uint", "f": "float", "d": "double",
                       "i64": "int64", "u64": "uint64", "b": "int8",
                       "w": "int16"}.get(target, "int")
-            self._bind(d, Atom("call", f"{target}({src.text})"))
+            #: ...carrying the source's `origin`, because a conversion is
+            #: not a computation: `int(stn(local_16))` ran when `stn` ran.
+            #: Without it, `cs`'s `load_bases` shuffled four converted
+            #: values back through one slot, so a base's three coordinates
+            #: and its health were one number.
+            self._bind(d, Atom("call", f"{target}({src.text})",
+                               origin=src.origin))
             return
         if name in ("NEGf", "NEGi", "NEGi64", "NEGd"):
             s = _s16(ins.w_arg)
-            self._bind(s, Atom("call", f"-({self._slot_atom(s).text})"))
+            neg = self._slot_atom(s)
+            self._bind(s, Atom("call", f"-({neg.text})", origin=neg.origin))
             return
         if name in ("CpyVtoR4", "CpyVtoR8"):
             # Any earlier call still in the value register was intentionally
@@ -2470,6 +2522,48 @@ class FuncDecompiler:
             return self.temps[off]
         return self.var_atom(off)
 
+    def _value_origin(self, a: "Atom") -> tuple[int, int]:
+        """When this value was COMPUTED, which a copy of it must not reset.
+
+        A folded temp copied into another slot carries its text and was given
+        a fresh bind position, so everything that ran between the two became
+        invisible to `_stale_fold`. `cs`'s `file_get_contents` is that
+        defect, and the four lines of its source are in the bytecode in the
+        right order the whole time:
+
+            PSF 2 ; CALLSYS file::read       ; 25  -- the value
+            PSF 4 ; PSF 2 ; opAssign         ; 33  -- string r = f.read();
+            PshVPtr ; CALLSYS file::close    ; 39  -- f.close();
+            PSF 0 ; PSF 4 ; opAssign         ; 43  -- return r;
+
+        Asked at the `RET`, the bind was 43 and the close ran at 39, so
+        nothing had run since the bind and the read folded past the close --
+        a closed file reads empty, so that server's every load read nothing.
+
+        **Only a value that really is a CALL carries its origin**, and
+        `a.kind == "call"` is not that test: that kind is what any computed
+        expression gets, `(registered ? 1 : 0)` and `(count - 6)` among
+        them. Gated on the kind alone this reached every bool merge in the
+        corpus, and Super Egg Hunt's `reward` came out with `if (registered)`
+        as three statements and a `for` header as a `while (true)` -- 151
+        lines of slot traffic for a question that cannot apply to a value
+        nothing ran to get. `call_sites` is the record of every call this
+        body rendered; `invocations`, which `_lost_calls` reads, holds only
+        the IMPURE ones, and purity has nothing to do with when a value ran.
+        """
+        here = (self._pos(), self.stmt_count)
+        #: An origin already on the atom wins outright -- that is the whole
+        #: inheritance, and the gate below decides only whether to STAMP a
+        #: value that has none. Asking the gate first threw away an origin a
+        #: conversion had carried: `int(stn(local_16))` is not itself a call
+        #: site, so a copy of it reset the position the `stn` ran at.
+        if a.origin is not None:
+            return a.origin
+        if a.kind != "call" or a.text not in self.call_sites:
+            return here
+        a.origin = here
+        return here
+
     def _stale_fold(self, off: int) -> bool:
         """Would folding this temp here re-evaluate it after something ran?
 
@@ -2499,6 +2593,19 @@ class FuncDecompiler:
         bound = self.temp_bound.get(off)
         if bound is None:
             return False
+        #: **Where the value RAN, which is not always where this slot was
+        #: stored.** A copy carries the text, so a value computed at 25 and
+        #: copied into this slot at 43 has run everything in between -- and
+        #: asked at the store, `cs`'s `file_get_contents` could not see the
+        #: `close()` at 39 and read a closed file.
+        #:
+        #: It is used for the invalidation window ONLY. `_conditionally_bound`
+        #: asks whether the STORE is skipped on another path, and
+        #: `duplicate_binds` and `_promote_temp` are keyed on the store's own
+        #: position, so those keep `bound`: answering them with the earlier
+        #: position made Paladin's `other_stuff` see two unconditional stores
+        #: as conditional and collapsed a `||` chain into a dead guard.
+        ran = value.origin or bound
         if (off, bound[0]) in self.duplicate_binds:
             # A previous pass folded this exact value into more than one read.
             # It is a call, so each fold *runs* it again: Paladin's `file_menu`
@@ -2566,7 +2673,7 @@ class FuncDecompiler:
         # "stale" too, gets promoted to a statement before a jump, and
         # stops being a loop condition: Egg Hunt 0 residual gotos -> 2, and
         # a Paladin body given up on.
-        if _is_repeatable(value) or bound[1] != self.stmt_count:
+        if _is_repeatable(value) or ran[1] != self.stmt_count:
             slot_of = {n: s for s, n in self.var_names.items()}
             if value.kind == "var":
                 names = {value.text.lstrip("@")}
@@ -2587,7 +2694,7 @@ class FuncDecompiler:
             #: `map::deserialize` gained 56 lines of literals pushed into
             #: slots for no correctness at all.
             behaviour = self.behaviour_writes if value.kind == "var" else {}
-            if any(any(bound[0] < write <= self._pos()
+            if any(any(ran[0] < write <= self._pos()
                        for write in (tuple(self.slot_writes.get(slot_of[name], ()))
                                      + tuple(behaviour.get(slot_of[name], ()))))
                    for name in names if name in slot_of):
@@ -2670,7 +2777,7 @@ class FuncDecompiler:
             # ordinary expression temporary is. What is left is a value the
             # compiler parked in a slot and read later, and the compiler does
             # that where the source declared a local.
-            if value.kind == "prop" and bound[1] != self.stmt_count:
+            if value.kind == "prop" and ran[1] != self.stmt_count:
                 owner = _prop_receiver(value.text)
                 #: **...and an assignment to the member ITSELF**, which the
                 #: receiver test cannot see when the member is written bare.
@@ -2702,14 +2809,14 @@ class FuncDecompiler:
                 #: about as narrow as a fold rule gets -- `_mutates` wants
                 #: an assignment or an increment to that exact path.
                 if any(_mutates(text, owner) or _mutates(text, value.text)
-                       for text in self.stmt_texts[bound[1]:]):
+                       for text in self.stmt_texts[ran[1]:]):
                     return declarable
             # **...and so does a GLOBAL, which has no receiver at all.**
             # `pause_menu` keeps `current_bgm` across the menu music and
             # restores it on the way out; folded, the restore read the
             # global `change_music` had just overwritten. See
             # `_stale_global`.
-            if self._stale_global(value, bound):
+            if self._stale_global(value, ran):
                 return declarable
             return False
         masked = _mask_strings(value.text)
@@ -2746,9 +2853,15 @@ class FuncDecompiler:
         #: the same moment.
         pending = []
         if (self.pending_value_call is not None
-                and self.pending_value_call_pos > bound[0]):
+                and self.pending_value_call_pos > ran[0]):
             pending = ["%s;" % self.pending_value_call]
-        if bound[1] == self.stmt_count and not any(
+        #: ...and the ones already flushed, which are statements in the
+        #: output and were invisible here for the same reason: the flush
+        #: does not advance the counter the guard below reads. Taken by
+        #: POSITION, between where this value ran and where it is read.
+        pending += [text for pos, text in self.flushed_calls
+                    if ran[0] < pos <= self._pos()]
+        if ran[1] == self.stmt_count and not any(
                 _mutates(text, receiver)
                 for text in pending for receiver in receivers):
             return False        # nothing has run since: the same moment
@@ -2788,7 +2901,7 @@ class FuncDecompiler:
         # the call PAST the `int(stored)` that reads its own out argument,
         # and the recovered function converted the slot before the call
         # filled it.
-        if self._stale_global(value, bound):
+        if self._stale_global(value, ran):
             return declarable
         if not receivers:
             # A bare call's result can still go stale through engine state
@@ -2797,7 +2910,7 @@ class FuncDecompiler:
             # `bgt libcheck` and not guessed at here.
             return False
         if not any(_mutates(text, receiver)
-                   for text in list(self.stmt_texts[bound[1]:]) + pending
+                   for text in list(self.stmt_texts[ran[1]:]) + pending
                    for receiver in receivers):
             return False
         return declarable
@@ -3323,7 +3436,12 @@ class FuncDecompiler:
             # value.
             if not self._declared_numeric(atom.text):
                 return Atom("call", f"({atom.text} ? 1 : 0)", data_type=dt)
-            return Atom(atom.kind, atom.text, atom.stack_size, data_type=dt)
+            #: `dw_size`, not `stack_size`: there is no such field, so this
+            #: line raised `AttributeError` every time it was reached. The
+            #: body is given up on and counted, which is why it read as one
+            #: body a structurer could not shape rather than as a typo --
+            #: `cs`'s whole network dispatcher, 119 calls, was that body.
+            return Atom(atom.kind, atom.text, atom.dw_size, data_type=dt)
         if atom.kind != "const":
             return atom
         if atom.constant_bits is not None:
@@ -3340,9 +3458,30 @@ class FuncDecompiler:
         return self._typed_constant(value, dt, _type_stack_size(dt) == 2)
 
     def _flush_pending_call(self) -> None:
+        """Write out a value-returning call whose result nothing consumed.
+
+        **It is recorded by POSITION**, which it was not until the file
+        functions in `cs` were run down. The engine declares most of its
+        setters as returning `bool` -- `open`, `close`, `seek`, `write` --
+        so a call made for its effect goes out this way, and nothing said it
+        had run: `stmt_count` stayed at 0 from entry to `RET` in a body
+        where every statement is one of those, and every fold-safety rule
+        here compares a bind's statement index against that counter.
+
+        **Counting it was tried and is the wrong lever**, which is worth
+        recording because it is the obvious one. The counter advances when
+        the statement is written OUT, and that is later in simulation order
+        than the position it is written AT -- so a value bound between the
+        call and its flush looked stale when nothing had run, and `main()`
+        came out `local_5 = netport; n.setup_server(local_5, 20, 500);`.
+        The position was knowable all along, so `_stale_fold` asks about
+        these by position instead.
+        """
         if self.pending_value_call:
+            text = f"{self.pending_value_call};"
             self.events.append(Event("stmt", self.pending_value_call_pos,
-                                     ("", f"{self.pending_value_call};")))
+                                     ("", text)))
+            self.flushed_calls.append((self.pending_value_call_pos, text))
             self.pending_value_call = None
 
     def _is_void_return_target(self, target: int) -> bool:
@@ -4045,7 +4184,8 @@ class FuncDecompiler:
                 # "Multiple matching signatures". The return type is the
                 # conversion the source wrote: `int(args["key"])`.
                 target = ret.format().removeprefix("const ").rstrip("&")
-                result = Atom("call", f"{target}({obj.text})")
+                result = Atom("call", f"{target}({obj.text})",
+                              origin=obj.origin)
             elif meth == "opCmp" and len(args) == 1:
                 self.cmp_pair = (obj, args[0])
                 calltxt = f"{obj.text}.opCmp({args[0].text})"
