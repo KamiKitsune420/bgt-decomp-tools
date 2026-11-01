@@ -146,6 +146,8 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `nvgt/` | the NVGT half: extraction, `asCReader` for 2.37, decompiler, project recovery, NVGT packs (`docs/nvgt.md`) |
 | `bgt_libcheck.py` | `bgt libcheck`: recovered code against BGT's shipped library source -- the lifter, or `--decompiler` for the `bgt recover` path |
 | `nvgt/libcheck.py` | `bgt nvgt libcheck`: decompile NVGT's own `include/`, debug and stripped, and recompile it |
+| `elias/render.cs` | renders a game's adaptive music at a chosen intensity, by driving the game's own `elias.dll`. **The one non-Python tool here**, and the reason is a hard one: `elias.dll` is 32-bit and the Python on this machine is 64-bit, so no `ctypes` can load it. `csc -platform:x86` ships with Windows, so this needs nothing fetched |
+| `elias/predecode.py` | decodes a theme's Ogg stems to raw 16-bit PCM for that renderer (needs `soundfile`, which nothing else here does) |
 
 `docs/ghidra_workflow.md` covers how to find `asCReader::ReadInner`, `asBCInfo[]`,
 the KDF and `pack::create` in a binary, and how to verify a transcription.
@@ -3012,12 +3014,55 @@ being entered at all proves the two function pointers were taken as declared.
 stops at the first one -- so that is the host-refused code, worth knowing
 before reading a 15 as something structural.
 
-The remaining gap is narrow and named: **five of `start`'s nine arguments.**
-Args 1, 2, 5 and 6 are the theme, the callback and the script's level and
-maximum; args 3, 4, 7, 8 and 9 come from fields of the game's own wrapper
-object (`+0x34`, `+0x38`, `+0x40` and a byte at `+0x3c`), and what those hold
-has not been read yet. Until they are, `start` answers 3 and no audio is
-pumped.
+**The five unread arguments all tolerate zero**, which closed the last gap
+cheaply. Args 1, 2, 5 and 6 are the theme, the callback and the script's level
+and maximum; args 3, 4, 7, 8 and 9 come from fields of the game's wrapper
+(`+0x34`, `+0x38`, `+0x40`, a byte at `+0x3c`), and chasing five setters
+through the binary turned out to be unnecessary -- trying zero for each took
+one build. What those fields *mean* is still unread, and the renderer says so
+rather than implying they are understood.
+
+#### Rendering a theme, which is the whole chain working
+
+```bash
+csc -platform:x86 -out:render.exe tools/elias/render.cs
+python tools/elias/predecode.py boss          # Ogg stems -> raw 16-bit PCM
+render.exe <game>/elias.dll boss.epro pcm/boss out.wav <level> [seconds]
+```
+
+Measured on The Gate's `boss` theme -- 91 sources, **0 missing**, which is the
+closed-set claim above holding in practice rather than on paper:
+
+| level | Bass | Strings | Brass | Perc | peak | centroid |
+|---|---|---|---|---|---|---|
+| 1 | 16 | 14 | 9 | 8 | 5,897 | 1,155 Hz |
+| 3 | 16 | 14 | 9 | 12 | 6,851 | -- |
+| 7 | 18 | 10 | 13 | 12 | 8,520 | 1,339 Hz |
+| 12 | 18 | 16 | 13 | 15 | 8,603 | 1,666 Hz |
+| 19 | 18 | 19 | 17 | 15 | 2,835 | -- |
+
+**Exactly four stems play at any level, one per track**, all in key 0 -- which
+is what a four-layer theme should do -- and the variation each track picks
+rises with the level. The audio is real music by its spectrum: energy spread
+23/60/17 across bass, mid and treble, and the **spectral centroid climbs with
+intensity**, 1,155 -> 1,339 -> 1,666 Hz, which is what brighter layers
+entering sounds like. A buffer echoed back would not do that, and neither
+would silence.
+
+Three honest gaps, recorded rather than smoothed over:
+
+- **The trigger-to-level mapping is not understood, only shown to be
+  monotone.** Level 1 picks track 1's trigger 16, which is not `<= 1` by any
+  reading, so "trigger is the intensity threshold" is wrong as stated. What is
+  established is that raising the level never lowers a track's chosen trigger,
+  across four levels and four tracks.
+- **Level 19 -- the greatest trigger -- renders mostly silence** (11% non-zero
+  against ~95% at every lower level). Whether the level must be strictly below
+  the maximum, or the render simply caught a transition, is not settled.
+- **`op 2`'s arguments are unread.** It arrives with `arg3` and `arg4` both
+  zero, immediately before each group of reads, so the renderer treats it as
+  rewind and that is consistent with every observation -- but a seek that
+  carries a position would look the same until a title needed one.
 
 ##### elias never opens a file, and that is the whole design
 
