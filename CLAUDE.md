@@ -1988,7 +1988,7 @@ checks say:
 | Super Egg Hunt | 5,294 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
 | Paladin of the Sky | 23,440 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
 | Psycho Strike | 24,428 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 174,597 | 14 | 0 | yes | 90,145 | 14, every one a DANGLING `goto` |
+| Crazy Party | 174,665 | 14 | 0 | yes | 90,148 | 14, every one a DANGLING `goto` |
 | Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
@@ -5654,23 +5654,22 @@ remembering.
 | Super Egg Hunt | 5,294 | 0 | verified | 1,608 |
 | Paladin of the Sky | 23,440 | 0 | verified | 6,952 |
 | Psycho Strike | 24,428 | 2 | verified | 6,406 |
-| Crazy Party | 174,547 -> **174,665** | 14 | verified | 90,145 -> **90,148** |
-
-Crazy Party's row is the list fix measured **on its own**, from the base
-before the signedness change rather than after it, because the run that
-would have measured the two together was stopped by the host for system
-memory. So the standings keep that title at 174,597 -- the last figure
-from one run of everything -- and adding 118 to it would be arithmetic
-rather than a measurement. The attributable part is what is quoted: this
-change costs 118 lines and three restored calls on the one title that has
-a refused list, and nothing anywhere else.
+| Crazy Party | 174,597 -> **174,665** | 14 | verified | 90,145 -> **90,148** |
 | Manamon 1 | 83,363 | 0 | verified | 26,482 |
 
-Super Egg Hunt and Paladin are **byte-identical** -- neither has a
-refused list -- and Crazy Party is the only title with any, so the
-scope is one title and 118 lines. Its three extra calls are the `round`
-calls that went with the empty array, `bgt oracle` is 52/52, and the
-suite passes.
+Super Egg Hunt and Paladin are **byte-identical** -- neither has a refused
+list -- and Crazy Party is the only title that has any, so the scope is one
+title, **68 lines and three calls**. The three are the `round` calls that
+went with the empty array. `bgt oracle` is 52/52 and the suite passes.
+
+**That 68 was first published as 118**, and the mistake is worth keeping
+because it is the one this file keeps recording in a new costume: the run
+that measured the list fix was launched after the signedness commit, so it
+had signedness in it, and subtracting the base from *before* that commit
+credited this change with the other one's lines. A delta is only a delta
+against the base it was actually measured from, and the way it was caught
+was re-running the title on the committed tree and getting 174,665 again --
+the same figure, from a different base, which cannot both be right.
 
 #### One `round` row is real, and it is a different defect
 
@@ -7281,12 +7280,12 @@ an error count never told them apart, and nothing here asked.
 the report and in `recovery.json`, scoped per file because that is how
 the structurer names and emits labels.
 
-**The sixteen were counted by inspection, not by that check**, and the
-distinction is worth keeping: every `goto` target in all four Crazy
-Party files and both Psycho Strike ones was compared against every
-label those files emit, and there are none. The check reproduces it on
-Psycho Strike; the run that would have it report on Crazy Party was
-stopped by the host for system memory, so that one figure is owed.
+**The sixteen were first counted by inspection**, and the check now
+reports the same: every `goto` target in all four Crazy Party files and
+both Psycho Strike ones was compared against every label those files
+emit, and there are none. Run on the committed tree, Crazy Party comes
+back `gotos 14` and `dangling_goto 14` -- the two numbers equal, which is
+the statement that none of them is labelled.
 ### The shape, and an attempt that was worse than the goto
 
 Both titles' gotos are the compiler's **bottom-tested loop**, which this
