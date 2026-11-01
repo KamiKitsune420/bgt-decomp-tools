@@ -2090,6 +2090,43 @@ def test_libcheck_does_not_read_a_declaration_as_a_call():
     assert bgt_libcheck.calls("do { f(); } while (g());") == ["f", "g"]
 
 
+def test_libcheck_counts_a_constructor_as_syntax_not_as_a_call():
+    """`timer d;` and `@h = timer();` are one construction, two spellings.
+
+    This checker's own docstring says constructors are left out, because
+    source writes them as syntax -- and `_noise` implemented that as
+    `name in TYPE_NAMES`, which holds the engine's VALUE types and not a
+    game's own classes. So every one of a game's `spawn_*` helpers
+    differed on the recovered side's `bullet(...)`.
+
+    The module answers it with no new source of truth: every `owner::` of a
+    function label is a script class. Measured against a whole game's own
+    source this closes 12 of 14 remaining differences (272 -> 284 of 292)
+    and moves no corpus score.
+
+    A name in this set is dropped from BOTH sides, so it is derived rather
+    than listed: a hand-written set would make the comparison weaker by
+    however much it was wrong.
+    """
+    types = bgt_libcheck.script_types(
+        ["bullet", "timer", "<global>", "rhythm::sound_pool"])
+    assert types == frozenset(
+        ["bullet", "timer", "rhythm::sound_pool", "sound_pool"])
+    # The construction is dropped; the method called on the result is not.
+    assert bgt_libcheck.calls("bullets.insert_last(bullet(x, y));", types) == [
+        "insert_last"]
+    assert bgt_libcheck.calls("@h = timer();", types) == []
+    # A namespaced class is written either way, and both are the same class.
+    assert bgt_libcheck.calls("p = rhythm::sound_pool();", types) == []
+    assert bgt_libcheck.calls("p = sound_pool();", types) == []
+    # A name that is not a class is still a call.
+    assert bgt_libcheck.calls("x = go(1);", types) == ["go"]
+    # ...and with no set passed, nothing is dropped for this reason.
+    assert bgt_libcheck.calls("@h = timer();") == ["timer"]
+    # `<global>` is a label, never a type.
+    assert "<global>" not in bgt_libcheck.script_types(["<global>"])
+
+
 def test_libcheck_does_not_invent_a_call_from_a_subscript():
     """A subscript that merely precedes a paren names no callee.
 

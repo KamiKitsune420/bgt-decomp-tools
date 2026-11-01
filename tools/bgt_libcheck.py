@@ -221,7 +221,28 @@ def _noise(name: str) -> bool:
             or name.startswith(("get_", "set_", "_beh_", "$beh")))
 
 
-def calls(text: str) -> List[str]:
+def script_types(owners) -> frozenset:
+    """The module's own class names, for telling a constructor from a call.
+
+    `_noise` already drops `name in TYPE_NAMES`, which holds the engine's
+    value types and NOT a game's own classes -- so `bullet(...)` counted as
+    a call where the source writes `bullet b1(...)` as syntax. Every
+    `owner::` of a function label IS a script class, so the module answers
+    this without a new source of truth.
+
+    A namespaced class renders qualified (`rhythm::sound_pool`) and a
+    constructor may be written either way, so both spellings go in.
+    """
+    out = set()
+    for owner in owners:
+        if not owner or owner == "<global>":
+            continue
+        out.add(owner)
+        out.add(owner.rsplit("::", 1)[-1])
+    return frozenset(out)
+
+
+def calls(text: str, types: frozenset = frozenset()) -> List[str]:
     """Call names in EVALUATION order -- sorted by where each call's `)` closes.
 
     The rule is unchanged by the pattern above seeing more calls than it used to:
@@ -255,6 +276,8 @@ def calls(text: str) -> List[str]:
         name = m.group(1)
         if _noise(name):
             continue
+        if name in types:
+            continue             # a constructor: source writes it as syntax
         if _TYPE_BEFORE_NAME.search(text[:m.start()]):
             continue
         j, d = m.end(), 1
@@ -296,10 +319,11 @@ def literals(text: str) -> collections.Counter:
 class Comparison:
     __slots__ = ("label", "source_calls", "lifted_calls", "ratio", "literals_equal")
 
-    def __init__(self, label: str, source: str, lifted: str) -> None:
+    def __init__(self, label: str, source: str, lifted: str,
+                 types: frozenset = frozenset()) -> None:
         self.label = label
-        self.source_calls = calls(source)
-        self.lifted_calls = calls(lifted)
+        self.source_calls = calls(source, types)
+        self.lifted_calls = calls(lifted, types)
         a, b = self.source_calls, self.lifted_calls
         self.ratio = difflib.SequenceMatcher(None, a, b).ratio() if (a or b) else 1.0
         self.literals_equal = literals(source) == literals(lifted)
@@ -315,13 +339,14 @@ def compare(mod: "as_disasm.Module",
     recovered: Dict[str, List[dict]] = collections.defaultdict(list)
     for f in mod.functions:
         recovered[as_disasm.function_label(f)].append(f)
+    types = script_types(k.rsplit("::", 1)[0] for k in recovered)
     out = []
     for label in sorted(library):
         bodies = library[label]
         if len(bodies) != 1 or len(recovered.get(label, ())) != 1:
             continue             # absent, or overloaded: no unambiguous pair
         lifted = as_lift.lift_function(mod, recovered[label][0])
-        out.append(Comparison(label, bodies[0], "\n".join(as_lift.structure(lifted))))
+        out.append(Comparison(label, bodies[0], "\n".join(as_lift.structure(lifted)), types))
     return out
 
 
@@ -358,13 +383,14 @@ def compare_decompiled(module_path: str, exe_path: Optional[str],
             continue
         owner = f.object_type.name if f.object_type is not None else "<global>"
         recovered["%s::%s" % (owner, f.name)].append(f)
+    types = script_types(k.rsplit("::", 1)[0] for k in recovered)
     out = []
     for label in sorted(library):
         bodies = library[label]
         if len(bodies) != 1 or len(recovered.get(label, ())) != 1:
             continue             # absent, or overloaded: no unambiguous pair
         text = chr(10).join(renderer._body(recovered[label][0], 0))
-        out.append(Comparison(label, bodies[0], text))
+        out.append(Comparison(label, bodies[0], text, types))
     return out
 
 

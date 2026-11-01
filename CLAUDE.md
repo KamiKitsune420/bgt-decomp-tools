@@ -7472,9 +7472,9 @@ function that appears once on both sides:
 | | |
 |---|---|
 | functions compared | **292** |
-| call sequence identical | **272** |
+| call sequence identical | **284** |
 | call sequence close (>= 80%) | 6 |
-| call sequence differs | 14 |
+| call sequence differs | 2 |
 | string literals identical | **279** |
 
 and the recovery itself: 31 classes, 265 functions, 418 globals, 840
@@ -7531,10 +7531,10 @@ it moves nothing: `bgt libcheck --decompiler` is **43/47, 39/47 and
 literals, and the whole suite passes. The reason to defer was real and it
 expired, which is worth as much as the fix.
 
-## What is left is the other half, and the docstring already names it
+## The other half: a constructor is syntax on one side and a call on the other
 
-All 14 rows rose from 0.50 to **0.67** and every one now differs for one
-reason only -- a **constructor** on the recovered side:
+With the declaration fix alone, all 14 rows rose from 0.50 to **0.67** and
+every one differed for one reason only:
 
 ```
   0.67  <global>::spawn_bullet     insert  source []  recovered ['bullet']
@@ -7542,18 +7542,68 @@ reason only -- a **constructor** on the recovered side:
 ```
 
 The source writes `timer stuntimer;` and the recovery writes
-`@local_1 = timer();`, so one side spells the construction as syntax and
-the other as a call. `_noise` is meant to drop exactly this -- it already
-excludes `name in TYPE_NAMES` -- and that set holds the engine's value
-types only, not the game's own classes. The module has them: every
-`owner::` of a function label is a script class, so `compare` can pass the
-set to `calls` and 12 of the 14 should close.
+`@local_1 = timer();` -- one construction, two spellings. `_noise` is meant
+to drop exactly this; it implements it as `name in TYPE_NAMES`, and that
+set holds the engine's **value** types and not a game's own classes.
 
-It is **deliberately not done here**, for the reason the last deferral
-names: a name in that set is dropped from BOTH sides, so it makes the
-comparison weaker, and it would move three titles' scores in the same
-breath as a fix that was measured not to move them. One step at a time is
-what made the `or` regression visible at all.
+**The module answers it with no new source of truth**: every `owner::` of a
+function label IS a script class, so `script_types` derives the set and
+`compare` passes it to `calls`. Derived rather than listed, deliberately --
+a name in that set is dropped from BOTH sides, so a hand-written set would
+make the comparison weaker by however much it was wrong.
+
+| | before | after |
+|---|---|---|
+| rage room, identical | 272 | **284** |
+| rage room, differs | 14 | **2** |
+| Super Egg Hunt | 43 / 47 | 43 / 47 |
+| Paladin of the Sky | 39 / 47 | 39 / 47 |
+| Psycho Strike | 144 / 149 | 144 / 149 |
+| Psycho Strike, lifter | 153 / 155 | 153 / 155 |
+
+**And this is the deferral the test had locked**, with the stated reason
+that it *"would move the scores for a second reason"*. It moves no corpus
+score at all, which is why it was taken in a second step rather than
+argued about: one change at a time is what made the `or` regression
+visible, and it is what says this one is free.
+
+What is left is the same shape one level out. `timer` and `file` are the
+**engine's** reference types, so they have no methods in the module and
+`script_types` cannot see them -- `bgt_api.registered()` is the list that
+can. Four rows are that, and it is the next step rather than this one.
+
+## All four of its dangling gotos are the ONE shape this file already names
+
+The strongest corroboration in the run, and it was free. This file records
+Psycho Strike's two residual gotos and Crazy Party's fourteen as the
+compiler's **bottom-tested loop**, declined by `_find_latch` because *"a
+statement in the condition block is accepted only if it has no `(` in
+it"* -- and a `for` whose bound is a call puts one there.
+
+rage room has four, and `count_total_items` is the same thing written by a
+different person in a different decade:
+
+```
+source:   for (uint i = 0; i < inv.get_keys().length(); i++)
+
+recovered:  local_3 = 0;
+            goto L002a;                     // the entry jump to the condition
+            ...body...
+            local_3++;
+            @local_4 = inv.get_keys();      // the materialisation -- A CALL
+            goto L0006;                     // the conditional back edge
+```
+
+So three unrelated titles, three authors, **one** structurer gap. The
+`while (true)` + explicit `break` emission this file names as the next
+attempt would close all sixteen of the corpus's and all four of these.
+
+**And one of the two remaining libcheck differences is a consequence of
+it**: the source's condition calls `.length()` and the recovered body has
+`@local_4 = inv.get_keys();` with no compare at all, because the condition
+never became one. That is the first time a residual goto has been shown to
+cost a *call* rather than only a compiler error -- the goto is the visible
+failure and the lost condition is the quiet one underneath it.
 
 ## And a recovery is not the game's source, which is the real headline
 
