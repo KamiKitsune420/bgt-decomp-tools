@@ -2489,3 +2489,74 @@ def test_a_funcdef_in_call_position_is_a_delegate_not_a_call():
         both = bgt_apicheck.arities(module, reg)
         assert (0, 0) in both["event"], "the class constructor survives"
         assert (1, 1) in both["event"], "and so does the delegate"
+
+
+# -- which integer opcodes say whether a slot is signed ----------------------
+#
+# An integer operation carries signedness exactly when a `u` spelling of it
+# also exists, because only then did the compiler have to choose. Where there
+# is no `u` form the `i` form serves both, so its `INT` vote is no evidence
+# that the slot is signed -- and taking it as evidence declared
+# `array<T>::length() - 1` loop bounds `int`, so the rebuilt module compared
+# them SIGNED where the original compares unsigned. That differs exactly when
+# the array is empty, since `length() - 1` is 4,294,967,295 unsigned and -1
+# signed. 88 sites in 35 of Super Egg Hunt's bodies, found by the round trip.
+
+
+def test_an_integer_op_with_a_u_sibling_carries_signedness():
+    got = bgt_asir._sign_agnostic_int_ops({"CMPi", "CMPu", "DIVi", "DIVu"})
+    assert "CMPi" not in got
+    assert "DIVi" not in got
+
+
+def test_an_integer_op_with_no_u_sibling_does_not():
+    got = bgt_asir._sign_agnostic_int_ops({"ADDi", "SUBi", "MULi", "SUBIi"})
+    assert {"ADDi", "SUBi", "MULi", "SUBIi"} <= got
+
+
+def test_the_variable_increment_spelling_is_seen():
+    """`IncVi`, not `INCi`, and the case-sensitive search is what finds it.
+
+    Writing the list by hand missed exactly this, and it is the loop
+    counter -- so the rule did nothing where it mattered and Super Egg
+    Hunt's written project came out byte-identical, which is the shape of a
+    change that looks measured and measured nothing.
+    """
+    got = bgt_asir._sign_agnostic_int_ops({"IncVi", "DecVi"})
+    assert "IncVi" in got and "DecVi" in got
+
+
+def test_the_instruction_set_is_the_universe_not_the_static_table():
+    """`TYPED_SLOT_OPS` lists `ADDu`, `SUBu` and `MULu` for completeness
+    although no BGT build has them. Asked of that table instead of the
+    build, `ADDi` comes out authoritative and the whole rule changes
+    meaning -- which is what the first attempt did."""
+    assert "ADDu" in bgt_asir.TYPED_SLOT_OPS                 # the trap
+    assert "ADDi" in bgt_asir._sign_agnostic_int_ops({"ADDi"})
+    # ...and a build that really had both would be told apart
+    assert "ADDi" not in bgt_asir._sign_agnostic_int_ops({"ADDi", "ADDu"})
+
+
+def test_a_sibling_is_found_wherever_the_i_sits_in_the_name():
+    """`iTOd`'s unsigned form is `uTOd` -- the `i` is at the FRONT.
+
+    The trailing-`i` rule alone covers `ADDi`/`ADDu` and `IncVi`/`IncVu`,
+    so it is the conversions that need the search, and they are exactly the
+    ops where signedness decides what the bits mean.
+    """
+    got = bgt_asir._sign_agnostic_int_ops({"iTOd", "uTOd", "iTOi64",
+                                           "uTOi64"})
+    assert "iTOd" not in got
+    assert "iTOi64" not in got
+    # ...and with no unsigned form present they are agnostic again
+    assert "iTOd" in bgt_asir._sign_agnostic_int_ops({"iTOd"})
+
+
+def test_an_opcode_the_build_does_not_have_is_not_claimed():
+    assert bgt_asir._sign_agnostic_int_ops(set()) == frozenset()
+
+
+def test_a_float_op_is_not_an_integer_one():
+    """The set is about integer signedness; nothing else belongs in it."""
+    assert bgt_asir._sign_agnostic_int_ops(
+        {"ADDf", "ADDd", "CMPf", "CMPd"}) == frozenset()

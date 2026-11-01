@@ -334,6 +334,64 @@ WIDTH_SLOT_OPS: Dict[str, int] = {
     "BSLL64": I64, "BSRL64": I64, "BSRA64": I64,
 }
 
+
+def _sign_agnostic_int_ops(instruction_set):
+    """Integer opcodes that do NOT distinguish signed from unsigned.
+
+    `instruction_set` is the set of opcode NAMES this build declares, read
+    out of the executable -- not `TYPED_SLOT_OPS`, which lists `ADDu`,
+    `SUBu` and `MULu` for completeness although no BGT build has them. Asked
+    of the static table instead, `ADDi`, `SUBi` and `MULi` come out
+    authoritative and the whole rule changes meaning. Read the instruction
+    set, not a table about it.
+
+    **Derived rather than listed, and the first attempt at this was listed.**
+    An integer operation carries signedness exactly when a `u` spelling of it
+    also exists, because only then did the compiler have to choose; where
+    there is no `u` form the `i` form serves both and its `INT` vote is no
+    evidence that the slot is signed. Asked of BGT's instruction set:
+
+      a `u` sibling exists, so AUTHORITATIVE
+          CMPi/CMPu  CMPIi/CMPIu  DIVi/DIVu  MODi/MODu  POWi/POWu
+          dTOi/dTOu  iTOd/uTOd  iTOi64/uTOi64
+      no `u` sibling, so agnostic
+          ADDi SUBi MULi ADDIi SUBIi MULIi NEGi IncVi DecVi POWdi i64TOi
+
+    Writing that list by hand got **four of the eleven wrong** -- `IncVi` and
+    `DecVi` are the opcode names, not `INCi`/`DECi`, and the hand list also
+    carried six names that vote `I64` or do not appear at all. The missing
+    `IncVi` is the loop counter, so the rule did nothing where it mattered:
+    on Super Egg Hunt the written project came out **byte-identical** and
+    only the one-file render moved, which is exactly the shape of a change
+    that looks measured and measured nothing.
+
+    `array<T>::length()` returns `uint`, so that title's mode setup computes
+    `length() - 1` with `SUBIi` -- agnostic -- and compares the loop counter
+    with `CMPu` -- authoritative. Counting the `SUBIi` as an `INT` vote and
+    keeping the first vote seen declared the slot `int`, so the rebuilt
+    module emitted `CMPi`: a signed compare where the original compares
+    unsigned, which differs exactly when the array is empty, since
+    `length() - 1` is 4,294,967,295 unsigned and -1 signed.
+    """
+    def siblings(name):
+        out = set()
+        if name.endswith("i"):
+            out.add(name[:-1] + "u")
+        if name.endswith("i64"):
+            out.add(name[:-3] + "u64")
+        # Wherever the `i` sits: a CONVERSION carries it at the front,
+        # `iTOd` against `uTOd`, which the two rules above cannot reach.
+        at = name.find("i")           # case-sensitive, so `IncVi` is safe
+        if at >= 0:
+            out.add(name[:at] + "u" + name[at + 1:])
+        return out
+
+    return frozenset(name for name, tokens in TYPED_SLOT_OPS.items()
+                     if (INT in tokens or I64 in tokens)
+                     and name in instruction_set
+                     and not (siblings(name) & instruction_set))
+
+
 # A slot these touch holds a handle rather than an object: the engine's own
 # record says which slots are objects but not which are references to one.
 HANDLE_SLOT_OPS = ("RefCpyV", "ClrVPtr", "STOREOBJ", "LOADOBJ")
@@ -383,6 +441,11 @@ class Builder:
         self.data = data
         self.info = info
         self.opcodes = opcodes
+        #: Which integer opcodes carry signedness, for THIS build -- see
+        #: `_sign_agnostic_int_ops`. Per build because the answer comes from
+        #: the instruction set the executable declares.
+        self.sign_agnostic = _sign_agnostic_int_ops(
+            {entry["name"] for entry in opcodes.values()})
         self.m = Module(debug_info=False)
         self.m.bytecode_profile = "bgt_%s" % info["dialect"]
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
@@ -588,6 +651,10 @@ class Builder:
         strong: Dict[int, List[int]] = {}
         weak: Dict[int, List[int]] = {}
         handles: set = set()
+        #: Votes from an integer op that does not distinguish signedness.
+        #: Promoted into `strong` below, but only for a slot that no
+        #: authoritative op has typed.
+        agnostic: Dict[int, List[int]] = {}
 
         for ins in f.bytecode:
             slots = SLOT_FIELDS.get(ins.bc_type, ())
@@ -595,9 +662,14 @@ class Builder:
                 handles.add(_s16(ins.w_arg))
             typed = TYPED_SLOT_OPS.get(ins.name)
             if typed is not None:
+                # An integer op with no `u` form says four bytes and a whole
+                # number, not which signedness -- so its vote is kept apart
+                # and used only where nothing authoritative disagrees.
+                into = (agnostic if ins.name in self.sign_agnostic
+                        else strong)
                 for field, token in zip(BC_FIELDS[ins.bc_type], typed):
                     if token and field in slots:
-                        votes = strong.setdefault(_s16(getattr(ins, field)), [])
+                        votes = into.setdefault(_s16(getattr(ins, field)), [])
                         if token not in votes:
                             votes.append(token)
                 continue
@@ -607,6 +679,19 @@ class Builder:
                     hints = weak.setdefault(_s16(getattr(ins, field)), [])
                     if width not in hints:
                         hints.append(width)
+
+        for offset, votes in agnostic.items():
+            # Only where nothing authoritative said otherwise: a `CMPu` on
+            # the slot is the compiler saying it knew the operands were
+            # unsigned, and a `SUBIi` on the same slot is the one opcode
+            # either signedness uses.
+            have = strong.setdefault(offset, [])
+            if not any(token != 67 for token in have):
+                for token in votes:
+                    if token not in have:
+                        have.append(token)
+            if not have:
+                del strong[offset]
 
         variables = []
         for token, offset in ((ov[0], ov[-1]) for ov in rec.get("objVars", [])):

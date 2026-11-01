@@ -1708,6 +1708,93 @@ flag it restores, and `deserialize_calendar` reads as the source wrote it. No
 residual goto, call-sequence score or literal count moves on any of the
 three.
 
+### ...and neither is its SIGNEDNESS, which the instruction set names
+
+The round trip's census, run again after the two fixes above, put a new
+shape at the top: **`CMPu` -232 instructions in 35 of Super Egg Hunt's
+bodies** -- the original compares *unsigned* where the rebuild compares
+signed. That is not cosmetic. `array<T>::length()` returns `uint`, so
+that title's mode setup is
+
+```
+original:  CALLSYS array<T>::length ; CpyRtoV4 v ; SUBIi v v 1 ; CMPu i v
+rebuilt:   CALLSYS array<T>::length ; CpyRtoV4 v ; SUBIi v v 1 ; CMPi i v
+```
+
+and `length() - 1` on an **empty** array is 4,294,967,295 unsigned and
+-1 signed, so the loop bound flips. The original's loop runs and the
+recovery's does not.
+
+`_slot_votes` keeps the first vote where two numeric types disagree, on
+the stated grounds that *"two numeric types in one slot is a width
+difference the bytecode does not usually make"*. Int against uint is not
+a width difference, and the bytecode makes it deliberately -- so this is
+a case that rule's own justification never covered.
+
+**Which opcodes carry signedness is derived, not listed**, and that is
+the whole of it: an integer operation carries signedness exactly when a
+`u` spelling of it also exists, because only then did the compiler have
+to choose. Asked of BGT's own table:
+
+| | |
+|---|---|
+| a `u` sibling exists, so **authoritative** | `CMPi`/`CMPu`, `CMPIi`/`CMPIu`, `DIVi`/`DIVu`, `MODi`/`MODu`, `POWi`/`POWu`, `dTOi`/`dTOu`, `iTOd`/`uTOd`, `iTOi64`/`uTOi64` |
+| no `u` sibling, so **agnostic** | `ADDi`, `SUBi`, `MULi`, `ADDIi`, `SUBIi`, `MULIi`, `NEGi`, `IncVi`, `DecVi`, `POWdi`, `i64TOi` |
+
+So an agnostic op's `INT` vote is kept apart and used only where nothing
+authoritative disagrees. `SUBIi` says four bytes and a whole number;
+`CMPu` says the compiler knew the operands were unsigned.
+
+#### Two mistakes in doing that, and both are the same mistake
+
+**I wrote the list by hand first and got four of eleven wrong.** The
+opcode is `IncVi`, not `INCi` -- and that is the loop counter, so the
+rule did nothing where it mattered: Super Egg Hunt's written project
+came out **byte-identical**, the rebuilt executable byte-identical, the
+edit distance identical to the digit, and only the one-file render
+moved, because the 32 lines were inside library files that are replaced
+by the engine's own source on disk. A change that looks measured and
+measured nothing is the shape this file keeps recording, and the tell
+was there: +32 lines with an identical build.
+
+**Then I derived it from the wrong universe.** `TYPED_SLOT_OPS` lists
+`ADDu`, `SUBu` and `MULu` for completeness although no BGT build has
+them, so deriving the siblings from that table makes `ADDi`, `SUBi` and
+`MULi` authoritative and inverts the rule for the three commonest
+integer ops. The universe is **the instruction set the executable
+declares**, which is this file's first rule arriving from a new
+direction: read the instruction set, not a table about it.
+
+The sibling search has to look wherever the `i` sits, too. A trailing-`i`
+rule covers `ADDi`/`ADDu` and `IncVi`/`IncVu`; a **conversion** carries
+it at the front, `iTOd` against `uTOd`, and those are exactly the ops
+where signedness decides what the bits mean.
+
+#### What it cost
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,262 -> 5,294 | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,392 -> 23,440 | 0 | verified | 6,952 |
+| Psycho Strike | 24,367 -> 24,428 | 2 | verified | 6,406 |
+| Crazy Party | 174,547 -> 174,597 | 14 | verified | 90,145 |
+| Manamon 1 | 83,318 -> 83,363 | 0 | verified | 26,482 |
+
+`uint` declarations on Super Egg Hunt go **7 -> 42**, and the rebuilt
+module's unsigned comparisons **7 -> 92** against the original's 95. Not
+one residual goto, call count, split check or `bgt signatures` row moves
+on any title, every `bgt audit` comparison is identical, and the round
+trip gains two more byte-identical bodies:
+
+| | edit distance | of the original | bodies identical |
+|---|---|---|---|
+| before | 9,446 | 33.1% | 30 / 137 |
+| after | **9,282** | **32.5%** | **32 / 137** |
+
+Modest against the two changes before it, and it is the first one here
+that is about *meaning* rather than shape: the others removed statements
+the original did not have, and this one changes what a comparison does.
+
 ### A slot's width evidence is not first-come-first-served
 
 `slot_types` has two kinds of evidence. A **type-tagged** opcode names its
@@ -1898,11 +1985,11 @@ checks say:
 
 | title | lines | goto | unbalanced | split | calls read back | compiler says |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 5,262 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 23,392 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | 24,367 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
-| Crazy Party | 174,547 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
-| Manamon 1 | 83,318 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
+| Super Egg Hunt | 5,294 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
+| Paladin of the Sky | 23,440 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
+| Psycho Strike | 24,428 | 2 | 0 | yes | 6,406 | 34, every one the engine's but the 2 gotos |
+| Crazy Party | 174,597 | 14 | 0 | yes | 90,145 | 14, every one a residual `goto` |
+| Manamon 1 | 83,363 | 0 | 0 | yes | 26,482 | **not measured -- wrong engine** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **All five rows are from one run of the code as it stands**, which this
