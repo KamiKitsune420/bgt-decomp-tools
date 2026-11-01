@@ -281,6 +281,14 @@ def scan(text: str) -> List[Tuple[str, int, str]]:
             text_of = _norm(m.group(0))
             if re.match(r"(?:if|while|for|switch|return)\(", text_of):
                 continue
+            #: **A numeric CONVERSION is not a call in the sense that
+            #: matters.** This shape is a correctness number -- running a
+            #: call once per read runs it once per read -- and re-evaluating
+            #: `int(local_10)` costs nothing and changes nothing. All six of
+            #: Paladin's rows were `int(local_10)` three times in one
+            #: condition, and `bag[int(pocket_cursor)]` twice.
+            if re.match(_NUMERIC + r"\(", text_of):
+                continue
             counts[text_of] = counts.get(text_of, 0) + 1
         if any(n >= DUPLICATION_LIMIT for n in counts.values()):
             hit("duplicated_call", i)

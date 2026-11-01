@@ -258,6 +258,24 @@ class DuplicatedCallTests(unittest.TestCase):
                          ["duplicated_call"])
 
 
+    def test_a_repeated_CONVERSION_is_not_a_duplicated_call(self):
+        """This shape is a correctness number -- running a call once per read
+        runs it once per read -- and re-evaluating `int(local_10)` costs
+        nothing. All six of Paladin's rows were that: `int(local_10)` three
+        times in one condition, `bag[int(pocket_cursor)]` twice."""
+        line = ("if (((arg2.get_length() <= int(local_10)) || "
+                "(arg2[int(local_10)].length() <= int(arg1))) || "
+                "(arg2[int(local_10)][int(arg1)] == 0)) {")
+        self.assertNotIn("duplicated_call", kinds(line))
+
+    def test_a_repeated_CALL_still_fires(self):
+        """Crazy Party's conditions call one getter per operand, which is the
+        author's own code and is still what this shape says it reports."""
+        line = ("if (((arg0.length() >= 3) && (arg0.length() <= 20)) && "
+                "(arg0.length() != 7)) {")
+        self.assertIn("duplicated_call", kinds(line))
+
+
 class SweepTests(unittest.TestCase):
     def _tree(self, files):
         import tempfile

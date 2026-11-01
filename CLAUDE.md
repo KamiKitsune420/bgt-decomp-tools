@@ -7254,6 +7254,38 @@ against (`_short_circuit_slots` is a shape test by necessity, and every
 merge whose shape it does not match becomes a forced variable). That is
 what a signature is for.
 
+#### ...and `duplicated_call` was counting CONVERSIONS
+
+The same correction one shape over. This one is a correctness number --
+running a call once per read runs it once per read -- and a numeric
+conversion is not a call in that sense: re-evaluating `int(local_10)`
+costs nothing and changes nothing. **All six of Paladin's rows were
+that**, `int(local_10)` three times in one condition and
+`bag[int(pocket_cursor)]` twice, and so was Manamon 1's one.
+
+| title | before | after |
+|---|---|---|
+| Paladin of the Sky | 6 | **0** |
+| Manamon 1 | 1 | **0** |
+| Crazy Party | 16 | 16 |
+| cs server | 1 | 1 |
+| Super Egg Hunt, Psycho Strike | 0 | 0 |
+
+Crazy Party's sixteen stay and are right to: they are real calls --
+`arg0.length() >= 3 && arg0.length() <= 20 && ...` -- one getter per
+operand of a chain, which is the author's own code and exactly what this
+shape claims to report.
+
+**Four of the nine shapes have now been read end to end** -- every empty
+arm, every identity cast, the hundred `double_assign` rows and these --
+and the pattern across all four is the same: a text-only sweep
+over-reports in a way that is obvious once a row is read, and the
+narrowing is always a question the text can answer (is this the
+destination? is this a conversion? is the slot ever read? is there
+anything between the branch and its target?). What is left after all
+four is **three real defects**, all of one class, and they are listed
+above.
+
 And the instrument needed its own correction, which is the usual one:
 asked of `jump_target == 0` it answered **0 for every title**,
 including two bodies whose branch over nothing had already been read by
