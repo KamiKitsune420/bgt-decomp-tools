@@ -7166,6 +7166,36 @@ store and leaving the arm empty is faithful.
 **Nothing is open.** Twenty rows, twenty explanations, and the two
 questions that settle them cost one disassembly each.
 
+#### ...and the identity casts, all 22 of them, are conversion chains
+
+`identity_cast` is the next-biggest unread set -- 13 on Manamon 1, 5 on
+Crazy Party, 2 on Paladin, 1 each on Super Egg Hunt and Psycho Strike
+-- and this file describes it as *"`double(int(x))`: a value converted
+twice and changed by neither"*. Read, every row is one of two things,
+and **neither is an identity**:
+
+- **A widening chain from a narrower slot.** `interact::mode` and
+  `base_pitch` are `uint16`, `internal_stat::stat_type` is a `uint8`,
+  and Psycho Strike's `experience_to_next_level(uint8 arg0)` opens
+  `double(int(arg0))`. The engine's `dictionary::set` takes an `int64`,
+  so `int64(int(mode))` is `uint16` -> `int` -> `int64`: the compiler's
+  own two steps, rendered.
+- **A truncation the source wrote.** `double(int(string_to_number(s)))`
+  truncates a double and widens the whole number back, which is what
+  the author asked for; Crazy Party does it three times to compute a
+  sound's pitch, and `int(int8(uint(character_to_ascii(c))))` is three
+  deliberate steps in one expression.
+
+**So the shape is only an identity when the inner argument is already
+integral, and the text cannot tell.** `double(int(d))` loses the
+fraction and `double(int(i))` loses nothing, and they are the same
+eleven characters. That makes `identity_cast` the weakest of the nine
+shapes -- it is kept because the collapsed snapshot it was written for
+(`fade(..., double(int(music.get_volume())), ...)`) really does look
+like this, and because its count still MOVES usefully: the fold rules
+took Paladin 6 -> 4 -> 2 and Manamon 1 18 -> 15 -> 13. A row is to be
+read with the declared type in hand, which is one grep.
+
 And the instrument needed its own correction, which is the usual one:
 asked of `jump_target == 0` it answered **0 for every title**,
 including two bodies whose branch over nothing had already been read by
