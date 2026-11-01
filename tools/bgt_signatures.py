@@ -13,10 +13,10 @@ signature below is here because a real, reported bug left it behind:
 | `tautology` | the same collapse inside a condition -- `if (a == a)` |
 | `empty_arm` | "an `if` with an empty arm is a condition that has lost its value" |
 | `two_empty_arms` | the stronger form, which found the folded `\\|\\|` chain |
-| `double_assign` | a name assigned twice in a row and then read several times in one expression -- `get_percent_of_range` |
-| `identity_cast` | `double(int(x))`: a value converted twice and changed by neither |
+| `double_assign` | a name assigned twice in a row and then read several times in one expression -- `get_percent_of_range`. The DESTINATION of an assignment is not a read of it: counting it made BGT's own `x = f(x)` chain a hit, 81 rows of 105 |
+| `identity_cast` | `double(int(x))`, which is only an identity when `x` is already integral -- the weakest of these, since the text cannot tell a truncation from a no-op |
 | `bare_read` | a statement that only reads -- the borrowed handle hoisted out of its guard |
-| `duplicated_call` | the same call text three or more times in one statement |
+| `duplicated_call` | the same call text three or more times in one statement, a numeric conversion excepted -- re-evaluating `int(x)` costs nothing |
 | `same_argument` | one call reading one slot for several arguments -- a safezone whose six bounds are one number |
 
 **A hit is a lead, not a verdict**, and the discipline is the same as for
