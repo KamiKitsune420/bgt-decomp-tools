@@ -2809,6 +2809,124 @@ def test_the_chain_is_not_walked_without_the_recovered_SOURCE():
     assert counts == {"callsite": 0, "hashchain": 0}
 
 
+def test_an_extraction_folder_is_not_NESTED_inside_its_own_pack_name():
+    """`sounds.dat` extracts to `assets/sounds`, and its entries are already
+    named `sounds/music/...` -- so joining the two gave
+    `assets/sounds/sounds/music/...`, which is nobody's layout.
+
+    The prefix is dropped only when EVERY entry carries it: removing one
+    common prefix from every name cannot make two names collide, and removing
+    it from some of them can.
+    """
+    key = bgt_kdf.aes_key(b"pw")
+    with tempfile.TemporaryDirectory() as folder:
+        def write(stem, names):
+            path = os.path.join(folder, stem + ".dat")
+            with open(path, "wb") as fh:
+                fh.write(bgt_pack.build(
+                    [(n, bgt_pack.encrypt_payload(b"OggS" + n.encode(), key))
+                     for n in names]))
+            return dict(bgt_pack.survey(path), name=stem + ".dat", path=path)
+
+        # every entry carries the pack's own name: the prefix goes
+        every = write("sounds", ["sounds/a.ogg", "sounds/music/b.ogg"])
+        out = os.path.join(folder, "all")
+        bgt_project.bring_data([every], out, extract=True,
+                               keys={bgt_pack.tag_for_key(key): key},
+                               copy=False)
+        assert os.path.isfile(os.path.join(out, "assets", "sounds", "a.ogg"))
+        assert os.path.isfile(
+            os.path.join(out, "assets", "sounds", "music", "b.ogg"))
+        assert not os.path.exists(
+            os.path.join(out, "assets", "sounds", "sounds"))
+
+        # only SOME do: dropping it would put two entries at one path, so the
+        # names are kept exactly as the pack wrote them
+        some = write("data", ["data/a.ogg", "a.ogg"])
+        out2 = os.path.join(folder, "some")
+        bgt_project.bring_data([some], out2, extract=True,
+                               keys={bgt_pack.tag_for_key(key): key},
+                               copy=False)
+        assert os.path.isfile(
+            os.path.join(out2, "assets", "data", "data", "a.ogg"))
+        assert os.path.isfile(os.path.join(out2, "assets", "data", "a.ogg"))
+
+
+def test_the_chain_FORKS_at_a_reversal_because_the_GAME_does():
+    """`H^m(reverse(H^n(seed)))` is on no unforked line, and two titles keep
+    an iteration of that shape.
+
+    Manamon 1 reverses at iteration 168 and keeps 111, so the plain line runs
+    through its key and the harvester found it. The Gate reverses at 168 and
+    keeps **175**, seven hashes the other side of the fork -- the case this
+    file recorded as out of reach, until a title had it. The reversed value
+    was already offered at every step; what was missing is that nothing
+    continued from it.
+    """
+    import hashlib
+    seed = b"c2VlZCBtYXRlcmlhbA"
+    current = seed
+    for _ in range(6):
+        current = hashlib.sha512(current).digest()
+    wanted = current[::-1]
+    for _ in range(4):
+        wanted = hashlib.sha512(wanted).digest()
+
+    forked = set(bgt_crack.harvest_hashchain([seed], depth=8, fork_depth=8))
+    assert wanted in forked
+
+    # ...and it is genuinely the fork that reaches it, not the depth
+    plain = set(bgt_crack.harvest_hashchain([seed], depth=64, fork_depth=0))
+    assert wanted not in plain
+
+    # the plain line is still walked, which is the half that already worked
+    straight = seed
+    for _ in range(6):
+        straight = hashlib.sha512(straight).digest()
+    assert straight in forked
+
+
+def test_a_pack_question_about_PAYLOADS_refuses_when_none_were_read():
+    """The `SWCR` tag lives in the payload, so `parse(load_data=False)` leaves
+    every entry looking unencrypted -- and a correct key then "opens 0 of
+    1,153 entries", which is indistinguishable from a wrong one.
+
+    That is how The Gate's key looked for several minutes after it had already
+    been verified against the tag `survey` reads out of the headers.
+    """
+    key = bgt_kdf.aes_key(b"a password")
+    raw = bgt_pack.build([("s.ogg", bgt_pack.encrypt_payload(b"OggS", key))])
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "data.dat")
+        with open(path, "wb") as fh:
+            fh.write(raw)
+
+        _, unloaded = bgt_pack.parse(path, load_data=False)
+        for call in (lambda: bgt_pack.key_matches(unloaded, key),
+                     lambda: bgt_pack.tag_index(unloaded)):
+            try:
+                call()
+            except bgt_pack.PackError as exc:
+                assert "payload" in str(exc)
+            else:
+                raise AssertionError("answered a question it could not ask")
+
+        # the two ways that DO work: survey reads the headers...
+        assert bgt_pack.survey(path)["tags"]
+        # ...and one entry can be filled at a time
+        with open(path, "rb") as fh:
+            unloaded[0].load(fh)
+        assert len(bgt_pack.key_matches(unloaded, key)) == 1
+
+        # and a pack that really holds no encrypted entry still answers
+        plain_path = os.path.join(folder, "plain.dat")
+        with open(plain_path, "wb") as fh:
+            fh.write(bgt_pack.build([("a.txt", b"hello")]))
+        _, loaded = bgt_pack.parse(plain_path, load_data=True)
+        assert bgt_pack.key_matches(loaded, key) == []
+        assert bgt_pack.tag_index(loaded) == {}
+
+
 def test_pack_keys_recovers_a_key_that_is_a_DIGEST():
     """The end to end of it, on a synthetic pack: the password is nowhere in
     the module, and the key still comes back verified against the pack's tag."""

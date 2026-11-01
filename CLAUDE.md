@@ -391,6 +391,7 @@ recorded: 454 global properties, 2,892 module functions, 1,280 global functions,
 | Super Egg Hunt | tagged | 10 / 10 | 141 | ends exactly at EOF |
 | Crazy Party | tagged | 550 / 550 | 4,486 | ends exactly at EOF |
 | Manamon 1 | len2 | 784 / 784 | 4,719 | ends exactly at EOF |
+| The Gate | tagged | 171 / 171 | 1,783 | ends exactly at EOF |
 
 Super Egg Hunt is the fifth, and the first picked up cold after all of the
 above: `bgt validate` passed it on every stage, byte-exact rewrite included,
@@ -2099,6 +2100,7 @@ checks say:
 | Psycho Strike | 24,419 | **0** | 0 | yes | 6,407 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
 | Crazy Party | 174,780 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
 | Manamon 1 | 83,371 | 0 | 0 | yes | 26,484 | **not measured -- wrong engine** |
+| The Gate | 34,955 | 0 | 0 | yes | 8,666 | **not measured -- the elias plugin** |
 | Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
 
 **Psycho Strike's goto column is 0 now**, which takes its two
@@ -2186,6 +2188,35 @@ split and 26,484 calls read back.
 Its compiler column is empty on purpose: the only engine installed here is
 BGT 1.3, which is not the fork that built it. See **The string factory has
 a third spelling** for what asking anyway cost.
+
+**The Gate is the eighth title, and the second picked up cold with nothing
+changed to receive it.** A 2015 VGStorm game (`VGStorm.com\The Gate\gate.exe`,
+1.28 MB, overlay 0xE9200, stock seed 0x11, `tagged`): 171 of 171 class blocks,
+1,783 bodies, 25 enums, 4 funcdefs, **0 parse errors**, a tail landing exactly
+on EOF at 703,499 bytes, and every per-build field the ordinary `tagged`
+combination -- `template_namespace`, `objvar_three` and `legacy_body` all true,
+`unguarded_lists` false. No reader change, and no new per-build case.
+
+It recovers to 183 files and **34,955 lines with 0 residual gotos, 0 dangling
+gotos, 0 unbalanced files, 0 unmodelled opcodes, a verified split and 8,666
+calls read back** against its own build's declarations. One body is given up
+on, and it is the known shape rather than a crash: an `UnstructuredSwitch` in
+`character`, a jump table neither matcher claimed -- the same class as
+Manamon's `number_key_pressed` was.
+
+**Its data comes out whole**, which took the chain fork below: the key is
+recovered from the module, `sounds.dat` is copied, and **1,153 of 1,153**
+entries extract -- 1,148 Ogg Vorbis and the 5 `.epro` themes, nothing refused
+and nothing unaccounted for.
+
+Its compiler column is empty for the reason Psycho Strike's 34 are mostly
+unavoidable: the game needs `elias`, which no stock BGT registers, so the
+installed 1.3 cannot compile it however good the recovery is. `bgt recover`
+reports the plugin and copies `elias.dll` into the project.
+
+**Two of its registration counts are Psycho Strike's exactly** -- 453 names
+and 40 types -- six months later to the day, so VGStorm's fork did not move
+between April and October 2015.
 
 **And two titles can no longer be measured the same way.** Psycho Strike's
 and Manamon 2's own runtimes are not on this machine, so their modules were
@@ -2751,6 +2782,7 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 | Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
 | Paladin of the Sky | 432 | 32 | stock |
 | Psycho Strike | 453 | 40 | 2015-04-19 21:02 |
+| The Gate | 453 | 40 | 2015-10-13 23:04 |
 | Manamon 1 | 469 | 44 | 2017-03-15 21:21 |
 | Manamon 2 | 509 | 52 | 2019-11-15 02:14 |
 
@@ -2809,18 +2841,77 @@ BGT has no plugin mechanism -- its `#include` takes a script or a pack file,
 and handed a DLL it says "Expected identifier". So the question is how
 `elias` becomes a *type*, and the binaries answer it from three directions:
 
-- The `elias` type and its seventeen methods (`start`, `silence`,
-  `request_change`, `play_stinger`, `set_level`, `set_key`, `set_urgency`,
-  `get_transitioning` ...) are **registration strings inside the runtime**,
-  in both `strike.exe` and `rpg.exe`. A DLL cannot put them there.
-- `elias.dll` is **not in either executable's import table**, and both
-  runtimes carry its C export names verbatim -- so it is loaded with
+- The `elias` type and its methods are **registration strings inside the
+  runtime**, in `strike.exe`, `rpg.exe` and `gate.exe` alike. A DLL cannot
+  put them there.
+- `elias.dll` is **not in any of those executables' import tables**, and each
+  runtime carries its C export names verbatim -- so it is loaded with
   `LoadLibrary` at run time.
-- The DLL exports 92 functions (`elias_theme_create_from_xml`,
-  `elias_theme_read_samples`, `elias_track_set_crossfade_minimum` ...), and
-  the seventeen script methods are a thin binding over about twenty of
-  them: the theme-level half. The track-authoring half is not exposed,
-  because a theme arrives as XML.
+- The DLL exports **92 functions**, and the split is exactly two halves plus
+  setup: **50 `elias_theme_*`, 40 `elias_track_*`, 2 `elias_set_*`**
+  (`elias_set_memory_allocator`, `elias_set_float_to_int_converter`). Read out
+  of the export directory of the copy that ships with The Gate, not guessed
+  from a strings dump -- a name in the strings is as likely to be an import or
+  a fragment, and the export table is the authority.
+
+**The fork imports 19 of those 92, and the two builds four years apart import
+exactly the same 19** -- no difference in either direction:
+
+```
+change_key  create_from_xml  destroy  enumerate_sources  get_basic_info
+get_greatest_trigger  get_keys  get_source_count  is_transitioning
+play_stinger  read_samples  request_change  set_level  silence  start  stop
+set_prebuffer_length_in_milliseconds  set_processing_period_in_milliseconds
+set_suggested_thread_count
+```
+
+all `elias_theme_*`, and **not one `elias_track_*`** -- which is the
+track-authoring half, confirming from the import side what the data says from
+the other: a theme arrives as XML, so nothing in the game builds one.
+
+**This file said 23, and said the script side was "seventeen methods" and "15"
+in two places. All three were wrong**, and the module is what settled it: a
+`usedFunctions` entry records its owner, so the methods a module *calls* on
+`elias` are countable without attributing a registration. The Gate calls
+**twenty**, with these signatures --
+
+```
+bool   load(const string&in, const string&in)     void set_immediately(bool)
+bool   start(int, int)                            void set_key(int)
+bool   pause()      bool resume()                 void set_rendezvous(bool)
+bool   set_level(int, int)                        void set_stinger(int)
+bool   silence()    bool close()                  void set_urgency(int)
+bool   get_playing()                              void set_volume(double)
+bool   get_transitioning()                        double get_volume()
+bool   get_immediately()                          int get_key()
+int    get_greatest_level()                       int get_urgency()
+```
+
+-- which already exceeds both of the numbers this file carried, so neither
+needed a second measurement to be refuted.
+
+#### A registration block can be read by POSITION, and it UNDERCOUNTS
+
+Worth its own note, because the mechanism bites any count taken this way.
+AngelScript takes the owner type as a separate argument, so a declaration
+string carries no owner and `registered()` cannot attribute one. What it does
+carry is **position**: a type's registrations are emitted together, so the
+declarations between the first and last known `elias` method are that type's
+block. In `gate.exe` that block is contiguous from `0x0c8b6c` to `0x0c8d9c`
+and holds **24** declarations -- the twenty above plus `request_change(int)`,
+`play_stinger(int)`, `get_rendezvous()`, `get_stinger()` and `get_pan()`.
+
+And `void set_volume(double)` is **not in it**, although the module proves it
+is an elias method. It occurs **once in the whole file**, at `0x0c6444`, inside
+another type's block: an identical declaration is **pooled**, so it is emitted
+where it was first needed and every later type's registration points at that
+one copy. `sound` declares `void set_volume(double)` too.
+
+So a block read by position is a floor that undercounts by exactly the
+signatures a type shares with another -- and `set_volume(double)`,
+`get_volume()`, `set_pan(double)` and `get_playing()` are all shapes several
+audio types have. The elias type has **at least 25** methods; the module's own
+table is the authority on any particular one.
 
 So it is a **BGT built to use that DLL**, which is the second of the two
 possibilities and not the first. Manamon 2 has it too, so it came with the
@@ -2845,7 +2936,8 @@ its stinger"*.
 
 So VGStorm's fork is **one shared engine build** carrying everything its
 author had accumulated, whether a given title touches it or not. Psycho Strike
-is the title that uses elias; Manamon 1 inherits the binding and ignores it.
+and **The Gate** are the titles that use elias; Manamon 1 inherits the binding
+and ignores it.
 Answering a question about a module with a fact about the engine is the same
 error as `string_compress` being registered and undocumented, pointing the
 other way -- and this file has the general form of it already: **a name a
@@ -2862,6 +2954,114 @@ registers, both out of any game's own runtime); the *theme data* a game ships
 is that game's content and reading it is ordinary asset recovery; and the
 *engine* is Elias Software's, so a port should load the DLL the game already
 ships rather than transcribe it.
+
+**Two of those three are now done rather than pending**, because The Gate
+ships `elias.dll` and five themes. See the two sections above for the binding
+and the section below for the data. What is left is the engine, and that is
+the half a port should not write.
+
+### The theme format: plain XML, inside the pack, with nothing to decode
+
+`elias_theme_create_from_xml` says a theme arrives as XML, and The Gate's
+pack is where it arrives. Of its **1,153 entries, 1,148 are SWCR-encrypted
+and 5 are not** -- and those five are the themes:
+
+```
+sounds/music/elias/boss/boss.epro                       10,775 B
+sounds/music/elias/carmilla_battle/carmilla_battle.epro  12,508 B
+sounds/music/elias/final_battle/final_battle.epro         8,836 B
+sounds/music/elias/horror_1/horror_1.epro                11,013 B
+sounds/music/elias/horror_2/horror_2.epro                11,939 B
+```
+
+`.epro` is an Elias **pro**ject export, it is stored unencrypted beside the
+audio it names, and it needs no reverse engineering at all: each one parses as
+XML with `<theme>` as its root. The whole vocabulary, taken from all five
+rather than from one -- 18 elements, every attribute:
+
+| element | attributes |
+|---|---|
+| `theme` | `bars`, `channels`, `mode`, `sample_rate`, `tempo`, `time_signature`, `volume` |
+| `defaults` | -- |
+| `audio_loop_track`, `audio_stinger_track` | `id`, `name`, `volume` |
+| `key` | `value`, `name` |
+| `trigger`, `stinger` | `value`, `length`, `filename` |
+| `fade_in`, `fade_out`, `crossfade` | `minimum`, `maximum` |
+| `reverb` | `mix`, `damping`, `size` |
+| `agility` | `value`, `strict` |
+| `agility_points` / `beat` | -- / `point` |
+| `pickup` | `beats` |
+| `progression` | `mode` |
+| `rendezvous` | -- |
+| `fade` | `value` |
+
+Read the hierarchy off that and it is the middleware's own, with the names the
+data uses rather than the ones the marketing uses: **theme, track, key,
+trigger**. A `key` is the musical key (`value="0" name="C"`), a `trigger`
+value is the **intensity level** -- which is why the script method is
+`set_level(int, int)` and the C export is `elias_theme_set_level` -- and every
+`<defaults>` entry is overridden per track where the composer wanted it.
+
+The audio is named relative to the theme's own folder and the convention is
+mechanical: `audio/<track_id>_<key>_<trigger>.wav`. So `boss`'s Bass track in
+C at level 7 is `sounds/music/elias/boss/audio/1_0_7.wav`.
+
+| theme | loop tracks | stinger tracks | keys | triggers | tempo | time |
+|---|---|---|---|---|---|---|
+| boss | 4 | 5 | 18 | 59 | 90 | 4/4 |
+| carmilla_battle | 4 | 5 | 18 | 81 | 90 | 6/8 |
+| final_battle | 4 | 4 | 16 | 43 | 136 | 6/4 |
+| horror_1 | 4 | 6 | 20 | 58 | 80 | 6/8 |
+| horror_2 | 4 | 6 | 20 | 49 | 120 | 3/4 |
+
+Four loop tracks every time -- `boss` names them Bass, Strings, Brass, Perc --
+layered to build intensity, with stingers fired over the top.
+
+**Every theme is a closed set, which is the check worth making**: of the files
+each one names, **0 are missing from the pack**, and of the pack entries in
+each theme's folder, **0 are unreferenced**. So the theme data recovers whole,
+and a port has everything it needs from the game side.
+
+#### How the script drives it, read out of the recovery
+
+`play_theme` is the load sequence, and it answers what the two strings of
+`elias::load` are -- the XML **contents**, and the folder its filenames are
+relative to:
+
+```
+theme.set_key(0);
+<read sounds/music/elias/<theme>.epro -- from disk when run as a script,
+ from the pack through pack_file::get_file when compiled>
+theme.load(<that file's bytes>, "sounds/music/elias/" + <theme>);
+theme.set_volume(music_volume);
+theme.start(level, max_level);
+```
+
+So the binding resolves the theme's `filename` attributes against that second
+string **through the pack**, which is what `elias_theme_enumerate_sources` and
+`elias_theme_get_source_count` are imported for: the fork asks the theme what
+sources it wants, reads each one itself, and hands over the samples. elias
+never touches the file system, which is why none of its 92 exports opens a
+file.
+
+And the adaptive half is one function and a monitor:
+
+```
+void monitor_elias() {
+    int level = default_elias_mode();
+    if (level == last_level) return;
+    last_level = level;
+    set_theme_level(level, -1, false);
+}
+```
+
+`default_elias_mode()` computes the level from the game state -- +50 for every
+live enemy within 25 units of the player that is not a friendly, not type 12
+and not invisible, +45 per weapon lying on the ground -- and `set_theme_level`
+clamps the pair so the maximum is never below the current. That is the whole
+of what the middleware is for, in a game: the music's intensity tracks how
+much trouble the player is in, and the composer's layers and crossfades do the
+rest.
 
 #### What that is worth to the gap checks
 
@@ -3336,6 +3536,16 @@ Three things this turned up:
   reports every pack as unencrypted — and a 372 MB pack cannot be loaded
   just to ask. `bgt_pack.survey` reads each entry's 20-byte header at its
   known offset instead, which is cheap and cannot give that answer.
+- **...and `key_matches` had the same silent zero, which is worse.** It reads
+  `e.encrypted` and `e.tag`, both of which need the payload, so handed
+  unloaded entries it reports that a key opens **0 of 1,153** -- and a correct
+  key reported that way is indistinguishable from a wrong one. The Gate's key
+  looked like that for several minutes, having *already* been verified against
+  the tag `survey` read out of the headers: two of this toolkit's own
+  self-verifying layers disagreeing, with the wrong one sounding confident.
+  Both functions refuse now, through one `_require_payloads` guard that names
+  the three ways to ask properly, and only when **no** entry was loaded -- a
+  pack that genuinely holds nothing encrypted still answers.
 - **A string constant is data, and two guards follow from that.** A name must
   not reach outside the game's folder, and an entry name must not write
   outside the extraction folder. `os.path.commonpath` raises `ValueError`
@@ -3447,12 +3657,52 @@ digest, what the chain carries forward, and both reversed, since
 `string_reverse` is in the same family. 2 seeds, 12,289 candidates, under
 three seconds.
 
-**What it will not reach**, stated because the next title will test it: a
-reversal -- or any other step -- that falls *before* the iteration the game
-keeps, because that forks the chain. Manamon 1's first reversal is iteration
-168 and its key is 111, so the plain chain passes through it. A title where
-it does not is the case for reading the function, and the recovered source is
-where that is readable.
+#### A reversal FORKS the chain, so the chain forks -- and a title needed it
+
+This said the harvester would not reach a reversal falling *before* the
+iteration the game keeps, because that forks the chain, and that such a title
+was the case for reading the function by hand. **The Gate is that title**, and
+reading the function by hand is what found it -- after which the fix was
+cheaper than the next read would have been.
+
+Its `get` is Manamon 1's, line for line, with one character different: the
+test is `>=`, so the **last** iteration holding the maximal NUL count wins
+where Manamon's `>` keeps the first.
+
+| | Manamon 1 | The Gate |
+|---|---|---|
+| reversal at iteration | 168 | 168 |
+| iteration the game keeps | **111** | **175** |
+| on the plain line? | yes | **no -- seven hashes past the fork** |
+
+So the values wanted are not only `H^n(seed)` but `H^m(reverse(H^n(seed)))`,
+and the reversed value was already being *offered* at every step while nothing
+ever continued from it. `harvest_hashchain` now walks a forked line from each
+step's reversed value, and `CHAIN_FORK_DEPTH` is its own smaller number
+because a kept iteration sits a few hashes past the reversal that produced it,
+never hundreds.
+
+**Measured in both directions, which is what says the change is the cause:**
+
+| | candidates | The Gate's key |
+|---|---|---|
+| `fork_depth=0` -- the old behaviour | 12,282 | **not found** |
+| as it now stands | 3,158,010 | **found**, in 81 s of testing |
+
+and the password it returns is the one a direct simulation of the recovered
+`get` returns, byte for byte, with the AES key then opening **1,148 of 1,148**
+encrypted entries -- every one valid Ogg Vorbis, in a pack whose entries are
+all named `.wav`.
+
+**One level of forking, deliberately.** Two titles reverse once in 218 rounds,
+so a second level would square the cost to buy a shape nothing has shown. The
+selection rule is still not modelled, which remains the point: whichever
+iteration the game keeps is somewhere in what the harvester yields, and one
+AES block against the pack's tag says which.
+
+The cost is real and worth stating: the chain is 43x the candidates it was, so
+a `bgt recover` that has to reach this shape spends a minute or so where it
+used to spend seconds. A pack that opens is worth a minute.
 
 **And the chain is never seeded from the whole module.** 82,169 literals times
 four chains times 512 steps is 168 million candidates spent to avoid reading
@@ -3542,6 +3792,28 @@ shape as that title's `tamerdata.dat`.
 Recorded, not done: writing the decrypted form as well as the stored bytes is
 a second extraction layer with its own choices -- what to name it, and the
 fact that the stored bytes are what the game reads and must not be replaced.
+
+#### ...and the folder it reads into must not nest inside its own name
+
+A pack extracts to `assets/<the pack's own stem>`, which keeps Super Egg
+Hunt's seven apart. The Gate's pack is `sounds.dat` and **its entries are
+already named `sounds/music/...`**, so joining the two gave
+`assets/sounds/sounds/music/elias/boss/audio/1_0_7.wav`.
+
+Nothing breaks -- the engine reads the pack, not the extraction, so the
+project still runs -- and it is nobody's layout, in the half of the output
+that exists for a person to read.
+
+The prefix is dropped only when **every** entry carries it, and that
+condition is the whole of the correctness argument: removing one common
+prefix from every name cannot make two names collide, while removing it from
+some of them can. A pack holding both `data/a.ogg` and `a.ogg` keeps the
+names the pack wrote, doubled folder and all, because the alternative is two
+entries at one path and one of them silently overwriting the other.
+
+Super Egg Hunt and Manamon 1 are unaffected, which is checked rather than
+assumed: neither names its entries after its pack, and both re-extract to
+exactly the figures recorded above.
 
 #### Extraction reads one entry at a time
 

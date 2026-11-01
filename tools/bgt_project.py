@@ -762,11 +762,23 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
         # offset, so one handle and one seek per entry bounds it at the
         # largest single sound.
         _, entries = bgt_pack.parse(pack["path"], load_data=False)
+        # The folder is named after the pack, and an entry's own name may
+        # already begin with that -- The Gate's `sounds.dat` holds
+        # `sounds/music/...`, so joining the two gives `assets/sounds/sounds/`.
+        # Dropping the prefix is safe only when EVERY entry carries it, since
+        # removing one common prefix from every name cannot make two names
+        # collide; drop it from some and it can.
+        stem = os.path.basename(where) + "/"
+        plain_names = [e.name.replace("\\", "/").lstrip("./") for e in entries]
+        doubled = bool(plain_names) and all(n.startswith(stem)
+                                            for n in plain_names)
         written = 0
         refused = 0
         with open(pack["path"], "rb") as handle:
-            for entry in entries:
-                name = os.path.normpath(entry.name.replace("\\", "/")).lstrip("./\\")
+            for entry, plain_name in zip(entries, plain_names):
+                if doubled:
+                    plain_name = plain_name[len(stem):]
+                name = os.path.normpath(plain_name).lstrip("./\\")
                 target = os.path.join(where, name)
                 if not _inside(where, os.path.abspath(target)):
                     continue                  # a pack cannot write outside itself

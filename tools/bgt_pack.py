@@ -274,8 +274,29 @@ def survey(path: str, sample: int = 0) -> Dict[str, Any]:
             "keys": len(tags), "tags": sorted(tags)}
 
 
+def _require_payloads(entries: Sequence["Entry"], asking: str) -> None:
+    """Refuse a question about payloads that were never read.
+
+    The `SWCR` tag lives in the payload, so after `parse(load_data=False)`
+    every entry's `encrypted` is False -- and the two functions below would
+    then answer "no keys" and "this key opens nothing". Those are verdicts
+    from a check that never ran, which is the worst shape there is: a correct
+    key reported as opening 0 of 1,153 entries is indistinguishable from a
+    wrong one, and that is how The Gate's key looked for several minutes.
+
+    `survey(path)` is the cheap way to ask -- it reads each entry's header at
+    its recorded offset -- and `Entry.load(handle)` fills them one at a time.
+    """
+    if entries and all(e.data is None for e in entries):
+        raise PackError(
+            "%s needs each entry's payload and not one was read: use "
+            "parse(..., load_data=True), or Entry.load(handle) per entry, or "
+            "survey(path), which reads the headers instead" % asking)
+
+
 def tag_index(entries: Sequence["Entry"]) -> Dict[bytes, List["Entry"]]:
     """Map verification tag -> list of entries, keyed by the AES-ECB(key, zeros) tag."""
+    _require_payloads(entries, "tag_index")
     idx = {}
     for e in entries:
         if e.encrypted:
@@ -289,7 +310,11 @@ def key_matches(entries: Sequence["Entry"], key: bytes) -> List["Entry"]:
     Cheap enough to run over thousands of keys: one AES block per key, no
     ciphertext touched. This is the supported way in -- supply keys from wherever
     you obtained them (see the module docstring) and this tells you which are real.
+
+    It needs the payloads, because that is where the tag is; handed entries
+    that were never filled it refuses rather than answering 0.
     """
+    _require_payloads(entries, "key_matches")
     tag = tag_for_key(key)
     return [e for e in entries if e.encrypted and e.tag == tag]
 

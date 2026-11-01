@@ -271,10 +271,14 @@ def harvest_call_site(text: str, api: str = KEY_API,
 #: candidate costs one AES block, so the bound is generosity rather than a
 #: tuned constant -- and it only ever multiplies the seeds the call site named.
 CHAIN_DEPTH = 512
+#: How far a FORKED line is walked -- see `harvest_hashchain`. A reversal
+#: splits the chain, so the values past one are not on the plain line at all.
+CHAIN_FORK_DEPTH = 256
 
 
 def harvest_hashchain(seeds: Sequence[bytes],
-                      depth: int = CHAIN_DEPTH) -> List[bytes]:
+                      depth: int = CHAIN_DEPTH,
+                      fork_depth: int = CHAIN_FORK_DEPTH) -> List[bytes]:
     """Every intermediate of an iterated `string_hash` over each seed.
 
     The shape this reaches is the one that defeats every harvester above:
@@ -304,11 +308,26 @@ def harvest_hashchain(seeds: Sequence[bytes],
     each digest is offered reversed as well, since `string_reverse` is in the
     same family.
 
-    What it does **not** reach: a reversal (or any other step) that falls
-    *before* the iteration the game keeps, because that forks the chain. For
-    Manamon 1 the first reversal is iteration 168 and the key is 111, so the
-    plain chain reaches it. A title where it does not is the case for reading
-    the function, and the recovered source is where it is readable.
+    **A reversal FORKS the chain, so the chain is forked.** This used to say
+    that a reversal falling before the kept iteration is what the harvester
+    cannot reach, and that the case was for reading the function by hand --
+    true, and then The Gate turned up as exactly that case. Its reversal is
+    iteration 168 and the iteration it keeps is **175**, seven hashes past the
+    fork, where Manamon 1 keeps 111 and the plain line passes through it. So
+    the values wanted are not only `H^n(seed)` but `H^m(reverse(H^n(seed)))`,
+    and the reversed value was already being *offered* at every step while
+    nothing ever continued from it.
+
+    One level of forking is what the shape needs and all it gets. Two titles
+    reverse once in 218 rounds, so a second fork would square the cost to buy
+    a shape nothing has shown. The cost of the first is `depth * fork_depth`
+    values per chain rather than `depth`, which is why `fork_depth` is its own
+    smaller number: a kept iteration sits within a few dozen hashes of the
+    reversal that produced it, never hundreds.
+
+    Still unmodelled, and deliberately: the selection rule. Whichever
+    iteration the game picks is somewhere in what this yields, and the pack
+    says which -- one AES block against the tag it stores.
     """
     out: List[bytes] = []
     seen: set = set()
@@ -321,22 +340,37 @@ def harvest_hashchain(seeds: Sequence[bytes],
                 seen.add(value)
                 starts.append(value)
     out.extend(starts)
+
+    def walk(start: bytes, algorithm, binary: bool, steps: int) -> List[bytes]:
+        """One line of the chain, returning each step's carried-forward value.
+
+        Every value it passes is offered; the list it returns is only the
+        carry, which is what a fork has to continue from.
+        """
+        carried: List[bytes] = []
+        current = start
+        for _ in range(steps):
+            digest = algorithm(current).digest()
+            current = digest if binary else digest.hex().encode()
+            carried.append(current)
+            # The digest AND what the chain carries forward: in the hex
+            # form they differ, and either can be the password -- the
+            # loop hashes the hex string while a last `binary` round
+            # would hand on the raw digest.
+            for value in (digest, current, digest[::-1], current[::-1]):
+                if value not in seen:
+                    seen.add(value)
+                    out.append(value)
+        return carried
+
     for seed in starts:
         for algorithm in (hashlib.sha256, hashlib.sha512):
             for binary in (True, False):
-                current = seed
-                for _ in range(depth):
-                    digest = algorithm(current).digest()
-                    current = digest if binary else digest.hex().encode()
-                    # The digest AND what the chain carries forward: in the hex
-                    # form they differ, and either can be the password -- the
-                    # loop hashes the hex string while a last `binary` round
-                    # would hand on the raw digest.
-                    for value in (digest, current, digest[::-1],
-                                  current[::-1]):
-                        if value not in seen:
-                            seen.add(value)
-                            out.append(value)
+                for carried in walk(seed, algorithm, binary, depth):
+                    # ...and the line the game would be on had it reversed
+                    # here. `walk` already offered the reversed value itself;
+                    # this is what follows it.
+                    walk(carried[::-1], algorithm, binary, fork_depth)
     return out
 
 
