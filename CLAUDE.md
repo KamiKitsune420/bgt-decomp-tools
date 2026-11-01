@@ -2284,6 +2284,41 @@ zeroes from a command that never ran. The answer only became real when the
 same search was done in Python against the bytes. A measurement is not a
 measurement until you have checked the instrument ran.
 
+#### The overloadable operators are a LIST, and the set held 6 of 43
+
+`OPERATOR_METHODS` keeps an operator the source writes as syntax out of
+the call comparison, and this file records it being *"widened one measured
+occurrence at a time, deliberately: a name in here is dropped from BOTH
+sides, so every addition makes the comparison weaker"*. `opAdd_r` was
+found that way -- one reversed concatenation, in one body, of one title.
+
+The language tutorial prints the whole thing in four tables: six unary,
+eleven binary with their `_r` reverses, twelve assignment forms,
+`opIndex`, `opEquals` and `opCmp`. **43 names, and the set had 6.** So 37
+more `opAdd_r`s were waiting, each costing a reported difference that is
+a spelling difference.
+
+The policy was right while there was no authority and is wrong now there
+is one: membership is a fact about the language rather than a tuning
+parameter, and this document's first rule is to read the authority. The
+tutorial prints `op_Ushr_r` for the reverse of `>>>`, which is a typo --
+every other reverse is the name with `_r` appended -- so both spellings
+are listed rather than guessed between.
+
+**It is inert on every score**, which is the point rather than a
+disappointment: dropping the same names from both sides cannot reorder
+what remains, so it can only ever stop a spelling being read as a
+difference. Measured in-process against the old six on one decompiler,
+Psycho Strike is 147 of 149 identical either way.
+
+**And measuring it taught the lesson twice over.** The first run said
+147 -> 145, which is impossible for this change and was believed for
+several minutes anyway. The cause was that an *unrelated* decompiler
+change was sitting in the tree at the same time, so the run measured both
+and the result was attributed to the wrong one. Two changes in flight is
+one measurement of neither -- which is exactly what this file keeps
+saying about structurer work, arriving from the instrument side.
+
 #### `limitations` is one line, and it is about the network object
 
 The whole page: *"The network object is too complicated. We need a higher

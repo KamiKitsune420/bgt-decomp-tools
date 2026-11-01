@@ -87,8 +87,39 @@ TYPE_NAMES = frozenset(("string", "int", "uint", "double", "float", "bool", "int
 #: in here is dropped from BOTH sides, so every addition makes the comparison
 #: weaker. `opAdd_r` is the only `op*` name the corpus produces that is not
 #: already here.
-OPERATOR_METHODS = frozenset(("opIndex", "opAssign", "opEquals", "opAdd",
-                              "opAdd_r", "opCmp"))
+#: **The complete list, from the language tutorial's own tables.** This held
+#: six names and was grown one reported difference at a time, on the stated
+#: grounds that a name here is dropped from BOTH sides so every addition
+#: makes the comparison weaker. That policy existed because there was no
+#: authoritative list; there is one, and it has **43** names in it.
+#:
+#: Membership is a fact about the language rather than a tuning parameter:
+#: these are exactly the methods a source writes as SYNTAX and the bytecode
+#: writes as a call, which is the one thing this comparison must not read as
+#: a difference. `opAdd_r` was found the slow way -- one reversed
+#: concatenation in one body of one title -- and 37 more were waiting behind
+#: it.
+#:
+#: The tutorial prints `op_Ushr_r` for the reverse of `>>>`, which is a typo
+#: in the documentation: every other reverse form is the method name with
+#: `_r` appended, so `opUshr_r` is the name and both spellings are listed
+#: rather than guessed between.
+OPERATOR_METHODS = frozenset((
+    # unary
+    "opNeg", "opCom", "opPreInc", "opPreDec", "opPostInc", "opPostDec",
+    # binary, each with its reversed form for `<value> op <object>`
+    "opAdd", "opAdd_r", "opSub", "opSub_r", "opMul", "opMul_r",
+    "opDiv", "opDiv_r", "opMod", "opMod_r",
+    "opAnd", "opAnd_r", "opOr", "opOr_r", "opXor", "opXor_r",
+    "opShl", "opShl_r", "opShr", "opShr_r", "opUshr", "opUshr_r",
+    "op_Ushr_r",
+    # assignment
+    "opAssign", "opAddAssign", "opSubAssign", "opMulAssign",
+    "opDivAssign", "opModAssign", "opAndAssign", "opOrAssign",
+    "opXorAssign", "opShlAssign", "opShrAssign", "opUshrAssign",
+    # index, equality and the four relational operators at once
+    "opIndex", "opEquals", "opCmp",
+))
 
 #: The identifier a `(` opens against. **Not** a receiver chain: this used to be
 #: `(?<![\w.])(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*\(`, which named the callee by

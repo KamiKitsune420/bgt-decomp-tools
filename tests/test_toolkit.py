@@ -2199,6 +2199,44 @@ def test_libcheck_skips_a_source_file_that_is_its_own_program():
     assert "<global>::helper_of_the_tool" not in found
 
 
+def test_libcheck_knows_every_overloadable_operator():
+    """The complete list, from the language tutorial's own tables.
+
+    These are the methods a source writes as SYNTAX and the bytecode writes
+    as a call, which is the one thing this comparison must never read as a
+    difference. The set held **six** of the **43** names BGT documents and
+    was grown one reported difference at a time -- `opAdd_r` was found the
+    slow way, from one reversed concatenation in one body of one title, with
+    37 more waiting behind it.
+
+    Membership is a fact about the language, not a tuning parameter, so the
+    authority is the documentation rather than the next bug report. Measured
+    in-process against the old six on the same decompiler, the identical
+    count does not move at all (147 of 149 on Psycho Strike either way):
+    dropping the same names from both sides cannot reorder what remains.
+
+    The tutorial prints `op_Ushr_r` for the reverse of `>>>`, which is a
+    typo -- every other reverse form is the name with `_r` appended -- so
+    both spellings are listed rather than guessed between.
+    """
+    documented = set(
+        "opNeg opCom opPreInc opPreDec opPostInc opPostDec "
+        "opAdd opAdd_r opSub opSub_r opMul opMul_r opDiv opDiv_r "
+        "opMod opMod_r opAnd opAnd_r opOr opOr_r opXor opXor_r "
+        "opShl opShl_r opShr opShr_r opUshr opUshr_r "
+        "opAssign opAddAssign opSubAssign opMulAssign opDivAssign "
+        "opModAssign opAndAssign opOrAssign opXorAssign opShlAssign "
+        "opShrAssign opUshrAssign opIndex opEquals opCmp".split())
+    assert len(documented) == 43
+    missing = documented - set(bgt_libcheck.OPERATOR_METHODS)
+    assert not missing, "not treated as syntax: %s" % sorted(missing)
+    # Nothing beyond the documented list and the typo it prints.
+    extra = set(bgt_libcheck.OPERATOR_METHODS) - documented
+    assert extra == {"op_Ushr_r"}, sorted(extra)
+    # ...and they really are dropped from a call sequence.
+    assert bgt_libcheck.calls("a.opSub(b); a.opShlAssign(c); go();") == ["go"]
+
+
 def test_libcheck_does_not_invent_a_call_from_a_subscript():
     """A subscript that merely precedes a paren names no callee.
 
