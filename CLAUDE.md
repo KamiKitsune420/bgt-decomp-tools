@@ -179,6 +179,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 ```bash
 bgt recover game.exe -o recovered/ --compile
 bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
+bgt recover game.exe -o recovered/ --no-game-files  # ...without the game's other data
 bgt compile recovered/game.bgt            # just the compiler, on any script
 bgt oracle                                # does a recovery still COMPUTE the same?
 bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
@@ -509,7 +510,7 @@ both engines' own `asBCInfo[]`, read rather than assumed -- and the
 registered string factory pops both. Whichever name that factory has.
 
 BGT 1.3 calls it `_string_factory_`, and so do Paladin, Super Egg Hunt,
-Psycho Strike and Crazy Party. **Manamon 1's 2017 fork calls it `$str`**,
+Psycho Strike and Crazy Party. **Manamon 1's fork calls it `$str`**,
 and nothing else in the corpus does -- which is checkable in one line, since
 the name is a literal in the module:
 
@@ -2145,7 +2146,8 @@ both report `compiled cleanly`, and the executables are what
 The other three rows stand as measured at their commit: Psycho Strike's
 34 are the installed engine's absences, Crazy Party's 14 are its
 residual gotos, and Manamon 1 cannot be asked at all because the only
-engine here is BGT 1.3 and that title is a 2017 fork. The residual goto
+engine here is BGT 1.3 and that title was built by VGStorm's own fork of
+BGT. The residual goto
 count is the proxy for those, and `bgt audit`, `bgt signatures` and
 `bgt apicheck` are the checks that cost nothing.
 
@@ -2172,6 +2174,14 @@ was corrected, to 90,848 when those two bodies came back and to 90,852 when a
 slot's width evidence stopped being first-come-first-served; the five
 `__nvgt_global_init_N` callees this file used to list as declared nowhere
 were a defect in the checker: see below.
+
+**Its data extracts now**, which is a separate claim from its source
+compiling and is the half that was broken: 2,007 of its 2,007 pack entries
+come out decrypted under a key the module computes rather than stores (see
+**A key that is a DIGEST**), and 5 of the game's own data files come with
+them, `data/tamerdata.dat` among them -- the one no string constant names.
+Measured at the current code: 83,371 lines, 0 residual gotos, a verified
+split and 26,484 calls read back.
 
 Its compiler column is empty on purpose: the only engine installed here is
 BGT 1.3, which is not the fork that built it. See **The string factory has
@@ -2748,6 +2758,17 @@ Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
 
+**Dating the FORK by the build in hand gets it backwards**, and this file
+used to call Manamon 1's engine "a 2017 fork". The copy installed here is
+**Manamon 1.1** -- the last entry in its own `changelog.txt`, with data files
+dated June 2017 and a runtime whose PE timestamp is 2017-03-15 -- while the
+game released in 2016, so that date is a *patch's*. And the fork is older than
+either: Psycho Strike already registers 453 names in **April 2015**. So the
+engine is VGStorm's own fork of BGT throughout, and a build date says when
+that copy was compiled and nothing about when the fork began. The practical
+consequence is unchanged and does not depend on the date: no stock `bgt.exe`
+of any version can parse this title's source.
+
 **The fork has three points now, and Manamon 1 is the middle one.** 453
 registrations in 2015, 469 in 2017, 509 in 2019 -- and **37 of Manamon 1's
 38 additions over stock 1.3 are also in Manamon 2**, so it is one
@@ -2804,6 +2825,43 @@ and handed a DLL it says "Expected identifier". So the question is how
 So it is a **BGT built to use that DLL**, which is the second of the two
 possibilities and not the first. Manamon 2 has it too, so it came with the
 fork rather than with Psycho Strike.
+
+#### ...and a registration is not a USE, which is a mistake worth not making
+
+This file says "Its `elias` binding is already present in 2017", about
+Manamon 1, and that is a statement about the *engine*. Asked of the **module**,
+the answer is the opposite and it is worth having explicitly:
+
+| | |
+|---|---|
+| the runtime registers `elias` and its methods | **yes** -- 12 of them |
+| the module uses the type | **no** -- absent from `used_types`, and `elias` occurs **0 times** in the module's bytes |
+| `elias.dll` ships beside the game | **no** -- only the two screen-reader clients |
+
+It could not use it either way: the DLL is `LoadLibrary`'d at run time, so a
+game that ships without it has no elias at all. The three `stinger` hits in
+that module are monster descriptions -- *"streaks of red and yellow circling
+its stinger"*.
+
+So VGStorm's fork is **one shared engine build** carrying everything its
+author had accumulated, whether a given title touches it or not. Psycho Strike
+is the title that uses elias; Manamon 1 inherits the binding and ignores it.
+Answering a question about a module with a fact about the engine is the same
+error as `string_compress` being registered and undocumented, pointing the
+other way -- and this file has the general form of it already: **a name a
+check wrongly holds is a gap it will never report.**
+
+**What elias IS, which settles how far reverse engineering it could go.**
+ELIAS is commercial adaptive-music middleware by Elias Software -- an
+authoring tool that exports XML and a runtime that ships in the game, with the
+hierarchy Project, Theme, Track, Level, Variation, Segment. So `elias.dll` is
+a licensed third-party product rather than anything in this corpus's
+authorship, and the job splits three ways: the *binding* is already read (the
+23 `elias_theme_*` C names the fork imports and the 15 script methods it
+registers, both out of any game's own runtime); the *theme data* a game ships
+is that game's content and reading it is ordinary asset recovery; and the
+*engine* is Elias Software's, so a port should load the DLL the game already
+ships rather than transcribe it.
 
 #### What that is worth to the gap checks
 
@@ -3334,6 +3392,166 @@ A pack key is confirmed by one AES block against the tag each entry stores, so
 none of this is guesswork: `tag == AES-ECB(key, 16 zero bytes)` cannot be
 satisfied by a wrong key. `bgt_pack.survey` returns the tags themselves now,
 not only how many, because that is all a search needs.
+
+### A key that is a DIGEST, and the caller read mechanically
+
+The harvesters above reach a password that is *stored* -- as a literal, as a
+run of literals, or as a blob plus the literal that decrypts it. **Manamon 1's
+is none of those: it is a hash.**
+
+```
+set_sound_decryption_key(get("\x00\x00able to\x00\x00learn\x00...irgjeoijeiorjgiojriorjegiore\x00\x00"), false);
+
+string get(string arg0) {
+    s = string_base64_decode(arg0);
+    for (i = 0; i < 218; i++) {
+        s = string_hash(s, 2, true);
+        if (i > 100 && i % 84 == 0) s = string_reverse(s);
+        ...keep the iteration whose 64 bytes hold the most NUL bytes...
+    }
+}
+```
+
+So no literal in that module is the password and no composition of literals
+can be, which is why `bgt recover --extract-data` answered *"holds 1,829
+encrypted entries and its key was not recovered"* on a title whose key was
+fully determined by the file in front of it. The same negative result this
+file records for Super Egg Hunt, one level deeper -- and the same lesson:
+**a search over candidates that cannot contain the answer is the most
+convincing kind of wrong.**
+
+Two harvesters close it, and neither is a sweep.
+
+**`callsite` reads the caller**, which is what this file has advised doing by
+hand since the section above was written. The argument list at each
+`set_sound_decryption_key` is bracket-matched out of the recovered text, its
+literals are taken, and every script function it names contributes the
+literals in its body. Literals come back through `bgt_audit.unescape`, written
+from the engine's lexer rules, because a seed holds NUL bytes and the text
+spells those `\xNN`. On Manamon 1 that is **2 seeds** where the module has
+82,169 literals.
+
+**`hashchain` walks the chain and offers every step.** The point is what it
+does *not* do: the game's selection rule -- most NUL bytes, of 218 iterations,
+with a reversal at every 84th past 100 -- is not modelled at all. Whichever
+digest the game keeps is somewhere in the chain, and checking one costs
+**one AES block** against the tag the pack stores, so the cheap thing is to
+offer them all and let the pack say which. Manamon 1's is iteration 111, and
+`bgt_kdf.aes_key` of it satisfies `285d062b...` exactly.
+
+Four chains per seed, because that is the engine's whole hashing surface:
+`string_hash(data, algorithm, binary)`, and the help file lists exactly two
+algorithms -- **1 SHA256, 2 SHA512** -- each with a binary or a hex result,
+and a chain over the hex form is a different chain. Each step offers the
+digest, what the chain carries forward, and both reversed, since
+`string_reverse` is in the same family. 2 seeds, 12,289 candidates, under
+three seconds.
+
+**What it will not reach**, stated because the next title will test it: a
+reversal -- or any other step -- that falls *before* the iteration the game
+keeps, because that forks the chain. Manamon 1's first reversal is iteration
+168 and its key is 111, so the plain chain passes through it. A title where
+it does not is the case for reading the function, and the recovered source is
+where that is readable.
+
+**And the chain is never seeded from the whole module.** 82,169 literals times
+four chains times 512 steps is 168 million candidates spent to avoid reading
+one function, so without the recovered text both harvesters yield nothing and
+say so in the counts. The seeds come from the call site or they do not come.
+
+### A path the script BUILDS is in no string constant
+
+`data_packs` finds what the script opens, by name, and a name is as far as
+that can go. **Manamon 1 reads its trade data from `data/tamerdata.dat`, and
+the module holds `"tamerdata.dat"` and `"data/"` as two separate literals.**
+The path it opens is never a string in the file, so no search for one can
+find it, and `bgt recover` brought the 314 MB pack and left a 4.4 MB file
+behind -- a recovered game that loads, speaks, and has no tamers in it.
+
+So the question is not what the module names. It is **what the game shipped**,
+and the game's own folder is the only record of that. `game_files` brings
+everything beside the executable, minus four kinds, and each exclusion is
+reported rather than applied quietly:
+
+| not brought | why |
+|---|---|
+| the executable | it is the input |
+| `unins000.exe`, `unins000.dat` | the installer's bookkeeping, not game data |
+| anything already brought | the packs, the plugin and screen-reader DLLs -- so a 314 MB pack is not copied twice and `--no-data` is not undone by the back door |
+| any other `.exe` or `.msi` | a program is not data, and a recovered project holding somebody else's executable invites running the wrong thing. **Named in the notes**, never dropped silently |
+
+The output folder is skipped when it sits inside the game folder, which is an
+ordinary thing to ask for and would otherwise copy the project into itself.
+`--no-game-files` turns the whole thing off.
+
+It is `bgt recover`'s default, for the reason the pack copy is: the engine
+opens `data/tamerdata.dat` by that relative path, so the file has to be at
+that relative path beside the script, and nothing in any report would ever
+have said otherwise.
+
+#### A containment guard that failed CLOSED, and reported success
+
+Found while measuring the above, and it is the worst shape in this file:
+**the check said no and the run said it had finished.**
+
+`_inside` decides where a pack entry and a game file may be written -- a
+string constant out of a module can name anything, so this is the guard that
+keeps an extraction inside its own folder. It compared `commonpath`'s answer
+against the caller's own string, and `commonpath` normalises both the
+separator and the case. So
+
+```bash
+bgt recover game.exe -o C:/somewhere --extract-data
+```
+
+-- a path with forward slashes, which is how half the world writes one on
+Windows -- put **every entry of every pack outside the directory it was about
+to be written to.** Super Egg Hunt reported `puppiesandpandas` recovered,
+seven packs copied, and `extracted 0 entries` seven times, with no error and
+exit 0. Case is the same trap one step on: `c:\users` against `C:\Users`.
+
+Both sides are normalised now, and the fix is worth the four lines twice
+over, because the symptom is indistinguishable from a key that was not found:
+**344 of 344** of that title's entries extract again, every one valid Ogg
+Vorbis, which is the figure this file already recorded and had no way to
+notice losing.
+
+#### An entry can be plaintext in the pack and still be encrypted
+
+Manamon 1 extracts 2,007 of 2,007 entries, and only **1,829** of them are
+audio. The other 178 are every one of its `data/rooms/*.dat` map files, each a
+multiple of 16 bytes and none with a recognisable header -- because the pack
+stored them *unencrypted* and the **game** encrypts their contents itself with
+`string_encrypt`, reading them back through `string_decrypt`.
+
+So there are two encryption layers and they are independent: `SWCR` per pack
+entry, with the key `set_sound_decryption_key` installs, and `string_encrypt`
+per *file*, with a key the script passes at each call site. An extraction that
+honours the first can still write 178 opaque blobs, and both the pack and the
+extraction are right about every byte.
+
+The second key is recoverable the same way the first is, and more cheaply:
+`string_decrypt` is self-checking -- BGT wraps a plaintext as
+`printf<len>\0<data>` -- so a candidate is confirmed or rejected outright with
+nothing to recognise by eye. Manamon 1's is one of the NUL-joined runs its own
+source passes to `string_decrypt`, which the `runs` harvester already yields,
+and it opens **178 of 178**. What comes out is base64-keyed dictionary text --
+`MjlfMjM=` is `29_23`, a tile coordinate -- which is the same serialisation
+shape as that title's `tamerdata.dat`.
+
+Recorded, not done: writing the decrypted form as well as the stored bytes is
+a second extraction layer with its own choices -- what to name it, and the
+fact that the stored bytes are what the game reads and must not be replaced.
+
+#### Extraction reads one entry at a time
+
+`parse(load_data=True)` keeps every payload in memory at once, which is the
+whole pack -- 314 MB for Manamon 1, more for Crazy Party -- so extracting one
+meant holding all of it to write it out piece by piece. An entry records its
+own offset, so `Entry.load(handle)` reads them one at a time and the memory is
+bounded by the largest single sound. A short read raises rather than returning
+what was there, because half a sound written to disk is a file that looks
+extracted.
 
 **Extracted assets are not what the script opens.** It still calls
 `set_sound_storage("data/bgm.dat")`, so `--extract-data` gives a project that
@@ -3990,7 +4208,7 @@ with string literals skipped, because a comma inside `"a, b"` is not a
 separator either.
 
 **And Manamon 1 does not have the bug at all**, which is worth knowing
-before assuming a sixth title does. Its 2017 fork registers the list factory
+before assuming a sixth title does. Its fork registers the list factory
 as the behaviour `$list`, the way the newer engine does, so its 13 lists and
 101 elements were already being recovered -- its whole project is
 **byte-identical** before and after. The factory spelling tracks the engine

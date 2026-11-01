@@ -93,9 +93,50 @@ class Entry:
         out = AES.new(key, AES.MODE_ECB).decrypt(self.ciphertext)
         return out[:self.plain_size]
 
+    def load(self, source: Union[str, Any]) -> "Entry":
+        """Fill this entry's payload from the pack, and return self.
+
+        `parse(load_data=True)` keeps every payload in memory at once, which is
+        the whole pack: Manamon 1's is 314 MB and Crazy Party's is larger, so
+        extracting one meant holding all of it. An entry records its own
+        offset, so reading them one at a time costs nothing and bounds the
+        memory at the largest single entry.
+
+        `source` is a path or an already-open file, because extraction wants
+        one handle for two thousand entries and a caller with a path wants not
+        to care.
+        """
+        self._data = payload(source, self)
+        return self
+
+    def unload(self) -> None:
+        """Drop the payload again, once it has been written out."""
+        self._data = None
+
     def __repr__(self) -> str:
         return "<Entry %r %d B%s>" % (self.name, self.size,
                                       " SWCR" if self.encrypted else "")
+
+
+def payload(source: Union[str, Any], entry: "Entry") -> bytes:
+    """One entry's stored bytes, read at the offset it recorded.
+
+    A short read raises rather than returning what was there: the entry count
+    in the header is what the engine trusts, so a payload that is not all
+    present means the file is not the pack it claims to be, and half a sound
+    written to disk is worse than none.
+    """
+    if isinstance(source, str):
+        with open(source, "rb") as fh:
+            fh.seek(entry.offset)
+            data = fh.read(entry.size)
+    else:
+        source.seek(entry.offset)
+        data = source.read(entry.size)
+    if len(data) != entry.size:
+        raise PackError("%s: short read (%d of %d bytes at %d)"
+                        % (entry.name, len(data), entry.size, entry.offset))
+    return data
 
 
 def parse(path: str, load_data: bool = True) -> Tuple[int, List["Entry"]]:

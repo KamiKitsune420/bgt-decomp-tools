@@ -115,6 +115,8 @@ class Project:
     problems: List[str] = field(default_factory=list)
     #: what was done with the asset packs -- an action, not a complaint
     data: List[str] = field(default_factory=list)
+    #: the game's OTHER data files, brought because no name can find them
+    game_data: List[str] = field(default_factory=list)
     #: which library files came from the engine rather than the module
     stock: List[str] = field(default_factory=list)
     #: the screen-reader client DLLs brought in, and why
@@ -162,6 +164,10 @@ class Project:
         if self.data:
             lines.append("%-22s %s" % ("asset packs", self.data[0]))
             for note in self.data[1:]:
+                lines.append("%-22s %s" % ("", note))
+        if self.game_data:
+            lines.append("%-22s %s" % ("game files", self.game_data[0]))
+            for note in self.game_data[1:]:
                 lines.append("%-22s %s" % ("", note))
         if self.speech:
             lines.append("%-22s %s" % ("screen reader", self.speech[0]))
@@ -441,15 +447,28 @@ def method_gap(exe_path: str, module, compiler: Optional[str] = None
 #: characters that cannot appear in a path the engine would open, so a
 #: string constant carrying one is not a file name.
 def _inside(folder: str, candidate: str) -> bool:
-    """Is `candidate` within `folder`?
+    r"""Is `candidate` within `folder`?
 
     `commonpath` raises `ValueError` for paths on different drives, and a
     string constant out of a game module can name anything -- a drive letter, a UNC
     share, a bare `/`. A different drive is simply outside, so the exception
     is the answer rather than a crash. Crazy Party's constants hit this.
+
+    **Both sides are normalised, and leaving that out failed CLOSED**, which is
+    the worst way for a guard to be wrong: it reports success having done
+    nothing. `commonpath` returns a path with one separator and one case, so
+    comparing its result against the caller's own string meant that
+    `bgt recover -o C:/somewhere --extract-data` -- a path with forward
+    slashes, which is how half the world writes one on Windows -- found every
+    entry of every pack to be outside the folder it was about to write it to,
+    and reported "extracted 0 entries" for seven packs whose key it had just
+    recovered. Case is the same trap one step further: `c:\users` against
+    `C:\Users`.
     """
+    def key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
     try:
-        return os.path.commonpath([folder, candidate]) == folder
+        return os.path.commonpath([key(folder), key(candidate)]) == key(folder)
     except ValueError:
         return False
 
@@ -496,8 +515,129 @@ def data_packs(exe_path: str, module, sample: int = 0) -> List[Dict[str, Any]]:
     return sorted(found, key=lambda d: d["name"])
 
 
+#: Installer bookkeeping. It sits in the game folder and is not game data.
+_INSTALLER = re.compile(r"^unins\d*\.(exe|dat|msg|lst)$", re.I)
+
+
+def game_files(exe_path: str, out_dir: str,
+               already: Iterable[str] = ()) -> Tuple[List[Tuple[str, int]],
+                                                     List[Tuple[str, str]]]:
+    """Every other file the game ships, as (relative path, size).
+
+    `data_packs` finds what the script opens with `pack_file`, by name, and
+    that is as far as a name can go: **a game builds some of its paths at run
+    time.** Manamon 1 reads its trade data from `data/tamerdata.dat` and the
+    module holds `"tamerdata.dat"` and `"data/"` as two separate literals, so
+    the path it opens is never a string in the file and no search for one can
+    find it. The game folder is the only place that knows.
+
+    So the rule is not "what does the module name" -- it is "what did the game
+    ship". Everything beside the executable comes, minus four kinds, and each
+    exclusion is reported rather than applied quietly:
+
+      * the executable itself, which is the input;
+      * installer bookkeeping (`unins000.exe` and friends);
+      * anything already brought -- the asset packs, the plugin and
+        screen-reader DLLs -- so a 314 MB pack is not copied twice, and
+        `--no-data` is not undone by the back door;
+      * any other `.exe` or `.msi`, because a program is not data and
+        a recovered project with somebody else's executable in it invites
+        running the wrong thing. Named in the notes, never dropped silently.
+
+    The output folder is skipped when it sits inside the game folder, which is
+    an ordinary thing to ask for and would otherwise copy the project into
+    itself.
+    """
+    folder = os.path.dirname(os.path.abspath(exe_path))
+    out = os.path.abspath(out_dir)
+    done = {name.replace("/", os.sep).lower() for name in already}
+    bring: List[Tuple[str, int]] = []
+    skipped: List[Tuple[str, str]] = []
+    for root, dirs, names in os.walk(folder):
+        if _inside(out, os.path.abspath(root)):
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs
+                   if not _inside(out, os.path.abspath(os.path.join(root, d)))]
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, folder)
+            if os.path.abspath(path) == os.path.abspath(exe_path):
+                continue
+            if _INSTALLER.match(name):
+                continue
+            if rel.lower() in done:
+                continue
+            if os.path.splitext(name)[1].lower() in (".exe", ".msi"):
+                skipped.append((rel, "a program, not data"))
+                continue
+            try:
+                bring.append((rel, os.path.getsize(path)))
+            except OSError as exc:
+                skipped.append((rel, str(exc)))
+    return bring, skipped
+
+
+#: Past this, the folder holding the executable is not a game's folder.
+#: Every BGT game in this corpus ships under 5 MB of loose data beside its
+#: packs -- Manamon 1's is 4.4 MB and Super Egg Hunt's is two shortcut files
+#: -- so the cap is two orders of magnitude of headroom, and what it is really
+#: for is the ordinary mistake of running this on an executable that sits in a
+#: shared folder. A game dropped in `Downloads` would otherwise have the whole
+#: of `Downloads` copied into the project, silently, because "what did the
+#: game ship" is answered by the folder and a shared folder is not an answer.
+MAX_GAME_DATA = 2_000_000_000
+
+
+def bring_game_files(exe_path: str, out_dir: str,
+                     already: Iterable[str] = (),
+                     limit: int = MAX_GAME_DATA) -> Tuple[List[str], List[str]]:
+    """Copy the game's own data files in, keeping their folders.
+
+    This is the difference between a project that compiles and a game that
+    runs, and it is the same argument the pack copy already makes one level
+    down: the engine opens `data/tamerdata.dat` by that relative path, so the
+    file has to be at that relative path beside the script.
+
+    Above `limit` bytes nothing is copied and the note says so, with the
+    figure and the folder: declining loudly beats copying somebody's whole
+    download folder into a project, and beats a silent cap, which would leave
+    a game missing exactly the files that happened to sort last.
+    """
+    bring, skipped = game_files(exe_path, out_dir, already)
+    folder = os.path.dirname(os.path.abspath(exe_path))
+    wanted = sum(size for _, size in bring)
+    if wanted > limit:
+        return [], ["%d file(s) totalling %.1f MB sit beside %s, which is "
+                    "more than a game's own data: nothing was copied, because "
+                    "that folder is probably shared with other things rather "
+                    "than being this game's. Move the game into a folder of "
+                    "its own and run again, or pass --no-game-files and copy "
+                    "what it needs by hand"
+                    % (len(bring), wanted / 1e6,
+                       os.path.basename(exe_path))]
+    copied: List[str] = []
+    notes: List[str] = []
+    total = 0
+    for rel, size in bring:
+        target = os.path.join(out_dir, rel)
+        os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
+        shutil.copy2(os.path.join(folder, rel), target)
+        copied.append(rel.replace(os.sep, "/"))
+        total += size
+    if copied:
+        notes.append("%d of the game's own data file(s) copied (%.1f MB): %s"
+                     % (len(copied), total / 1e6,
+                        ", ".join(copied[:6])
+                        + (", ..." if len(copied) > 6 else "")))
+    for rel, why in skipped:
+        notes.append("%s left behind -- %s" % (rel.replace(os.sep, "/"), why))
+    return copied, notes
+
+
 def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
-              progress=lambda message: None) -> Tuple[Dict[bytes, bytes], List[str]]:
+              progress=lambda message: None,
+              source: Optional[str] = None) -> Tuple[Dict[bytes, bytes], List[str]]:
     """Recover the AES key for every encrypted pack, from the module itself.
 
     Extraction without this answers "it needs its key" and stops, which is the
@@ -515,6 +655,17 @@ def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
     not a guess: `tag == AES-ECB(key, 16 zero bytes)` cannot be satisfied by
     the wrong key.
 
+    **Manamon 1 is the case the literal harvesters cannot reach**, and it is
+    why `source` is taken. Its key is a *digest*:
+    `set_sound_decryption_key(get("<119 bytes>"), false)`, where `get`
+    base64-decodes that literal and hashes it 218 times. No literal and no
+    composition of literals is the password, so `strings`, `runs`, `cores` and
+    `encrypted` searched 82,169 candidates and could not contain the answer --
+    the same shape of negative result this file records for Super Egg Hunt,
+    one level deeper. `callsite` reads the seed out of the recovered text and
+    `hashchain` walks the chain, which is 2 seeds and 12,289 candidates
+    instead, because the recovered source is the thing that names the input.
+
     Returns ({verification tag: key}, notes). Keyed by tag rather than by pack
     because one key usually opens all of them, and the tag is what says so.
     """
@@ -528,7 +679,9 @@ def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
     with open(module_path, "rb") as fh:
         data = fh.read()
     candidates, counts = bgt_crack.build_candidates(
-        data, ("strings", "runs", "cores", "encrypted"))
+        data, ("strings", "runs", "cores", "encrypted", "callsite",
+               "hashchain"),
+        text=source)
     progress("searching %d candidates for %d pack key(s)"
              % (len(candidates), len(wanted)))
 
@@ -547,9 +700,11 @@ def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
         if tag not in found:
             notes.append(
                 "no key found for %s among %d candidates (%s). The password "
-                "is computed rather than stored -- read the caller of "
-                "set_sound_decryption_key in the recovered source, which is "
-                "where Super Egg Hunt's `string_decrypt(h_key, ...)` was found"
+                "is computed, and not in a shape any of these reach -- read "
+                "the caller of set_sound_decryption_key in the recovered "
+                "source, which is where Super Egg Hunt's "
+                "`string_decrypt(h_key, ...)` and Manamon 1's 218-deep hash "
+                "chain were both found"
                 % (", ".join(sorted(names)), len(candidates),
                    ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
     return found, notes
@@ -601,25 +756,33 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
         where = os.path.join(out_dir, "assets",
                              os.path.splitext(os.path.basename(pack["name"]))[0])
         os.makedirs(where, exist_ok=True)
-        _, entries = bgt_pack.parse(pack["path"], load_data=True)
+        # Headers only, and each payload read as it is written. Loading a
+        # pack to extract it holds the game's whole audio in memory at once --
+        # 314 MB for Manamon 1 -- for no reason: every entry records its own
+        # offset, so one handle and one seek per entry bounds it at the
+        # largest single sound.
+        _, entries = bgt_pack.parse(pack["path"], load_data=False)
         written = 0
         refused = 0
-        for entry in entries:
-            name = os.path.normpath(entry.name.replace("\\", "/")).lstrip("./\\")
-            target = os.path.join(where, name)
-            if not _inside(where, os.path.abspath(target)):
-                continue                      # a pack cannot write outside itself
-            if entry.encrypted:
-                plain = entry.decrypt(keys.get(entry.tag, b"\x00" * 32))
+        with open(pack["path"], "rb") as handle:
+            for entry in entries:
+                name = os.path.normpath(entry.name.replace("\\", "/")).lstrip("./\\")
+                target = os.path.join(where, name)
+                if not _inside(where, os.path.abspath(target)):
+                    continue                  # a pack cannot write outside itself
+                entry.load(handle)
+                if entry.encrypted:
+                    plain = entry.decrypt(keys.get(entry.tag, b"\x00" * 32))
+                else:
+                    plain = entry.data or b""
+                entry.unload()
                 if plain is None:
                     refused += 1
                     continue
-            else:
-                plain = entry.data or b""
-            os.makedirs(os.path.dirname(target) or where, exist_ok=True)
-            with open(target, "wb") as fh:
-                fh.write(plain)
-            written += 1
+                os.makedirs(os.path.dirname(target) or where, exist_ok=True)
+                with open(target, "wb") as fh:
+                    fh.write(plain)
+                written += 1
         notes.append("%s extracted %d entries to assets/%s%s"
                      % (pack["name"], written, os.path.basename(where),
                         "" if not refused
@@ -1343,6 +1506,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             make_zip: bool = True, compile_check: bool = False,
             timeout: float = 600.0, with_data: bool = True,
             extract_data: bool = False, stock_includes: bool = True,
+            with_game_files: bool = True,
             progress=lambda message: None) -> Project:
     name = os.path.splitext(os.path.basename(exe_path))[0]
     os.makedirs(out_dir, exist_ok=True)
@@ -1387,8 +1551,11 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     keys: Dict[bytes, bytes] = {}
     if packs and extract_data:
         # Extraction needs the key, and the module is where it is. Copying
-        # does not: the script sets its own key at run time.
-        keys, key_notes = pack_keys(module_path, packs, progress)
+        # does not: the script sets its own key at run time. The decompiled
+        # text goes in as well, because the key may be computed and then the
+        # call site is the only thing that names its input -- Manamon 1's is
+        # a digest, so no literal in the module can be it.
+        keys, key_notes = pack_keys(module_path, packs, progress, source=source)
         data_notes += key_notes
     if packs and (with_data or extract_data):
         progress("bringing %d asset pack(s)" % len(packs))
@@ -1648,6 +1815,19 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     project.speech = list(speech_notes)
     project.files += [dll for dll in spoken if dll not in project.files]
 
+    # ...and the rest of what the game ships, which is the half no name can
+    # reach: a path the script builds at run time (`"data/" + "tamerdata.dat"`)
+    # is in no string constant, so the game folder is the only record of it.
+    # Last, so everything brought above is already excluded, and before the
+    # ZIP, which is where the plugin DLLs were once left out.
+    if with_game_files:
+        progress("bringing the game's own data files")
+        brought, game_notes = bring_game_files(
+            exe_path, out_dir,
+            list(project.files) + [p["name"] for p in packs])
+        project.game_data = list(game_notes)
+        project.files += [rel for rel in brought if rel not in project.files]
+
     if make_zip:
         archive = os.path.join(out_dir, name + "_project.zip")
         progress("writing %s" % os.path.basename(archive))
@@ -1731,6 +1911,8 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                    "order": order,
                    "plugins": plugins, "newer_engine": newer,
                    "script_loaded_dlls": loaded,
+                   "asset_packs": project.data,
+                   "game_files": project.game_data,
                    "stats": project.stats,
                    "problems": project.problems,
                    "origins": {s.name: s.origin for s in sections if s.origin},
@@ -1772,6 +1954,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="do not bring the asset packs, leaving a project that cannot play audio")
     ap.add_argument("--extract-data", action="store_true",
                     help="also extract the packs' entries, decrypting with the key recovered from the module")
+    ap.add_argument("--no-game-files", action="store_true",
+                    help="do not bring the game's other data files, leaving a "
+                         "project that cannot read anything it opens by a path "
+                         "it builds at run time")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
@@ -1781,6 +1967,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       timeout=args.timeout, with_data=not args.no_data,
                       extract_data=args.extract_data,
                       stock_includes=not args.no_stock_includes,
+                      with_game_files=not args.no_game_files,
                       progress=(lambda m: None) if args.quiet
                       else (lambda m: print("  %s" % m, flush=True)))
     print(project.summary())

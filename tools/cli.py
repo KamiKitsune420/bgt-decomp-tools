@@ -277,8 +277,22 @@ def cmd_repack(args: argparse.Namespace) -> int:
 
 
 def cmd_crack(args: argparse.Namespace) -> int:
-    forwarded = [args.pack, "--dict", args.dictionary,
-                 "--harvest", args.harvest, "--workers", str(args.workers)]
+    """Forward to `bgt_crack`, and re-state none of its defaults.
+
+    This parser used to carry its own `--harvest` default, and the two drifted:
+    `bgt_crack` learned the `encrypted` harvester -- the one that composes
+    `string_decrypt(h_key, "...")` and is the only thing that finds Super Egg
+    Hunt's key -- and this copy went on saying `strings,runs,cores`. So the
+    same command was weaker through `bgt` than through the module it calls,
+    which is this project's recurring failure wearing a CLI costume. An option
+    not given is not forwarded, and the module's default applies.
+    """
+    forwarded = [args.pack, "--dict", args.dictionary]
+    for flag, value in (("--harvest", args.harvest),
+                        ("--workers", args.workers),
+                        ("--source", args.source)):
+        if value is not None:
+            forwarded += [flag, str(value)]
     if args.quiet:
         forwarded.append("--quiet")
     for extra in args.extra or []:
@@ -685,8 +699,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("crack", help="search a module for a pack password")
     p.add_argument("pack")
     p.add_argument("--dict", dest="dictionary", required=True)
-    p.add_argument("--harvest", default="strings,runs,cores")
-    p.add_argument("--workers", type=int, default=1)
+    # No defaults here on purpose -- see cmd_crack. `bgt_crack` owns them.
+    p.add_argument("--harvest",
+                   help="which harvesters to run (default: %s)"
+                        % ", ".join(bgt_crack.HARVESTERS[:-1]))
+    p.add_argument("--workers", type=int)
+    p.add_argument("--source", metavar="FILE_OR_DIR",
+                   help="a recovered project whose text the callsite and "
+                        "hashchain harvesters read -- needed for a password "
+                        "that is computed rather than stored")
     p.add_argument("--extra", action="append")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_crack)

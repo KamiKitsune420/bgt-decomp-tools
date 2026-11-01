@@ -29,7 +29,7 @@ import tempfile
 
 try:                                   # after `pip install -e .`
     from bgtdecomp import (bgt_api, bgt_apicheck, bgt_asir, bgt_compile,
-                           bgt_pack, bgt_project)
+                           bgt_crack, bgt_kdf, bgt_pack, bgt_project)
     from bgtdecomp.nvgt import asreader, decompile
 except ImportError:                    # straight from a checkout
     TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
@@ -38,6 +38,8 @@ except ImportError:                    # straight from a checkout
     import asreader
     import bgt_api
     import bgt_apicheck
+    import bgt_crack
+    import bgt_kdf
     import bgt_asir
     import decompile
     import bgt_compile
@@ -2720,3 +2722,228 @@ def test_a_float_op_is_not_an_integer_one():
     """The set is about integer signedness; nothing else belongs in it."""
     assert bgt_asir._sign_agnostic_int_ops(
         {"ADDf", "ADDd", "CMPf", "CMPd"}) == frozenset()
+
+
+# --------------------------------------------------------------------------
+# a computed pack key, and the game's own data files
+# --------------------------------------------------------------------------
+
+#: Manamon 1's shape, reduced to what matters: the password is a DIGEST, so no
+#: literal in the module is it, and the literal that seeds it is an argument at
+#: the `set_sound_decryption_key` call site.
+_COMPUTED_KEY_SOURCE = '''
+void prepare_audio()
+{
+    set_sound_decryption_key(derive("\\x00\\x00c2VlZCBtYXRlcmlhbA\\x00"), false);
+    set_sound_storage("data.dat");
+}
+
+string derive(string arg0)
+{
+    string local_1 = string_base64_decode(arg0);
+    for (int i = 0; i < 40; i++) {
+        local_1 = string_hash(local_1, 2, true);
+    }
+    return local_1;
+}
+'''
+
+
+def _computed_password(rounds):
+    """What that script computes: base64-decode, then `rounds` SHA-512s."""
+    import base64
+    import hashlib
+    seed = base64.b64decode(b"c2VlZCBtYXRlcmlhbA" + b"==")
+    for _ in range(rounds):
+        seed = hashlib.sha512(seed).digest()
+    return seed
+
+
+def test_the_call_site_gives_the_seed_a_computed_key_is_built_from():
+    r"""The literals the password expression reaches, and nothing else.
+
+    A computed password cannot be harvested from the module -- it is a digest.
+    What CAN be read is its input, and the input is an argument at the call
+    site or a literal in the function that call names. Both come back here,
+    with `\xNN` decoded to the byte it stands for, because a seed holds NULs.
+    """
+    seeds = bgt_crack.harvest_call_site(_COMPUTED_KEY_SOURCE)
+    assert b"\x00\x00c2VlZCBtYXRlcmlhbA\x00" in seeds
+    # the call site's own argument, not the whole module
+    assert b"data.dat" not in seeds
+
+
+def test_the_chain_offers_every_iteration_so_no_selection_RULE_is_modelled():
+    """Whichever digest the game keeps, the chain has walked through it.
+
+    Manamon 1 keeps the iteration of 218 whose digest holds the most NUL
+    bytes. Reproducing that rule is unnecessary and would not generalise: a
+    candidate costs one AES block, so every step is offered and the pack's own
+    tag says which one was meant.
+    """
+    chain = bgt_crack.harvest_hashchain(
+        [b"\x00\x00c2VlZCBtYXRlcmlhbA\x00"], depth=64)
+    for rounds in (1, 17, 40, 64):
+        assert _computed_password(rounds) in chain, rounds
+    # ...and a digest past the depth is not claimed
+    assert _computed_password(65) not in chain
+
+
+def test_the_chain_walks_the_HEX_form_too():
+    """`string_hash(data, algorithm, binary)` -- the hex result is a different
+    chain, and the help file lists exactly two algorithms, so there are four."""
+    import hashlib
+    chain = set(bgt_crack.harvest_hashchain([b"seed material here"], depth=3))
+    for algorithm in (hashlib.sha256, hashlib.sha512):
+        binary = algorithm(b"seed material here").digest()
+        assert binary in chain
+        assert algorithm(binary.hex().encode()).digest() in chain
+
+
+def test_the_chain_is_not_walked_without_the_recovered_SOURCE():
+    """82,169 literals times four chains times 512 steps is 168 million
+    candidates to avoid reading one function, so the seeds come from the call
+    site or the harvester declines and says so in the counts."""
+    candidates, counts = bgt_crack.build_candidates(b"", ("callsite", "hashchain"))
+    assert candidates == []
+    assert counts == {"callsite": 0, "hashchain": 0}
+
+
+def test_pack_keys_recovers_a_key_that_is_a_DIGEST():
+    """The end to end of it, on a synthetic pack: the password is nowhere in
+    the module, and the key still comes back verified against the pack's tag."""
+    password = _computed_password(40)
+    key = bgt_kdf.aes_key(password)
+    raw = bgt_pack.build([("s.ogg", bgt_pack.encrypt_payload(b"OggS", key))])
+    with tempfile.TemporaryDirectory() as folder:
+        pack_path = os.path.join(folder, "data.dat")
+        with open(pack_path, "wb") as fh:
+            fh.write(raw)
+        module_path = os.path.join(folder, "m.bin")
+        with open(module_path, "wb") as fh:
+            fh.write(b"nothing here is the password")
+        packs = [dict(bgt_pack.survey(pack_path), name="data.dat")]
+        assert packs[0]["tags"]
+
+        # without the source: the literal harvesters cannot contain the answer
+        found, notes = bgt_project.pack_keys(module_path, packs)
+        assert found == {}
+        assert any("no key found" in n for n in notes)
+
+        # with it: read the caller, walk the chain
+        found, notes = bgt_project.pack_keys(module_path, packs,
+                                             source=_COMPUTED_KEY_SOURCE)
+        assert list(found.values()) == [key]
+        assert any("recovered from the module" in n for n in notes)
+
+
+def _fake_game(folder):
+    """A game folder: an executable, a pack, a nested data file, an installer."""
+    os.makedirs(os.path.join(folder, "data"))
+    for rel, body in (("game.exe", b"MZ stub"),
+                      ("data.dat", b"SFPv..."),
+                      ("data/tamerdata.dat", b"trade records"),
+                      ("readme.txt", b"hello"),
+                      ("unins000.exe", b"MZ uninstaller"),
+                      ("unins000.dat", b"bookkeeping"),
+                      ("helper.exe", b"MZ helper")):
+        with open(os.path.join(folder, rel.replace("/", os.sep)), "wb") as fh:
+            fh.write(body)
+    return os.path.join(folder, "game.exe")
+
+
+def test_a_path_guard_that_fails_CLOSED_reports_success_having_done_nothing():
+    r"""`_inside` decides where a pack entry and a game file may be written.
+
+    It compared `commonpath`'s answer against the caller's own string, and
+    `commonpath` normalises separators and case -- so an output folder written
+    with forward slashes, which is how `bgt recover -o C:/out` reads on
+    Windows, put every entry of every pack "outside" the directory it was
+    about to be written to. Seven packs, a key already recovered, and
+    "extracted 0 entries" seven times.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        for separator in ("/", os.sep):
+            root = folder.replace(os.sep, separator)
+            assert bgt_project._inside(root, os.path.join(folder, "a.ogg"))
+            assert bgt_project._inside(root, os.path.join(folder, "d", "a.ogg"))
+        # case, which is the same trap one step on
+        assert bgt_project._inside(folder.upper(),
+                                   os.path.join(folder, "a.ogg"))
+        # ...and it still refuses what is really outside
+        assert not bgt_project._inside(
+            os.path.join(folder, "in"), os.path.join(folder, "out", "a.ogg"))
+        assert not bgt_project._inside(
+            folder, os.path.join(folder, "..", "escape.ogg"))
+
+
+def test_the_game_files_rule_brings_what_no_NAME_could_find():
+    """`data/tamerdata.dat` is the case: Manamon 1 builds that path at run
+    time out of `"data/"` and `"tamerdata.dat"`, so it is in no string
+    constant and no search for one can reach it. The game folder is the record.
+    """
+    with tempfile.TemporaryDirectory() as folder, \
+            tempfile.TemporaryDirectory() as elsewhere:
+        exe = _fake_game(folder)
+        out = os.path.join(elsewhere, "out")
+        bring, skipped = bgt_project.game_files(exe, out, already=["data.dat"])
+        brought = {rel.replace(os.sep, "/") for rel, _ in bring}
+        assert "data/tamerdata.dat" in brought
+        assert "readme.txt" in brought
+        # the input, the installer's bookkeeping and an already-copied pack
+        assert "game.exe" not in brought
+        assert "unins000.exe" not in brought
+        assert "unins000.dat" not in brought
+        assert "data.dat" not in brought
+        # a program is not data -- and it is REPORTED, not dropped quietly
+        assert "helper.exe" not in brought
+        assert [rel for rel, _ in skipped] == ["helper.exe"]
+
+
+def test_an_output_folder_inside_the_game_is_not_copied_into_itself():
+    """Asking for the output beside the game is an ordinary thing to do."""
+    with tempfile.TemporaryDirectory() as folder:
+        exe = _fake_game(folder)
+        out = os.path.join(folder, "recovered")
+        os.makedirs(out)
+        with open(os.path.join(out, "game.bgt"), "wb") as fh:
+            fh.write(b"// recovered")
+        bring, _ = bgt_project.game_files(exe, out)
+        assert all("recovered" not in rel for rel, _ in bring)
+
+
+def test_a_folder_that_is_not_a_GAME_folder_is_declined_loudly():
+    """An executable in a shared folder is the ordinary mistake here.
+
+    "What did the game ship" is answered by the folder, and a download folder
+    is not an answer -- so above the cap nothing is copied and the note says
+    how much and why. A silent cap would be worse than either: the game would
+    be missing exactly the files that happened to sort last.
+    """
+    with tempfile.TemporaryDirectory() as folder, \
+            tempfile.TemporaryDirectory() as elsewhere:
+        exe = _fake_game(folder)
+        out = os.path.join(elsewhere, "out")
+        copied, notes = bgt_project.bring_game_files(exe, out, limit=4)
+        assert copied == []
+        assert any("probably shared" in n for n in notes)
+        # declining must not have created the folder it would have filled
+        assert not os.path.exists(out)
+        # ...and under the cap it still brings everything
+        copied, _ = bgt_project.bring_game_files(exe, out)
+        assert "data/tamerdata.dat" in copied
+
+
+def test_bringing_the_game_files_keeps_their_FOLDERS():
+    """The engine opens `data/tamerdata.dat` by that relative path, so the
+    file has to be at that relative path beside the script."""
+    with tempfile.TemporaryDirectory() as folder:
+        exe = _fake_game(folder)
+        out = os.path.join(folder, "out")
+        copied, notes = bgt_project.bring_game_files(exe, out,
+                                                     already=["data.dat"])
+        assert "data/tamerdata.dat" in copied
+        with open(os.path.join(out, "data", "tamerdata.dat"), "rb") as fh:
+            assert fh.read() == b"trade records"
+        assert any("data file(s) copied" in n for n in notes)
+        assert any("helper.exe" in n for n in notes)

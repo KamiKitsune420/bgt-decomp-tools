@@ -44,11 +44,26 @@ Several harvesters are provided because BGT passwords turn up in several shapes:
     `module_strings` cannot even represent `h_key`, because its plausibility
     test rejects every byte outside printable ASCII and a cipher blob is
     nothing else. 3,392 candidates, 0 hits, and the password was in the file.
+  * `callsite` -- the literals the password EXPRESSION reaches, read out of
+    the recovered source. This is the one that is not a sweep: a computed
+    password is computed from something, and the something is an argument at
+    the `set_sound_decryption_key` call site or a literal in the function it
+    calls. Manamon 1 is `set_sound_decryption_key(get("<119 bytes>"), false)`,
+    and that literal is the whole input to its key.
+  * `hashchain` -- an iterated `string_hash` over those seeds, yielding every
+    intermediate digest. The engine offers two algorithms and a binary or hex
+    result, so four chains are walked, and a candidate costs one AES block --
+    which is why the selection rule at the end of the game's own loop does not
+    have to be modelled. Manamon 1 keeps the iteration of 218 whose digest
+    holds the most NUL bytes; it is iteration 111, and a plain chain reaches it.
   * `printable` -- plain printable runs, the crude fallback.
 """
 
 import argparse
+import base64
+import hashlib
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -177,15 +192,218 @@ def harvest_encrypted(blobs: Sequence[bytes], keys: Sequence[bytes],
     return out
 
 
-HARVESTERS = ("strings", "runs", "cores", "encrypted", "printable")
+#: The engine function whose argument is the pack password. A game that
+#: computes its key computes it for this call.
+KEY_API = "set_sound_decryption_key"
+_IDENT = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
 
 
-def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], Dict[str, int]]:
-    """Harvest, de-duplicate, and report how many each source contributed."""
+def _arguments(text: str, start: int) -> str:
+    """The bracket-matched argument list of the call opening at `start`."""
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if not depth:
+                return text[start + 1:i]
+        i += 1
+    return ""
+
+
+def harvest_call_site(text: str, api: str = KEY_API,
+                      depth: int = 2) -> List[bytes]:
+    """The literals the password expression reaches, out of recovered source.
+
+    CLAUDE.md's advice for a computed password is to read the caller of
+    `set_sound_decryption_key` rather than sweep the module, and this is that
+    advice done mechanically. The argument list at each call site gives its own
+    literals; every script function it names gives the literals in its body,
+    `depth` levels deep. For Manamon 1 the literal is at the call site itself
+    and the function it names is `get`, so one level is enough and the whole
+    seed set is **2 strings** where the module holds 82,169 literals.
+
+    Literals are read back with `bgt_audit.unescape`, which is written from the
+    engine's lexer rules -- a password holds NUL bytes and bytes above 0x7F,
+    and both arrive in the text as `\\xNN`.
+    """
+    try:                                   # the heavier readers, only if asked
+        from . import bgt_audit, bgt_libcheck
+    except ImportError:
+        import bgt_audit
+        import bgt_libcheck
+    out: List[bytes] = []
+    seen: set = set()
+
+    def take(fragment: str, level: int) -> None:
+        for raw in bgt_libcheck._STRING.findall(fragment):
+            value = bgt_audit.unescape(raw)
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+        if level <= 0:
+            return
+        for name in {m.group(1) for m in _IDENT.finditer(fragment)}:
+            for body in bodies_by_name.get(name, ()):
+                take(body, level - 1)
+
+    # Keyed by the BARE name, because that is what a call site writes: a
+    # method and a global function of one name both qualify, and taking the
+    # literals of both is the cheap side of the mistake.
+    bodies_by_name: Dict[str, List[str]] = {}
+    for label, bodies in bgt_libcheck.source_functions(text).items():
+        for body in bodies:
+            bodies_by_name.setdefault(label.rsplit("::", 1)[-1], []).append(body)
+
+    stripped = bgt_libcheck.strip_comments(text)
+    for m in re.finditer(r"(?<![\w.])%s\s*\(" % re.escape(api), stripped):
+        take(_arguments(stripped, m.end() - 1), depth)
+    return out
+
+
+#: How far to walk a chain. Manamon 1's key is iteration 111 of 218; a
+#: candidate costs one AES block, so the bound is generosity rather than a
+#: tuned constant -- and it only ever multiplies the seeds the call site named.
+CHAIN_DEPTH = 512
+
+
+def harvest_hashchain(seeds: Sequence[bytes],
+                      depth: int = CHAIN_DEPTH) -> List[bytes]:
+    """Every intermediate of an iterated `string_hash` over each seed.
+
+    The shape this reaches is the one that defeats every harvester above:
+    a password that is a *digest*, so no literal and no composition of literals
+    can be it. Manamon 1's is
+
+        string get(string arg0) {
+            s = string_base64_decode(arg0);
+            for (i = 0; i < 218; i++) {
+                s = string_hash(s, 2, true);
+                if (i > 100 && i % 84 == 0) s = string_reverse(s);
+                ...keep the one whose 64 bytes hold the most NULs...
+            }
+        }
+
+    **The selection rule does not have to be modelled**, which is the whole
+    reason this is affordable: whichever iteration the game picks, that digest
+    is somewhere in the chain, and checking one costs a single AES block
+    against the tag the pack stores. So the chain is walked and every step is
+    offered.
+
+    Four chains per seed, because `string_hash(data, algorithm, binary)` is
+    the engine's whole hashing surface and the help file lists exactly two
+    algorithms -- 1 SHA256, 2 SHA512 -- each with a binary or a hex result,
+    and a chain over the hex form is a different chain. Each seed is also
+    tried base64-decoded, since that is how Manamon 1 reads its literal, and
+    each digest is offered reversed as well, since `string_reverse` is in the
+    same family.
+
+    What it does **not** reach: a reversal (or any other step) that falls
+    *before* the iteration the game keeps, because that forks the chain. For
+    Manamon 1 the first reversal is iteration 168 and the key is 111, so the
+    plain chain reaches it. A title where it does not is the case for reading
+    the function, and the recovered source is where it is readable.
+    """
+    out: List[bytes] = []
+    seen: set = set()
+    starts: List[bytes] = []
+    for seed in seeds:
+        if not seed:
+            continue
+        for value in (seed, _base64(seed)):
+            if value and value not in seen:
+                seen.add(value)
+                starts.append(value)
+    out.extend(starts)
+    for seed in starts:
+        for algorithm in (hashlib.sha256, hashlib.sha512):
+            for binary in (True, False):
+                current = seed
+                for _ in range(depth):
+                    digest = algorithm(current).digest()
+                    current = digest if binary else digest.hex().encode()
+                    # The digest AND what the chain carries forward: in the hex
+                    # form they differ, and either can be the password -- the
+                    # loop hashes the hex string while a last `binary` round
+                    # would hand on the raw digest.
+                    for value in (digest, current, digest[::-1],
+                                  current[::-1]):
+                        if value not in seen:
+                            seen.add(value)
+                            out.append(value)
+    return out
+
+
+#: base64's own alphabet, spelled out. Padding is recomputed rather than
+#: kept, since a literal that is a slice of a larger string has none.
+_B64_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+
+def _base64(value: bytes) -> Optional[bytes]:
+    """`string_base64_decode(value)`, or None when nothing decodes.
+
+    Permissive about what is not in the alphabet, because the literal Manamon 1
+    decodes holds NUL bytes and spaces and the engine decodes it anyway -- the
+    key that comes out is the one the pack's own tag verifies, which is the
+    only check that matters here.
+    """
+    alphabet = bytes(c for c in value if c in _B64_ALPHABET)
+    if len(alphabet) < 16:
+        return None
+    try:
+        out = base64.b64decode(alphabet + b"=" * (-len(alphabet) % 4))
+    except Exception:
+        return None
+    return out or None
+
+
+def read_source(where: str) -> str:
+    """The recovered source at `where` -- one .bgt file, or a project tree.
+
+    Concatenated rather than parsed: `callsite` wants the text the call site
+    is in and `source_functions` is a brace scanner, so a project read as one
+    string answers both. Undecodable bytes are replaced rather than refused --
+    a literal above 0x7F is written `\\xNN`, so nothing a seed needs is lost,
+    and a file this cannot read is still worth the rest of the tree.
+    """
+    if os.path.isfile(where):
+        paths = [where]
+    else:
+        paths = [os.path.join(root, name)
+                 for root, _, names in os.walk(where)
+                 for name in sorted(names) if name.endswith(".bgt")]
+    out = []
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            out.append(fh.read())
+    return "\n".join(out)
+
+
+HARVESTERS = ("strings", "runs", "cores", "encrypted", "callsite",
+              "hashchain", "printable")
+
+
+def build_candidates(module: bytes, which: Sequence[str],
+                     text: Optional[str] = None) -> Tuple[List[bytes], Dict[str, int]]:
+    """Harvest, de-duplicate, and report how many each source contributed.
+
+    `text` is the recovered source, which the `callsite` harvester needs and
+    which `hashchain` is seeded from. Without it both yield nothing and say so
+    in the counts, because walking a chain from all 82,169 of a module's
+    literals is 84 million candidates to avoid reading one function.
+    """
     seen = set()
     out: List[bytes] = []
     counts: Dict[str, int] = {}
     literals: List[bytes] = []
+    site: List[bytes] = []
 
     for name in which:
         if name == "strings":
@@ -197,6 +415,14 @@ def build_candidates(module: bytes, which: Sequence[str]) -> Tuple[List[bytes], 
         elif name == "encrypted":
             produced = harvest_encrypted(harvest_blobs(module),
                                          literals or harvest_strings(module))
+        elif name == "callsite":
+            produced = site = harvest_call_site(text) if text else []
+        elif name == "hashchain":
+            # Seeded from the call site, never from the whole module: the
+            # chain multiplies its seeds by two thousand.
+            if not site and text:
+                site = harvest_call_site(text)
+            produced = harvest_hashchain(site) if site else []
         elif name == "printable":
             produced = harvest_printable(module)
         else:
@@ -300,7 +526,11 @@ def main() -> int:
     ap.add_argument("pack", help="the encrypted SFPv1 pack (e.g. sounds.dat)")
     ap.add_argument("--dict", dest="dictionary", required=True,
                     help="recovered module bytecode to harvest candidates from")
-    ap.add_argument("--harvest", default="strings,runs,cores,encrypted",
+    ap.add_argument("--source", metavar="FILE_OR_DIR",
+                    help="a recovered project (or one .bgt) whose text the "
+                         "callsite and hashchain harvesters read")
+    ap.add_argument("--harvest",
+                    default="strings,runs,cores,encrypted,callsite,hashchain",
                     help="comma-separated: %s (default: strings,runs,cores)"
                          % ", ".join(HARVESTERS))
     ap.add_argument("--workers", type=int, default=1,
@@ -328,7 +558,12 @@ def main() -> int:
     with open(args.dictionary, "rb") as fh:
         module = fh.read()
     which = [w.strip() for w in args.harvest.split(",") if w.strip()]
-    candidates, counts = build_candidates(module, which)
+    # The recovered source, for the two harvesters that read the caller
+    # rather than sweeping the module. Without it they yield nothing and the
+    # counts say so, which is why it is worth passing: a computed password is
+    # computed from something the text names.
+    text = read_source(args.source) if args.source else None
+    candidates, counts = build_candidates(module, which, text=text)
     for extra in args.extra:
         candidates.append(extra.encode("utf-8"))
 

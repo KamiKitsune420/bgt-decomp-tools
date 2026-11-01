@@ -19,6 +19,7 @@ import os
 import shutil
 import struct
 import sys
+import inspect
 import tempfile
 
 try:                                   # after `pip install -e .`
@@ -2743,3 +2744,103 @@ def test_a_zero_parameter_funcdef_may_still_write_both_lists():
         assert "type-info" in str(exc), exc
     else:
         raise AssertionError("the guarded reading should not reach the end")
+
+
+def test_the_unified_CLI_restates_no_crack_DEFAULT():
+    """Two parsers for one command is two places to keep in step, and they
+    had already drifted: `bgt_crack` gained the `encrypted` harvester -- the
+    only one that finds Super Egg Hunt's key -- while `cli.py` went on
+    defaulting to `strings,runs,cores`, so the same command was weaker
+    through `bgt` than through the module it calls.
+    """
+    body = inspect.getsource(cli.build_parser) if hasattr(cli, "build_parser") \
+        else inspect.getsource(cli)
+    index = body.index('sub.add_parser("crack"')
+    block = body[index:index + 900]
+    assert "strings,runs,cores" not in block
+    forwarder = inspect.getsource(cli.cmd_crack)
+    assert "args.source" in forwarder
+    # ...and every option this parser declares is one bgt_crack accepts
+    for flag in ("--harvest", "--workers", "--source", "--extra", "--quiet"):
+        assert flag in inspect.getsource(bgt_crack.main), flag
+
+
+def test_the_crack_cli_actually_READS_its_source_option():
+    """An option nobody reads is an option that does nothing, quietly.
+
+    `--source` was added for the two harvesters that need the recovered text
+    and then not passed to `build_candidates`, so it parsed, printed in
+    `--help`, and changed no behaviour -- the same shape as a regex whose word
+    boundary was eaten. Both halves are pinned: the flag exists, and the value
+    reaches the harvest.
+    """
+    body = inspect.getsource(bgt_crack.main)
+    assert "--source" in body
+    assert "args.source" in body
+    assert "text=text" in body
+    signature = inspect.signature(bgt_crack.build_candidates)
+    assert "text" in signature.parameters
+
+
+def test_reading_a_recovered_project_as_source_finds_its_call_site():
+    with tempfile.TemporaryDirectory() as folder:
+        os.makedirs(os.path.join(folder, "includes"))
+        with open(os.path.join(folder, "includes", "part_1.bgt"), "w") as fh:
+            fh.write('void f() { set_sound_decryption_key(derive("SEED"),'
+                     ' false); }\n')
+        with open(os.path.join(folder, "notes.txt"), "w") as fh:
+            fh.write("set_sound_decryption_key(\"decoy\")")
+        text = bgt_crack.read_source(folder)
+        assert b"SEED" in bgt_crack.harvest_call_site(text)
+        # a .txt beside the project is not source
+        assert b"decoy" not in bgt_crack.harvest_call_site(text)
+
+
+def test_a_pack_entry_can_be_read_one_at_a_time():
+    """Extraction must not hold the whole pack in memory.
+
+    `parse(load_data=True)` keeps every payload at once, which for Manamon 1
+    is 314 MB. An entry records its own offset, so the streaming read has to
+    agree with the loaded one byte for byte -- including the SWCR header, since
+    that is what `encrypted`, `tag` and `decrypt` all read.
+    """
+    key = hashlib.sha256(b"k").digest()
+    raw = bgt_pack.build([("a.wav", b"12345"),
+                          ("dir/b.ogg", bgt_pack.encrypt_payload(b"OggS", key)),
+                          ("c.txt", b"")])
+    path = _write_temp(raw)
+    try:
+        _, loaded = bgt_pack.parse(path, load_data=True)
+        _, lazy = bgt_pack.parse(path, load_data=False)
+        assert [e.name for e in lazy] == [e.name for e in loaded]
+        with open(path, "rb") as handle:
+            for want, entry in zip(loaded, lazy):
+                assert entry.data is None
+                entry.load(handle)
+                assert entry.data == want.data
+                assert entry.encrypted == want.encrypted
+                assert entry.tag == want.tag
+                entry.unload()
+                assert entry.data is None
+        # and the decryption still verifies through the streamed payload
+        lazy[1].load(path)
+        assert lazy[1].decrypt(key) == b"OggS"
+    finally:
+        os.unlink(path)
+
+
+def test_a_short_payload_raises_rather_than_writing_half_a_sound():
+    """A truncated pack is not the pack it claims to be. Returning what was
+    there would write a partial file that looks extracted."""
+    raw = bgt_pack.build([("a.wav", b"123456789")])
+    path = _write_temp(raw[:-4])
+    try:
+        _, entries = bgt_pack.parse(path, load_data=False)
+        try:
+            entries[0].load(path)
+        except bgt_pack.PackError as exc:
+            assert "short read" in str(exc)
+        else:
+            raise AssertionError("a short payload was accepted")
+    finally:
+        os.unlink(path)

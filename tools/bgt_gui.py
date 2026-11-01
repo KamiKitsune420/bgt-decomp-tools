@@ -128,10 +128,21 @@ class Frame(wx.Frame):
         self.with_data.SetValue(True)
         self.extract_data = wx.CheckBox(
             box, label="Also extract the packs' entries, decrypted, for reading")
+        # On by default, because "give me the game's code and its data" is the
+        # whole request this window exists for, and the key is recovered from
+        # the module without being asked for.
+        self.extract_data.SetValue(True)
+        self.game_files = wx.CheckBox(
+            box, label="Copy the game's other data files (anything it opens by "
+                       "a path it builds at run time)")
+        # On by default for the same reason the packs are: Manamon 1 reads
+        # `data/tamerdata.dat`, that path is in no string constant, and a copy
+        # without it loses the trade data with nothing said.
+        self.game_files.SetValue(True)
         self.make_zip = wx.CheckBox(box, label="Also write a .zip of the project")
         self.make_zip.SetValue(True)
         for control in (self.compile_check, self.with_data,
-                        self.extract_data, self.make_zip):
+                        self.extract_data, self.game_files, self.make_zip):
             options.Add(control, 0, wx.ALL, 4)
         # Copying and extracting are **not** alternatives, and forcing a
         # choice was a mistake: they answer different questions -- "can this
@@ -169,6 +180,9 @@ class Frame(wx.Frame):
         # reports and the user never sees the point of.
         wx.CallAfter(self.exe.SetFocus)
         self.say("Ready. Choose a game executable and an output folder.")
+        self.say("Recover gives you the source, the asset packs the script "
+                 "opens, those packs extracted, and the game's own data "
+                 "files -- a folder that runs, not just one that compiles.")
         self.say("Everything here runs the same code as the `bgt` command "
                  "line, so any result can be reproduced with one command.")
 
@@ -191,7 +205,7 @@ class Frame(wx.Frame):
         for control in (self.identify_button, self.recover_button,
                         self.compile_button, self.exe, self.out,
                         self.compile_check, self.with_data,
-                        self.extract_data, self.make_zip):
+                        self.extract_data, self.game_files, self.make_zip):
             control.Enable(not running)
 
     def run(self, what: str, job) -> None:
@@ -284,7 +298,8 @@ class Frame(wx.Frame):
         options = dict(make_zip=self.make_zip.GetValue(),
                        compile_check=self.compile_check.GetValue(),
                        with_data=self.with_data.GetValue(),
-                       extract_data=self.extract_data.GetValue())
+                       extract_data=self.extract_data.GetValue(),
+                       with_game_files=self.game_files.GetValue())
 
         def job():
             self.say("Recovering %s" % path)
