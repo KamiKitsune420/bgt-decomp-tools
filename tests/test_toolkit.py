@@ -2052,6 +2052,45 @@ def test_libcheck_sees_a_method_called_on_an_indexed_receiver():
     assert bgt_libcheck.calls("f(x).m();") == ["f", "m"]
 
 
+def test_libcheck_does_not_read_a_RESERVED_WORD_as_a_call():
+    """`or (` is not a call to `or`, and the language says so.
+
+    `cs` is written with AngelScript's word operators --
+    `if(key_down(KEY_LCONTROL) or key_down(KEY_RCONTROL))` -- so `or`
+    landed in the SOURCE's call sequence and nowhere in the recovery's,
+    and two functions of that game's client were reported as differing by
+    a keyword. With them excluded the client reaches **218 of 218**.
+
+    This file already held the list, in `_TYPE_BEFORE_NAME`, where it keeps
+    a word operator out of the TYPE position -- one question answered in
+    two places with one of them blind, which is the shape this project
+    keeps recording. The two read one set now, and the test pins that they
+    do.
+
+    Widening `_noise` normally makes the comparison weaker, since a name in
+    it is dropped from both sides. That argument does not reach a reserved
+    word: the language forbids it as a function name, so nothing real is
+    ever dropped -- which is why this one is taken from the language rather
+    than one measured occurrence at a time.
+    """
+    assert bgt_libcheck.calls("if (a(x) or b(y)) c();") == ["a", "b", "c"]
+    assert bgt_libcheck.calls("if (a(x) and not b(y)) c();") == ["a", "b", "c"]
+    assert bgt_libcheck.calls("if (h is null) f();") == ["f"]
+    # ...and the type position reads the same set, so a word operator
+    # before a name still cannot suppress the call after it.
+    assert bgt_libcheck.calls("if (key_down(A) or key_down(B)) return;") \
+        == ["key_down", "key_down"]
+    for word in ("or", "and", "not", "xor", "is", "in", "out", "inout",
+                 "true", "false", "null", "new", "delete", "const",
+                 "case", "default", "break", "continue", "this", "super",
+                 "void"):
+        assert word in bgt_libcheck.RESERVED, word
+        assert word in bgt_libcheck._TYPE_BEFORE_NAME.pattern, word
+    # A real call whose name merely CONTAINS one is untouched.
+    assert bgt_libcheck.calls("is_registered(); counter(); android(x);") \
+        == ["is_registered", "counter", "android"]
+
+
 def test_libcheck_does_not_read_a_declaration_as_a_call():
     """`bullet b1(x, y);` names a type and then a variable, which reads
     exactly like a call to `b1`. `bgt_apicheck` already refuses that -- a

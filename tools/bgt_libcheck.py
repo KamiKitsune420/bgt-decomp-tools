@@ -71,6 +71,26 @@ DEFAULT_INCLUDE_DIRS = (
 
 KEYWORDS = frozenset(("if", "while", "for", "switch", "return", "catch", "else",
                       "do", "cast"))
+#: Reserved words, which can never be a callee name -- so one followed by `(`
+#: is a false match rather than a call this comparison should weigh. `cs` is
+#: written with the word operators, `if(key_down(KEY_LCONTROL) or
+#: key_down(KEY_RCONTROL))`, so `or (` read as a call to `or` put that name in
+#: the SOURCE's sequence and nowhere in the recovery's -- two functions of its
+#: client reported as differing by a keyword.
+#:
+#: This file already held the list, in `_TYPE_BEFORE_NAME`, where it keeps a
+#: word operator out of the type position. One question answered in two places
+#: with one of them blind is the shape this project keeps recording, so the two
+#: read one set now.
+#:
+#: Widening `_noise` normally makes the comparison weaker, because a name in it
+#: is dropped from both sides. That argument does not reach a reserved word: the
+#: language forbids it as a function name, so nothing real is ever dropped.
+RESERVED = frozenset((
+    "and", "or", "not", "xor", "is", "in", "out", "inout",
+    "true", "false", "null", "new", "delete", "const",
+    "case", "default", "break", "continue", "this", "super", "void",
+))
 # Constructions and conversions: calls in bytecode, types in source.
 TYPE_NAMES = frozenset(("string", "int", "uint", "double", "float", "bool", "int8",
                         "int16", "int64", "uint8", "uint16", "uint64", "array",
@@ -143,7 +163,7 @@ OPERATOR_METHODS = frozenset((
 #: them is the token before the name: a declaration has a *type* there.
 _TYPE_BEFORE_NAME = re.compile(
     r"(?:^|[;{})]|\n)\s*"
-    r"(?!(?:return|else|case|default|do|new|delete|const|and|or|not|xor|is|in|out|inout|true|false|null)\b)"
+    r"(?!(?:return|else|do|" + "|".join(sorted(RESERVED)) + r")\b)"
     r"(?:const\s+)?[A-Za-z_][\w:]*(?:<[^<>;{}]*>)?(?:@|[\[\]])*@?[ \t]+$")
 
 _CALL = re.compile(r"(?<!\w)([A-Za-z_]\w*)\s*\(")
@@ -275,7 +295,8 @@ def library_functions(include_dirs: Sequence[str]) -> Dict[str, List[str]]:
 # --------------------------------------------------------------------------
 
 def _noise(name: str) -> bool:
-    return (name in KEYWORDS or name in TYPE_NAMES or name in OPERATOR_METHODS
+    return (name in KEYWORDS or name in RESERVED or name in TYPE_NAMES
+            or name in OPERATOR_METHODS
             or name.startswith(("get_", "set_", "_beh_", "$beh")))
 
 

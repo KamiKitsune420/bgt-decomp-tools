@@ -7383,7 +7383,8 @@ Every `bgt audit` comparison is identical before and after on both
 titles that can be audited here -- Paladin 25 call rows and 2 constant
 rows, Psycho Strike 41 and 2 -- `bgt oracle` is 52/52, and the four
 games that came with their own source hold exactly: the `cs` server 194
-of 196, its client 216 of 218, rage room 291 of 292 and constant
+of 196, its client **218 of 218** (see below), rage room 291 of 292
+and constant
 velocity 94 of 95, with 0 differing on all but the server's one.
 
 ##### The trace that found it, worth repeating rather than re-deriving
@@ -9257,6 +9258,60 @@ it**: the source's condition calls `.length()` and the recovered body has
 never became one. That is the first time a residual goto has been shown to
 cost a *call* rather than only a compiler error -- the goto is the visible
 failure and the lost condition is the quiet one underneath it.
+
+### A reserved word in call position, and the last two client rows
+
+`cs`'s client stood at 216 of 218 with **0 differing**, the other two
+being "close" -- and both were one name: `or`.
+
+```
+source:     if(key_down(KEY_LCONTROL) or key_down(KEY_RCONTROL)) return true;
+reported:   delete  source ['or']  recovered []
+```
+
+`_CALL` matches the identifier a `(` opens against, which is right --
+*adjacency to the `(` is what identifies a call* -- and `or (` is an
+identifier followed by a paren. So the word operator went into the
+SOURCE's sequence and nowhere into the recovery's, which renders `||`.
+
+**This file already held the list.** `_TYPE_BEFORE_NAME` lists the word
+operators to keep one out of the *type* position -- that is the
+narrowing this document records as the fix for `or` SUPPRESSING a call
+-- and the same list was never applied to the callee position. One
+question answered in two places with one of them blind, for the
+umpteenth time here; `RESERVED` is the one set now and both read it.
+
+**Widening `_noise` normally makes the comparison weaker**, because a
+name in it is dropped from both sides, which is why `OPERATOR_METHODS`
+is widened one measured occurrence at a time. That argument does not
+reach a reserved word: the language forbids it as a function name, so
+nothing real can ever be dropped. Taken from the language, not from a
+measurement.
+
+| | before | after |
+|---|---|---|
+| cs client | 216 / 218, 2 close | **218 / 218, 0 close** |
+| cs server | 194 / 196 | 194 / 196 |
+| rage room | 291 / 292 | 291 / 292 |
+| constant velocity | 94 / 95 | 94 / 95 |
+| Super Egg Hunt | 44 / 47 | 44 / 47 |
+| Paladin of the Sky | 39 / 47 | 39 / 47 |
+| Psycho Strike | 147 / 149 | 147 / 149 |
+
+**The corpus cannot move and that is checked rather than asserted**:
+BGT's own `include/*.bgt` is written with `||` and `&&` throughout, so
+there is nothing in it for this to reach. Only a game whose author
+writes the word operators moves, and `cs` is the one in hand.
+
+So **a whole game's own code matches its author's source in every
+function this can compare** -- 218 of 218, which is a first here.
+
+And the escape trap was paid again on the way: `\b` written through a
+shell heredoc arrived as a literal **backspace**, so the new pattern's
+word boundary was a control character and the exclusion matched any
+name *starting* with a reserved word. The byte check this file
+prescribes is what caught it, and the fix is to write such a patch with
+a tool rather than a heredoc.
 
 ## A second one, and it needed no executable at all
 
