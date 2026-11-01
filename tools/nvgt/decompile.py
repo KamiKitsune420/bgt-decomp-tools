@@ -2237,7 +2237,10 @@ class FuncDecompiler:
         if name in ("CMPIi", "CMPIi64", "CMPIu", "CMPIu64", "CMPIf", "CMPIf64"):
             self._flush_pending_call()
             off = _s16(ins.w_arg)
-            self.cmp_pair = (self._compared(off),
+            left = self._compared(off)
+            if name in ("CMPIi", "CMPIi64") and _s32(ins.dw_arg) < 0:
+                left = self._as_signed(left, off, name)
+            self.cmp_pair = (left,
                              self._typed_constant(_s32(ins.dw_arg), _numeric_type(name)))
             return
         if name in ("EQi", "EQf", "EQu", "EQi64", "EQu64", "EQd", "EQPtr"):
@@ -2542,6 +2545,63 @@ class FuncDecompiler:
         self._stmt(f"// {name} (unhandled)")
 
     # -- helpers ------------------------------------------------------------
+
+    def _as_signed(self, a: Atom, off: int, opcode: str) -> Atom:
+        """A signed comparison against a negative number, through a slot the
+        recovery had to declare unsigned.
+
+        One slot serves several source locals, so a slot may carry a `uint`
+        loop counter *and* a signed index, and only one of them can be the
+        declaration. The engine was asked rather than assumed:
+
+            uint b = 5;  b > -1   is FALSE
+            int  s = 5;  s > -1   is TRUE
+
+        -- the signed literal converts to unsigned, and BGT says so with
+        `Implicit conversion changed sign of value`. So declaring the slot
+        unsigned turns a guard that passes into one that never can, and the
+        warning stops an unattended compile at its modal dialog as well.
+
+        `cs`'s server is the instance, in ground-truth code:
+        `int b = get_base_index(map); if (b > -1)` shares slot 2 with the
+        `uint i` of the loop above it, so **the vault dispenser report could
+        never run**. `CMPIi` has a `CMPIu` spelling, which is what makes it
+        authoritative about signedness -- the compiler had to choose.
+
+        **The cast is the COMPARISON's width, never the slot's own signed
+        sibling**, and the engine is what settled that. A `uint8` slot holds
+        its value zero-extended in four bytes, so `CMPIi` sees 0..255 -- but
+        `int8(200)` is -56, so an `int8` cast would answer the opposite:
+
+            uint8 c = 200;   c > -1   is FALSE   (the recovery's defect)
+            int8(c) > -1              is FALSE   (a cast that is width-matched)
+            int(c)  > -1              is TRUE    (what the original computes)
+
+        The narrow-sibling mapping was written first and is wrong for exactly
+        the values that reach the top bit.
+
+        Emitted only where the two disagree, and only for a NEGATIVE
+        immediate, which is the shape measured. A signed comparison against a
+        positive constant reads the same either way, and the two-slot `CMPi`
+        form is the same question with no literal to key on: recorded, not
+        done.
+        """
+        #: A value whose own type is already signed needs nothing: the slot
+        #: is declared `uint` for another local's sake, and what is in it
+        #: here is, say, `array<T>::find`'s `int`. Without this the cast is
+        #: emitted around it -- harmless, and noise.
+        if a.data_type is not None and not a.data_type.obj_type:
+            own = a.data_type.format()
+            if own.startswith("int"):
+                return a
+        dt = self.var_types.get(off)
+        if dt is None or dt.obj_type or not dt.format().startswith("uint"):
+            return a
+        signed = "int64" if opcode.endswith("64") else "int"
+        return Atom(a.kind, "%s(%s)" % (signed, a.text), a.dw_size,
+                    data_type=DataType(token_type=NUMERIC_TYPES[
+                        "i64" if opcode.endswith("64") else "i"]),
+                    offset=a.offset, origin=a.origin)
 
     def _compared(self, off: int) -> Atom:
         """A slot's value as read by a comparison -- which USES it.

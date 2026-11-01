@@ -1800,6 +1800,109 @@ Modest against the two changes before it, and it is the first one here
 that is about *meaning* rather than shape: the others removed statements
 the original did not have, and this one changes what a comparison does.
 
+#### ...and where two AUTHORITATIVE votes disagree, the loser needs a cast
+
+The rule above decides what a slot is **declared**. It cannot decide
+what every *use* of it is, because one slot serves several source
+locals and two of them can be signed and unsigned at once -- two
+authoritative votes, not a width difference. `_slot_votes` keeps the
+first, which is the right answer for the declaration and the wrong
+answer for the other local's uses.
+
+`cs`'s server is the instance, and it is in ground-truth code:
+
+```
+source:     int b = get_base_index(map);   if (b > -1) { ...vault report... }
+bytecode:   CALL get_base_index ; CpyRtoV4 3 ; CpyVtoV4 2 3 ; CMPIi 2 -1
+recovered:  local_2 = get_base_index(map); if (local_2 > -1) {
+```
+
+with `uint local_2;` declared, because slot 2 is also the `uint i` of
+the loop above. **The engine was asked rather than assumed**, by a
+script that writes its answers through `file::write`:
+
+| asked of BGT | answer |
+|---|---|
+| `uint b = 5; b > -1` | **false** |
+| `int s = 5; s > -1` | true |
+| `uint8 c = 200; c > -1` | **false** |
+| `int8(c) > -1` | **false** |
+| `int(c) > -1` | true |
+
+-- the signed literal converts to unsigned, so the comparison can never
+pass, and the engine says so with `Implicit conversion changed sign of
+value`. That warning is a cost of its own: BGT waits on its modal
+dialog, so a project full of them cannot be compiled unattended.
+
+So **the vault dispenser report could never run** in the recovered
+server, and `get_base_index` returning -1 for "no base here" is the
+whole point of that guard. 16 sites in that one artefact and 1 in
+Psycho Strike; Super Egg Hunt, Paladin, the `cs` client, rage room and
+constant velocity have none.
+
+`CMPIi` has a `CMPIu` spelling, which is what makes it authoritative --
+the compiler had to choose -- so the fix is to render that use through
+the cast the signedness it declares implies.
+
+##### The cast is the COMPARISON's width, and the engine refuted the other
+
+A narrow-sibling mapping was written first -- `uint8` to `int8`,
+`uint16` to `int16` -- and the table above is why it is wrong: a `uint8`
+slot holds its value **zero-extended in four bytes**, so `CMPIi` sees
+0..255, while `int8(200)` is -56 and answers the opposite. The cast is
+`int` for `CMPIi` and `int64` for `CMPIi64`, whatever the slot's own
+width.
+
+Two narrowings keep it to the measured shape:
+
+- **A negative immediate only.** A signed comparison against a positive
+  constant reads the same either way. The two-slot `CMPi` form is the
+  same question with no literal to key on, and is not done here.
+- **A value whose OWN type is already signed needs nothing.** The slot
+  is `uint` for another local's sake while what is in it here is, say,
+  `array<T>::find`'s `int`. Psycho Strike has three sites of that shape
+  -- `weapon::ammunition` is a plain `int` -- and casting them was
+  harmless noise, which is how the narrowing was measured: 4 changed
+  sites down to the 1 that is a defect.
+
+##### What it cost
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,302 (byte-identical) | 0 | verified | 1,608 |
+| Paladin of the Sky | 23,396 (byte-identical) | 0 | verified | 6,952 |
+| Psycho Strike | 24,419 | 0 | verified | 6,406 -> 6,407 |
+| Crazy Party | 174,780 (byte-identical) | 0 | verified | 90,148 |
+| Manamon 1 | 83,371 (byte-identical) | 0 | verified | 26,484 |
+| cs server | 10,139 | 0 | verified | 3,018 -> 3,034 |
+
+**Four of the six artefacts are byte-identical**, including both big
+titles, and the other two move by the casts and nothing else -- no line
+count changes at all, because a cast is rendered inside a condition that
+was already there. The call counts rise by exactly one per cast, which is
+`bgt apicheck` reading `int(` as the call it syntactically is: Psycho
+Strike by 1 and the `cs` server by 16.
+
+So the whole scope of this is 17 comparisons in two artefacts, which is
+what a correctly scoped change looks like -- and the sweep says the same
+from the other side, 17 rows before and 0 after.
+
+The sweep that sized this is `bgt signatures`-shaped and is not in that
+command, because the question needs a declared type: an unsigned local
+in an **ordering** comparison against a negative literal. Its own first
+version grouped declarations by brace depth, which in a class file puts
+every method's locals in one set -- so `uint local_1;` in one method
+made `int local_1;` in another look unsigned, and it reported 4, 8 and 9
+rows on three titles that have 0, 0 and 1 between them. Resolving each
+use against the NEAREST declaration above it is what a reader does and
+what the hoisting in these files makes correct. **The instrument needed
+checking before its baseline could be believed**, for the fifth time in
+this file.
+
+The equality form is left alone deliberately and there is none in the
+corpus anyway: `uint == -1` compares the same bits either way, so it is
+only the ordering comparisons whose answer moves.
+
 ### A slot's width evidence is not first-come-first-served
 
 `slot_types` has two kinds of evidence. A **type-tagged** opcode names its

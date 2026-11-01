@@ -2421,3 +2421,72 @@ class PushedValueTests(unittest.TestCase):
         fd._snapshot_pushed(17)
         self.assertEqual(fd.stack[0].text, "local_4")
         self.assertEqual(fd.events, [])
+
+
+class SignedComparisonTests(unittest.TestCase):
+    """`uint > -1` can never pass, and the original compared it signed.
+
+    One slot serves several source locals, so a slot may carry a `uint` loop
+    counter *and* a signed index, and only one of them can be the
+    declaration. BGT was asked rather than assumed, with a script that writes
+    its answers to a file:
+
+        uint  b = 5;    b > -1       FALSE
+        int   s = 5;    s > -1       TRUE
+        uint8 c = 200;  c > -1       FALSE
+        int8(c) > -1                 FALSE
+        int(c)  > -1                 TRUE
+
+    -- the signed literal converts to unsigned, even for a one-byte type, and
+    the engine says so with `Implicit conversion changed sign of value`. That
+    warning also stops an unattended compile at its modal dialog.
+
+    `cs`'s server is the instance, in ground-truth code:
+    `int b = get_base_index(map); if (b > -1)` shares slot 2 with the `uint i`
+    of the loop above it, so **the vault dispenser report could never run.**
+    16 sites in that one artefact, and 1 in Psycho Strike.
+    """
+
+    def _fd(self, slot_type, atom_type=None):
+        from decompile import Atom, DataType, FuncDecompiler, NUMERIC_TYPES
+        fd = object.__new__(FuncDecompiler)
+        fd.var_types = {4: DataType(token_type=NUMERIC_TYPES[slot_type])}
+        dt = (DataType(token_type=NUMERIC_TYPES[atom_type])
+              if atom_type else fd.var_types[4])
+        return fd, Atom("var", "local_4", 1, data_type=dt)
+
+    def test_an_unsigned_slot_compared_signed_gets_a_cast(self):
+        fd, atom = self._fd("u")
+        self.assertEqual(fd._as_signed(atom, 4, "CMPIi").text, "int(local_4)")
+
+    def test_the_cast_is_the_COMPARISONS_width_not_the_slots_sibling(self):
+        """A `uint8` slot holds its value zero-extended in four bytes, so
+        `CMPIi` sees 0..255 -- but `int8(200)` is -56, so a width-matched cast
+        answers the opposite of what the original computes. The
+        narrow-sibling mapping was written first and the engine refuted it.
+        """
+        from asreader import TT_UINT8
+        fd, atom = self._fd("u")
+        fd.var_types[4].token_type = TT_UINT8
+        self.assertEqual(fd._as_signed(atom, 4, "CMPIi").text, "int(local_4)")
+        self.assertEqual(fd._as_signed(atom, 4, "CMPIi64").text,
+                         "int64(local_4)")
+
+    def test_a_signed_slot_is_left_alone(self):
+        fd, atom = self._fd("i")
+        self.assertIs(fd._as_signed(atom, 4, "CMPIi"), atom)
+
+    def test_a_value_whose_OWN_type_is_signed_needs_nothing(self):
+        """The slot is `uint` for another local's sake and what is in it here
+        is, say, `array<T>::find`'s `int`. Psycho Strike had three sites of
+        this shape -- `weapon::ammunition` is a plain `int` -- and casting
+        them was harmless noise."""
+        fd, atom = self._fd("u", atom_type="i")
+        self.assertIs(fd._as_signed(atom, 4, "CMPIi"), atom)
+
+    def test_an_unknown_slot_is_left_alone(self):
+        from decompile import FuncDecompiler, Atom
+        fd = object.__new__(FuncDecompiler)
+        fd.var_types = {}
+        atom = Atom("var", "local_4", 1)
+        self.assertIs(fd._as_signed(atom, 4, "CMPIi"), atom)
