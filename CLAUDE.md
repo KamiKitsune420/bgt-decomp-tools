@@ -2845,8 +2845,27 @@ and handed a DLL it says "Expected identifier". So the question is how
   runtime**, in `strike.exe`, `rpg.exe` and `gate.exe` alike. A DLL cannot
   put them there.
 - `elias.dll` is **not in any of those executables' import tables**, and each
-  runtime carries its C export names verbatim -- so it is loaded with
-  `LoadLibrary` at run time.
+  runtime carries its C export names verbatim -- so it is loaded at run time
+  rather than at start-up. **The mechanism is DELAY-LOAD, not a hand-written
+  `LoadLibrary`**, which this file used to say: `gate.exe`'s data directory 13
+  names `elias.dll` with 20 delay-loaded symbols, an IAT at `0x004E2308` and
+  its module handle slot at `0x004E33E0`. Both of the original observations
+  were right -- absent from the import directory, loaded on first use -- and
+  the mechanism between them was guessed.
+
+  That matters because it is far more useful than a guess: the descriptor is a
+  **complete symbol-to-slot map**, so every call site is one byte pattern
+  away (`FF 15 <slot>`), with no disassembler needed to find them and no
+  Ghidra run to pay for. Which is just as well, because importing this stub
+  into Ghidra died on `OutOfMemoryError` at the heap the tooling defaults to,
+  for the third time in this file.
+
+  **And it explains why no name has a code reference.** A delay-load name is
+  an `IMAGE_IMPORT_BY_NAME` read by the loader, so nothing in `.text` pushes
+  its address -- which looked at first like the names being unused. The
+  control that settled it was `_string_factory_`, whose address *is* found as
+  an immediate: the search worked, and the absence was real and meant
+  something else.
 - The DLL exports **92 functions**, and the split is exactly two halves plus
   setup: **50 `elias_theme_*`, 40 `elias_track_*`, 2 `elias_set_*`**
   (`elias_set_memory_allocator`, `elias_set_float_to_int_converter`). Read out
@@ -2889,6 +2908,54 @@ int    get_greatest_level()                       int get_urgency()
 
 -- which already exceeds both of the numbers this file carried, so neither
 needed a second measurement to be refuted.
+
+#### The C API, read out of the call sites
+
+Elias Software's SDK header is not public -- it was licensee-only, and this is
+a 2015 build -- so the authority is the game's own calls, which is this file's
+first rule applied one layer out: read the caller.
+
+cdecl puts every argument on the stack, so the pushes before a call give the
+arity and the `add esp, N` after it corroborates. **Both are needed**, because
+MSVC folds cleanups: `elias_set_memory_allocator` has no `add esp` of its own
+and its 8 bytes turn up in the `add esp, 0x14` after the *next* call, which
+cleans 8 + 12. Count pushes; use `add esp` as the check.
+
+| signature, as `gate.exe` calls it | what the game passes |
+|---|---|
+| `elias_set_memory_allocator(alloc, free)` | its own two allocator functions, before anything else |
+| `elias_theme_create_from_xml(&theme, xml, char *err, 1024, 0)` | the `.epro` text, and a 1,088-byte error buffer it zeroes first |
+| `elias_theme_get_basic_info(theme, 0, 0, 0, 0, &a, &b)` | seven args, four of them NULL -- it wants only the last two |
+| `elias_theme_get_source_count(theme, &count)` | |
+| `elias_theme_enumerate_sources(theme, callback, user)` | **a callback**, and its own context |
+| `elias_theme_destroy(theme)` | |
+| `elias_theme_start(a, b)`, `set_level(a, b)`, `play_stinger(a, b)`, `change_key(a, b)` | two each |
+| `elias_theme_read_samples(ctx, buffer, &count)` | |
+| `set_prebuffer_length_in_milliseconds(theme, 500)` | and `set_processing_period_in_milliseconds(theme, 250)` |
+
+**Zero is success**, consistently: every call is followed by `test eax, eax`
+and a jump that treats non-zero as the error path, and on failure the game
+calls `elias_theme_destroy` and gives up.
+
+##### elias never opens a file, and that is the whole design
+
+The surprise, and the thing that makes the 19-of-92 import list make sense:
+**nothing in elias does I/O.** `enumerate_sources` takes a function pointer,
+and elias calls back into the host once per source the theme names. The
+callback reads the source descriptor's filename at `+0x14`, skips it when
+`+0x20` is already set or the name is empty, and otherwise looks the name up
+in the host's own array and hands over the audio.
+
+So the `base_folder` half of `elias::load(xml_text, base_folder)` never
+reaches elias at all -- it is the *binding's* own, used to resolve each
+callback against the pack. That is why a theme's sounds can live inside
+`sounds.dat` while elias has no idea packs exist, and why none of the 92
+exports takes a path.
+
+It also sets the price of driving the DLL from outside a game: a harness has
+to implement that callback, which needs the layout of elias's source
+descriptor rather than just a signature. Reading the two fields the game
+touches is not the same as knowing the struct.
 
 #### A registration block can be read by POSITION, and it UNDERCOUNTS
 
