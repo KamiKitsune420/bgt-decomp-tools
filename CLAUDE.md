@@ -7196,6 +7196,64 @@ like this, and because its count still MOVES usefully: the fold rules
 took Paladin 6 -> 4 -> 2 and Manamon 1 18 -> 15 -> 13. A row is to be
 read with the declared type in hand, which is one grep.
 
+#### `double_assign` was 105 rows, and 81 of them were a CHAIN
+
+The biggest unread set, and the reason it was unread: it counted the
+**destination** of an assignment as a read of it. BGT's own idiom is a
+chain --
+
+```
+local_1 = string_replace(local_1, "north", string(0), true);
+local_1 = string_replace(local_1, "northeast", string(45), true);
+local_1 = string_replace(local_1, "south", string(180), true);
+```
+
+-- and every line of it mentions the name twice, so a chain of three or
+more scored. The shape is about one value read twice in **one
+expression**, so only the right-hand side counts now:
+
+| title | before | after |
+|---|---|---|
+| Super Egg Hunt | 3 | **0** |
+| Paladin of the Sky | 6 | **2** |
+| Psycho Strike | 9 | **1** |
+| Manamon 1 | 17 | **2** |
+| Crazy Party | 30 | **6** |
+| cs server | 40 | **13** |
+
+#### ...and what is left points straight at the hardest open defect
+
+Three of the 24 are read, and all three are the `use_screen_reader`
+collapse: one slot carrying both operands of a short-circuit, with the
+condition reading one of them twice. The text is enough to be sure --
+`if ((x != 0) && (x != 0))` is never what a two-operand `&&` meant.
+
+- **Paladin's gift eligibility.** `gift::get_gift` builds
+  `!is_in_party(for_character)` and then `for_character != ""` through
+  one slot, and the guard that prints *"You can not obtain this yet."*
+  reads it twice. Which gifts a player can claim is therefore wrong.
+- **Paladin's difficulty guard**, in the save loader: `!is_registered()`
+  and `difficulty == 2` through one slot, and the condition comes out
+  `if ((!is_registered() ? 1 : 0) == local_4 && (local_4 != 0))` --
+  which is not even the same SHAPE as an `&&` of two tests.
+- **Psycho Strike's `home::reset_rebels`**, which this file already
+  records from the structurer side: `if ((local_2 != 0) && (local_2 !=
+  0))` where the source has `!arg0` and `!rebels[i].former_rebel`, so
+  which rebels get removed is wrong. Finding it twice over, from two
+  unrelated instruments, is the cross-validation this project runs on.
+
+One more is read and is NOT a collapse: Manamon 1's `paladine`
+constructor reads `get_possessive(this.name)` twice in one sentence,
+which is the same value both times and is what the author wrote. Its
+FIRST assignment -- the sentence about the spirit horse -- looks
+unread, which is a different question and wants its own look.
+
+So the narrowing turns a hundred rows of noise into a two-dozen-row
+pointer at the one defect class this file has three measured rejections
+against (`_short_circuit_slots` is a shape test by necessity, and every
+merge whose shape it does not match becomes a forced variable). That is
+what a signature is for.
+
 And the instrument needed its own correction, which is the usual one:
 asked of `jump_target == 0` it answered **0 for every title**,
 including two bodies whose branch over nothing had already been read by

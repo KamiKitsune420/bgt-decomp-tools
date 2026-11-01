@@ -163,6 +163,30 @@ class DoubleAssignTests(unittest.TestCase):
                          [("same_argument", 4)])
 
 
+    def test_a_CHAIN_is_not_two_reads_of_one_value(self):
+        """BGT's own idiom, and 81 of this shape's 105 rows across the
+        corpus. Each line mentions the name twice -- once as the
+        DESTINATION -- so a chain of three or more scored, and `cs`'s server
+        alone had forty. Only the right-hand side is a read."""
+        text = ('local_1 = string_replace(local_1, "north", "0", true);\n'
+                'local_1 = string_replace(local_1, "northeast", "45", true);\n'
+                'local_1 = string_replace(local_1, "south", "180", true);\n'
+                'local_1 = string_replace(local_1, "west", "270", true);\n')
+        self.assertNotIn("double_assign", kinds(text))
+
+    def test_a_collapsed_short_circuit_still_fires(self):
+        """What is left after the narrowing, and what the shape is for: one
+        slot carrying both operands of an `&&`, with the condition reading
+        one of them twice. Paladin's gift eligibility and Psycho Strike's
+        `home::reset_rebels` are both this, and `if ((x != 0) && (x != 0))`
+        is never what a two-operand `&&` meant."""
+        text = ("local_7 = ((local_7 == 0) ? 1 : 0);\n"
+                'local_7 = ((for_character == "") ? 1 : 0);\n'
+                "local_7 = ((local_7 == 0) ? 1 : 0);\n"
+                "if ((local_7 != 0) && (local_7 != 0)) {\n")
+        self.assertIn("double_assign", kinds(text))
+
+
 class IdentityCastTests(unittest.TestCase):
     def test_a_value_converted_twice_and_changed_by_neither(self):
         """`fade(..., double(int(music.get_volume())), ...)` is the snapshot

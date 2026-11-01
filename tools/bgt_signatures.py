@@ -228,8 +228,19 @@ def scan(text: str) -> List[Tuple[str, int, str]]:
             if second and first.group(1) == second.group(1):
                 name = first.group(1)
                 for j in range(i + 2, min(i + 5, len(lines))):
+                    #: **The destination is not a read**, and counting it
+                    #: made BGT's own chain a hit: each
+                    #: `local_1 = string_replace(local_1, ...)` mentions the
+                    #: name twice, so every chain of three or more scored,
+                    #: and `cs`'s server alone had forty of them. What this
+                    #: shape is for is one value read twice in ONE
+                    #: expression, so only the right-hand side counts.
+                    rhs = lines[j]
+                    assigned = _ASSIGN.match(rhs)
+                    if assigned and assigned.group(1) == name:
+                        rhs = rhs.split("=", 1)[1]
                     uses = len(re.findall(r"(?<![\w.])" + re.escape(name)
-                                          + r"(?!\w)", lines[j]))
+                                          + r"(?!\w)", rhs))
                     if uses >= 2:
                         hit("double_assign", i)
                         break
