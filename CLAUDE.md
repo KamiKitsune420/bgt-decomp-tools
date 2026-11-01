@@ -9259,6 +9259,57 @@ never became one. That is the first time a residual goto has been shown to
 cost a *call* rather than only a compiler error -- the goto is the visible
 failure and the lost condition is the quiet one underneath it.
 
+### The audits, run where the source can settle every row
+
+`bgt audit` compares a body's callees, literals and numeric constants
+against the bytecode's, and this file's whole account of how to read it
+is *"a row is a lead and not a verdict"* -- four benign kinds recur, and
+triage means reading the disassembly. On the four games that came with
+their own source there is a third thing to read, so a row can be settled
+outright:
+
+| | bodies paired | calls | literals | constants |
+|---|---|---|---|---|
+| cs client | 265 / 437 | 0 | 0 | 0 |
+| cs server | 249 / 345 | 0 | 0 | 0 |
+| constant velocity | 112 / 157 | 0 | 0 | 0 |
+| rage room | 387 / 840 | 1 | 1 | **24** |
+
+Three of the four are clean on all three comparisons, which is the
+cross-validation: these are whole games' own code, not library files,
+and nothing was lost from any body the audit could pair.
+
+**And rage room's 24 are the original's own dead stores**, which the
+source proves rather than suggests. The shape is one function repeated:
+
+```
+source:     dictionary d = engine.call("int get_ver1();");
+            int e = -1;                       <- the audit's row
+            d.get("0", e);
+            return e + "." + f + "." + ...;
+
+bytecode:   SetV4 14 -1                       <- `int e = -1;`
+            VAR 17 ; ... ; dictionary::get    <- the out arg is a
+                                                 CONVERTED temp, slot 17
+            i64TOi 18 17 ; CpyVtoV4 14 18     <- ...and slot 14 is
+                                                 overwritten, every path
+```
+
+`dictionary::get` takes an `int64`, so the compiler passes a temp and
+converts it back **unconditionally** -- so the `-1` is overwritten on the
+next line whatever `get` returned. The author wrote it as the fallback
+for a lookup that misses, and this engine's `get` leaves its argument
+untouched on a miss, so the fallback that should have worked is defeated
+by the conversion the compiler inserts. It never worked in the shipped
+game, and dropping a store nothing can read is faithful -- the
+`find_best_weapon` and `sleep_in_bed` shape, found in a third game by a
+different instrument with the source in hand to confirm the reading.
+
+24 functions of its plugin layer are that one line: `game_engine_version`,
+`export_map`, every `ftp_*`, `reg_exp_*`, `zip_get_files`. The one call
+and one literal row are the `input_box` this file already records as the
+lost-call census's value-type-return blind spot.
+
 ### A reserved word in call position, and the last two client rows
 
 `cs`'s client stood at 216 of 218 with **0 differing**, the other two
