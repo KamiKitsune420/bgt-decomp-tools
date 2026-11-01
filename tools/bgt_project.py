@@ -713,7 +713,10 @@ def pack_keys(module_path: str, packs: Sequence[Dict[str, Any]],
 def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
                extract: bool = False,
                keys: Optional[Dict[bytes, bytes]] = None,
-               copy: Optional[bool] = None) -> List[str]:
+               copy: Optional[bool] = None,
+               module_path: Optional[str] = None,
+               source: Optional[str] = None,
+               decrypt_files: bool = True) -> List[str]:
     """Copy each pack next to the entry script, or extract its entries.
 
     Copying is what makes the recovered project runnable, because the engine
@@ -734,6 +737,7 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
     keys = keys or {}
     copy = (not extract) if copy is None else copy
     notes: List[str] = []
+    second_layer: List[str] = []
     for pack in packs:
         if pack.get("error"):
             notes.append("%s could not be read: %s" % (pack["name"], pack["error"]))
@@ -795,10 +799,114 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
                 with open(target, "wb") as fh:
                     fh.write(plain)
                 written += 1
+                if _string_encrypted_shaped(plain):
+                    second_layer.append(target)
         notes.append("%s extracted %d entries to assets/%s%s"
                      % (pack["name"], written, os.path.basename(where),
                         "" if not refused
                         else " (%d skipped: no key that verifies)" % refused))
+    if second_layer and decrypt_files:
+        notes.extend(open_second_layer(second_layer, module_path, source))
+    elif second_layer:
+        notes.append("%d extracted file(s) are encrypted a second time by the "
+                     "game itself and were left as they are" % len(second_layer))
+    return notes
+
+
+#: Audio a pack normally holds. A second-layer candidate is a file that is
+#: none of these and is a whole number of AES blocks.
+_AUDIO_MAGIC = (b"OggS", b"RIFF", b"ID3\x03", b"fLaC", b"\xff\xfb", b"\xff\xf3",
+                b"FORM", b".snd", b"MThd")
+
+
+def _string_encrypted_shaped(blob: bytes) -> bool:
+    """Does this look like `string_encrypt` output rather than a sound?
+
+    Manamon 1's pack holds 2,007 entries of which 1,829 are Ogg Vorbis and 178
+    are its map files -- and the pack stored those 178 **unencrypted**, because
+    the game encrypts each one itself with `string_encrypt` before writing it.
+    So honouring the pack's own encryption still leaves 178 opaque blobs, and
+    both layers are right about every byte.
+
+    The test is deliberately weak, because it only decides what is worth
+    TRYING: `string_decrypt` self-checks, so a candidate that is really a sound
+    is rejected by the format rather than written out wrongly.
+    """
+    if len(blob) < 32 or len(blob) % 16 != 0:
+        return False
+    for magic in _AUDIO_MAGIC:
+        if blob.startswith(magic):
+            return False
+    return True
+
+
+def open_second_layer(paths: Sequence[str], module_path: Optional[str],
+                      source: Optional[str] = None) -> List[str]:
+    """Write the decrypted form of each file beside the bytes the pack held.
+
+    **The stored bytes are kept**, and that is the whole shape of this: the
+    game reads the encrypted file, so replacing it would break a project that
+    otherwise runs. The decrypted form is written alongside with `.decrypted`
+    appended, so the pair is obvious and the original extension is intact.
+
+    The key is a `string_encrypt` password out of the module's own literals.
+    Manamon 1's is one of the NUL-joined runs its source passes to
+    `string_decrypt` -- which the `runs` harvester already yields -- and it
+    opens 178 of 178.
+    """
+    notes: List[str] = []
+    if not paths or not module_path or not os.path.isfile(module_path):
+        return notes
+    try:
+        import bgt_crack
+        import bgt_string_crypt
+    except ImportError:
+        from . import bgt_crack
+        from . import bgt_string_crypt
+
+    with open(paths[0], "rb") as fh:
+        sample = fh.read(64)
+    with open(module_path, "rb") as fh:
+        module = fh.read()
+    candidates, counts = bgt_crack.build_candidates(
+        module, ("strings", "runs", "cores"), text=source)
+
+    found = None
+    for candidate in candidates:
+        for use_kdf in (True, False):
+            if not bgt_string_crypt.head_matches(sample, candidate, use_kdf):
+                continue
+            # the first block is enough to pick a candidate and not enough to
+            # believe one: confirm against the whole file
+            with open(paths[0], "rb") as fh:
+                whole = fh.read()
+            if bgt_string_crypt.string_decrypt(whole, candidate, use_kdf) is not None:
+                found = (candidate, use_kdf)
+                break
+        if found:
+            break
+    if found is None:
+        notes.append("%d extracted file(s) are encrypted a second time by the "
+                     "game itself and no key for that was found among %d "
+                     "candidate(s) %s" % (len(paths), len(candidates), counts))
+        return notes
+
+    key, use_kdf = found
+    opened = 0
+    for path in paths:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        plain = bgt_string_crypt.string_decrypt(blob, key, use_kdf)
+        if plain is None:
+            continue
+        with open(path + ".decrypted", "wb") as fh:
+            fh.write(plain)
+        opened += 1
+    notes.append("%d of %d file(s) the game encrypts itself were opened with a "
+                 "key from the module (%r, kdf=%s) and written alongside as "
+                 "*.decrypted; the stored bytes are kept, because that is what "
+                 "the game reads"
+                 % (opened, len(paths), key[:48], use_kdf))
     return notes
 
 
@@ -1519,6 +1627,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
             timeout: float = 600.0, with_data: bool = True,
             extract_data: bool = False, stock_includes: bool = True,
             with_game_files: bool = True,
+            decrypt_files: bool = True,
             progress=lambda message: None) -> Project:
     name = os.path.splitext(os.path.basename(exe_path))[0]
     os.makedirs(out_dir, exist_ok=True)
@@ -1572,7 +1681,9 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     if packs and (with_data or extract_data):
         progress("bringing %d asset pack(s)" % len(packs))
         data_notes += bring_data(packs, out_dir, extract=extract_data,
-                                 keys=keys, copy=with_data)
+                                 keys=keys, copy=with_data,
+                                 module_path=module_path, source=source,
+                                 decrypt_files=decrypt_files)
     # ...and types the installed engine simply does not have, plugin or not.
     newer = [name for name, _ in engine_gap(exe_path, used)
              if not any(os.path.splitext(dll)[0].lower() == name.lower()
@@ -1970,6 +2081,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="do not bring the game's other data files, leaving a "
                          "project that cannot read anything it opens by a path "
                          "it builds at run time")
+    ap.add_argument("--no-decrypt-files", action="store_true",
+                    help="do not write the decrypted form of extracted files "
+                         "the game encrypts itself; the stored bytes are kept "
+                         "either way, so this only costs readability")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
@@ -1980,6 +2095,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       extract_data=args.extract_data,
                       stock_includes=not args.no_stock_includes,
                       with_game_files=not args.no_game_files,
+                      decrypt_files=not args.no_decrypt_files,
                       progress=(lambda m: None) if args.quiet
                       else (lambda m: print("  %s" % m, flush=True)))
     print(project.summary())

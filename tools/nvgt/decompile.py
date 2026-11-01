@@ -1005,6 +1005,144 @@ def _constructor_type(dt: DataType) -> str:
     return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
 
 
+def _construction_args(dt: DataType, expr: str) -> str | None:
+    """`T(a, b)` of the DECLARED type -> `"a, b"`, else None.
+
+    `T x = T(a, b);` is not valid AngelScript for a class whose only
+    constructor takes arguments: that form needs a **default constructor**
+    to make `x` and an **opAssign** to copy the temporary into it, and such
+    a class has neither. The compiler says both outright --
+
+        key_hold left = key_hold(KEY_LEFT, 500, 50);
+        No default constructor for object of type 'key_hold'
+        No appropriate opAssign method found in 'key_hold'
+
+    -- while the form source actually wrote needs neither:
+    `key_hold left(KEY_LEFT, 500, 50);`, which constructs in place.
+
+    This is the defect already recorded for a *member* declared by value
+    with a constructor argument, reaching **globals** -- which that fix
+    could not have covered, because it accepts only a constant argument
+    and a global's are routinely computed.
+
+    The bracket balance is what makes this a reading rather than a guess:
+    `key_hold(1) + key_hold(2)` also begins with the type name and ends
+    with a paren, and its inner text does not balance.
+    """
+    bare = dt.format().removeprefix("const ").strip()
+    for name in (bare, _constructor_type(dt)):
+        if not name or not expr.startswith(name + "(") or not expr.endswith(")"):
+            continue
+        args = expr[len(name) + 1:-1]
+        if not args.strip():
+            return None            # no arguments: the declaration IS it
+        depth = 0
+        for ch in args:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+        if depth == 0:
+            return args
+    return None
+
+
+_SIMPLE_BINDING = re.compile(
+    r"^\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s*[@&\[\]]+)?\s+"
+    r"([A-Za-z_]\w*)\s*=\s*(.+);\s*$")
+_LEFTOVER_LOCAL = re.compile(r"(?<![A-Za-z_0-9])local_\d+(?![A-Za-z_0-9])")
+
+
+def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
+    """Collapse a generated global initialiser back into one construction.
+
+    BGT compiles `savedata sd(path, key)` at global scope into an
+    initialiser that computes the arguments into locals, constructs, and
+    stores. Rendered straight back out that becomes a helper function which
+    cannot compile at all, because it declares the class by value and so
+    needs the default constructor again:
+
+        savedata sd = __nvgt_global_init_95();
+        savedata __nvgt_global_init_95() {
+            savedata sd;                                // no default ctor
+            string local_6 = (get_DIRECTORY_APPDATA() + "/.../data.dat");
+            savedata@ local_7 = savedata(local_6, "wolves111");
+            sd = local_7;                               // no opAssign
+            return sd;
+        }
+
+    So where the whole body amounts to "construct this type and store it",
+    the arguments go on the declaration and no helper is emitted.
+
+    A local is substituted only when it is declared once and **read exactly
+    once**: substituting one read twice would duplicate whatever computed
+    it, which this file counts as a correctness defect rather than an
+    untidiness. Anything in the body that is not a plain local declaration
+    means the initialiser does real work, and the fold is refused.
+    """
+    if not stmts:
+        return None
+    last = stmts[-1].strip()
+    if not last.startswith(name + " = ") or not last.endswith(";"):
+        return None
+    expr = last[len(name) + 3:-1].strip()
+    bindings = {}
+    order = []
+    for stmt in stmts[:-1]:
+        hit = _SIMPLE_BINDING.match(stmt)
+        if hit is None:
+            return None
+        if hit.group(1) in bindings:
+            return None
+        bindings[hit.group(1)] = hit.group(2).strip()
+        order.append(hit.group(1))
+    # innermost first, so a binding that uses an earlier one is resolved
+    # before that earlier one is looked for
+    for local in reversed(order):
+        value = bindings[local]
+        token = re.compile(r"(?<![A-Za-z_0-9])" + re.escape(local)
+                           + r"(?![A-Za-z_0-9])")
+        seen = len(token.findall(expr))
+        if seen == 0:
+            continue           # a local the initialiser never read
+        if seen != 1:
+            return None        # folding would run its value twice
+        # already parenthesised, a bare token or a literal needs no wrapper;
+        # adding one anyway gives `((expr))`, which is valid and reads badly
+        value = _unparen(value) if value.startswith("(") else value
+        plain = re.match(r"^[\w.]+$", value) or (
+            value.startswith(chr(34)) and value.endswith(chr(34)))
+        expr = token.sub(lambda _m: value if plain else "(" + value + ")", expr)
+    if _LEFTOVER_LOCAL.search(expr):
+        return None            # something was left unsubstituted
+    return _construction_args(dt, _unparen(expr))
+
+
+def _unparen(expr: str) -> str:
+    """Drop parentheses that wrap the whole expression.
+
+    Substituting a local parenthesises its value, which is right everywhere
+    except on the outermost one: `(savedata(path, key))` no longer *begins*
+    with the type name, so the construction goes unrecognised and a global
+    that could be declared properly is emitted in the form that cannot
+    compile. The brackets have to be matched as the outer pair, or `(a) + (b)`
+    would lose its meaning.
+    """
+    expr = expr.strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        for index, ch in enumerate(expr):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and index != len(expr) - 1:
+                    return expr        # the first bracket closes early
+        expr = expr[1:-1].strip()
+    return expr
+
 def _initialiser(dt: DataType, expr: str) -> str | None:
     """How source writes this initialiser, or None if the declaration IS it.
 
@@ -6675,6 +6813,19 @@ class ModuleDecompiler:
                 self.emit(f"{g.type.format()} {g.name} = {list_expr};")
                 continue
             stmts = init_stmts.get(g.name) or []
+            # A global of a script class whose constructor takes arguments has
+            # to be DECLARED with them. `T x = T(a, b);` needs a default
+            # constructor and an opAssign, and a class with only an
+            # argument-taking constructor has neither -- so this form is not a
+            # tidier rendering, it is the only one that compiles. Tried before
+            # anything else, because it subsumes the single-statement fold
+            # below for exactly the cases that fold cannot express.
+            qualified_name = (namespace + "::" if namespace else "") + g.name
+            built = _fold_to_construction(g.type, stmts, qualified_name) \
+                or _fold_to_construction(g.type, stmts, g.name)
+            if built is not None:
+                self.emit(f"{g.type.format()} {g.name}({built});")
+                continue
             # fold the final assignment into the declaration
             decl = f"{g.type.format()} {g.name};"
             if len(stmts) == 1:

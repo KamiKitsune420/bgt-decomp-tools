@@ -29,7 +29,8 @@ import tempfile
 
 try:                                   # after `pip install -e .`
     from bgtdecomp import (bgt_api, bgt_apicheck, bgt_asir, bgt_compile,
-                           bgt_crack, bgt_kdf, bgt_pack, bgt_project)
+                           bgt_crack, bgt_kdf, bgt_pack, bgt_project,
+                           bgt_string_crypt)
     from bgtdecomp.nvgt import asreader, decompile
 except ImportError:                    # straight from a checkout
     TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
@@ -40,6 +41,7 @@ except ImportError:                    # straight from a checkout
     import bgt_apicheck
     import bgt_crack
     import bgt_kdf
+    import bgt_string_crypt
     import bgt_asir
     import decompile
     import bgt_compile
@@ -2807,6 +2809,91 @@ def test_the_chain_is_not_walked_without_the_recovered_SOURCE():
     candidates, counts = bgt_crack.build_candidates(b"", ("callsite", "hashchain"))
     assert candidates == []
     assert counts == {"callsite": 0, "hashchain": 0}
+
+
+def test_a_file_the_GAME_encrypts_is_opened_and_the_stored_bytes_KEPT():
+    """A pack entry can be stored plain and still be encrypted.
+
+    Manamon 1 keeps 178 of its 2,007 entries unencrypted in the pack and
+    encrypts each one's contents itself with `string_encrypt`, so honouring
+    the pack's own key still writes 178 opaque blobs. Both layers are right
+    about every byte.
+
+    The stored bytes must survive: the game reads the encrypted file, so
+    replacing it would break a project that otherwise runs. The decrypted form
+    goes alongside.
+    """
+    password = b"ze\x00levelinfo"
+    plaintext = b"MjlfMjM=|29_23|tile"
+    inner = bgt_string_crypt.string_encrypt(plaintext, password)
+    assert len(inner) % 16 == 0
+
+    pack_key = bgt_kdf.aes_key(b"outer")
+    raw = bgt_pack.build([
+        ("music.ogg", bgt_pack.encrypt_payload(b"OggS" + b"\0" * 28, pack_key)),
+        ("rooms/a.dat", inner),          # stored PLAIN in the pack
+    ])
+    with tempfile.TemporaryDirectory() as folder:
+        pack_path = os.path.join(folder, "data.dat")
+        with open(pack_path, "wb") as fh:
+            fh.write(raw)
+        module_path = os.path.join(folder, "m.bin")
+        # the harvesters read the module's own string encoding, not raw
+        # bytes: in `len2` a new string's length byte is TWICE its length,
+        # so the key has to be laid out as the literals the script really
+        # held. This key is a NUL-joined RUN of two of them, which is the
+        # shape the `runs` harvester exists for, and the shape Manamon 1's
+        # real key has.
+        with open(module_path, "wb") as fh:
+            fh.write(bytes([4]) + b"ze" + bytes([18]) + b"levelinfo" +
+                     bytes([8]) + b"more")
+
+        packs = [dict(bgt_pack.survey(pack_path), name="data.dat", path=pack_path)]
+        out = os.path.join(folder, "out")
+        notes = bgt_project.bring_data(
+            packs, out, extract=True,
+            keys={bgt_pack.tag_for_key(pack_key): pack_key},
+            copy=False, module_path=module_path)
+
+        stored = os.path.join(out, "assets", "data", "rooms", "a.dat")
+        assert os.path.isfile(stored)
+        # the bytes the game reads are untouched
+        with open(stored, "rb") as fh:
+            assert fh.read() == inner
+        # ...and the readable form is beside them
+        with open(stored + ".decrypted", "rb") as fh:
+            assert fh.read() == plaintext
+        assert any("encrypts itself" in n for n in notes), notes
+
+        # the audio entry is not treated as a second-layer candidate
+        assert not os.path.exists(
+            os.path.join(out, "assets", "data", "music.ogg.decrypted"))
+
+        # ...and asking for it not to happen leaves only the stored bytes
+        out2 = os.path.join(folder, "out2")
+        notes2 = bgt_project.bring_data(
+            packs, out2, extract=True,
+            keys={bgt_pack.tag_for_key(pack_key): pack_key},
+            copy=False, module_path=module_path, decrypt_files=False)
+        assert os.path.isfile(os.path.join(out2, "assets", "data", "rooms", "a.dat"))
+        assert not os.path.exists(
+            os.path.join(out2, "assets", "data", "rooms", "a.dat.decrypted"))
+        assert any("left as they are" in n for n in notes2), notes2
+
+
+def test_the_first_BLOCK_decides_a_string_key_and_does_not_confirm_it():
+    """`string_decrypt` self-checks on a `printf` prefix, and CBC decrypts the
+    first block from the IV alone -- so a candidate costs one AES block rather
+    than a whole file. Manamon 1 offers tens of thousands of candidates
+    against 25 KB files, which is the difference between searching and not."""
+    blob = bgt_string_crypt.string_encrypt(b"a room", b"the key")
+    assert bgt_string_crypt.head_matches(blob, b"the key")
+    assert not bgt_string_crypt.head_matches(blob, b"the keys")
+    assert not bgt_string_crypt.head_matches(b"OggS" + b"\0" * 28, b"the key")
+    # too short to judge is not the same as judged
+    assert not bgt_string_crypt.head_matches(b"short", b"the key")
+    # and the probe is only a filter: the whole file is what confirms
+    assert bgt_string_crypt.string_decrypt(blob, b"the key") == b"a room"
 
 
 def test_an_extraction_folder_is_not_NESTED_inside_its_own_pack_name():

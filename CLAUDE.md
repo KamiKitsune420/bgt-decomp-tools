@@ -4190,6 +4190,80 @@ found by reading what it said rather than by inspection:
   entry already turns on is what keeps thirty-seven of thirty-eight safe,
   and one by-value member with a constructor argument is the hole.
 
+- **A GLOBAL of a script class must be declared with its constructor
+  arguments, not assigned one.** `T x = T(a, b);` needs two things a class
+  with only an argument-taking constructor does not have -- a **default
+  constructor** to make `x` and an **opAssign** to copy the temporary in --
+  and the compiler says both:
+
+  ```
+  key_hold left = key_hold(KEY_LEFT, 500, 50);
+  No default constructor for object of type 'key_hold'
+  No appropriate opAssign method found in 'key_hold'
+  ```
+
+  **This is the `piano::piano_pool` defect reaching globals**, and that fix
+  could not have covered it: it accepts only a *constant* argument, and a
+  global's are routinely computed. Battle of the Hunter's is
+  `get_DIRECTORY_APPDATA() + "/tunmi13/bth/data.dat"`.
+
+  The form is the whole fix -- `key_hold left(KEY_LEFT, 500, 50);` constructs
+  in place and needs neither -- so this is not a tidier rendering, it is the
+  only one that compiles. Put to the compiler before being emitted, because
+  the first probe asked two questions at once and answered neither: a sized
+  array of a class with no default constructor fails on `array<T>`'s own
+  **"The subtype has no default factory"**, and the *cascade* from that is
+  `Compiling <unknown> things` and then "Only objects have constructors" --
+  which reads exactly like a verdict on the syntax and is not one. Asked
+  again with the two separated, `needs_args a(5);`, `has_default[] c(4);` and
+  `int[] d(8);` all compile cleanly.
+
+  **A generated initialiser makes the same shape worse**, because it cannot
+  compile at all -- it declares the class by value, so the default
+  constructor is needed a second time:
+
+  ```
+  savedata sd = __nvgt_global_init_95();
+  savedata __nvgt_global_init_95() {
+      savedata sd;                                   // no default ctor
+      string local_6 = (get_DIRECTORY_APPDATA() + "/.../data.dat");
+      savedata@ local_7 = savedata(local_6, "wolves111");
+      sd = local_7;                                  // no opAssign
+      return sd;
+  }
+  ```
+
+  So `_fold_to_construction` collapses a body that amounts to "construct this
+  type and store it" back onto the declaration and emits no helper. A local is
+  substituted only when it is declared once and **read exactly once**, because
+  folding one read twice would duplicate whatever computed it -- which this
+  file counts as a correctness defect rather than an untidiness -- and
+  anything in the body that is not a plain local declaration means the
+  initialiser does real work and the fold is refused.
+
+  **One cascade ends with it**, which is what the error count hides: Battle of
+  the Hunter reported 40 further errors of the form *"Use of uninitialized
+  global variable 'sd'"*, plus two for `up` and `down`, and every one of them
+  was a consequence of the declaration above it failing. 5 real defects, 47
+  diagnostics.
+
+  Measured against the commit before it, with the change stashed so the
+  baseline is this code and not a stale tree: **Egg Hunt differs in three
+  files and every difference is this transformation** --
+
+  ```
+  sound_pool environment = sound_pool(500);             -> sound_pool environment(500);
+  sound[] classic_found = array<sound>(8);              -> sound[] classic_found(8);
+  egg[] eggs = array<egg>(250);                         -> egg[] eggs(250);
+  time_object[] time_objects = array<time_object>(25);  -> time_object[] time_objects(25);
+  ```
+
+  -- 5,302 lines, 0 residual gotos, split verified, and still **`compiled
+  cleanly`**. Its call count falls 1,608 -> 1,607, and that is `bgt apicheck`
+  being right rather than a lost call: a construction spelled as a declaration
+  is a declaration, and this file's own rule is that a declaration is not a
+  call.
+
 - **`CallPtr` names its variable in the other operand.** It takes one operand
   here and two there, and the funcdef-holding variable is the *second* one --
   which is where everything downstream looks. Left in the first, the call read

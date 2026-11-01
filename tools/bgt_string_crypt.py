@@ -102,6 +102,29 @@ def string_decrypt(blob: bytes, password: Union[bytes, str],
     return unwrap(AES.new(key, AES.MODE_CBC, iv).decrypt(blob[:n]))
 
 
+def head_matches(blob: bytes, password: Union[bytes, str],
+                 use_kdf: bool = True) -> bool:
+    """Would this password open this blob? Decided on the FIRST BLOCK alone.
+
+    `string_decrypt` is self-checking -- the plaintext has to begin `printf` --
+    and CBC decrypts the first block from the IV alone, so a candidate costs
+    one AES block rather than a decryption of the whole file. That is the
+    difference between searching a module's literals and not bothering:
+    Manamon 1 offers tens of thousands of candidates and its room files are
+    25 KB each, so a full decrypt per candidate is gigabytes of work to learn
+    something the first sixteen bytes already settle.
+
+    A false positive would need a wrong key whose first block happens to begin
+    with those six bytes, which is one chance in 2^48. The caller still
+    confirms with a real decryption before believing it.
+    """
+    if len(blob) < 16:
+        return False
+    key, iv = aes_params(password, use_kdf)
+    head = AES.new(key, AES.MODE_CBC, iv).decrypt(bytes(blob[:16]))
+    return head.startswith(b"printf")
+
+
 def pack_key(password: Union[bytes, str]) -> bytes:
     """The AES key a pack entry ends up with after set_sound_decryption_key().
 
