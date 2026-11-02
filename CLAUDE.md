@@ -2410,8 +2410,70 @@ question.
 That is rule three's shape -- *"the value was computed before a loop and read
 inside it"* -- not reaching a handle slot whose only write is the back edge.
 It is pre-existing: the line is identical in a recovery from before any of
-tonight's work. Fixing it is a fold-safety change and wants its own
-five-title measurement, so it is written down here rather than guessed at.
+tonight's work.
+
+#### Fixed, and it was NOT rule three: the null came from `_deref`
+
+The prediction above named the right shape and the wrong place. `_deref`
+answers that a handle slot nothing has written holds `null` -- correct for a
+slot the frame merely zeroed, and worth 204 of Paladin's compiler errors --
+and that is a **linear** reading of "nothing wrote it". A handle carried
+round a loop is written at the bottom and read at the top, so on the one
+pass down the body nothing has written it yet: the honest answer for the
+first iteration is the wrong answer for every other one.
+
+`_written_inside_this_loop` is the question asked before that fallback
+answers, and it is narrow by construction -- the read must be inside a loop
+and the slot must be written inside **that** loop, so a write anywhere else
+leaves the fallback alone and a slot genuinely never written still reads as
+the null it holds.
+
+**It needed a write that `slot_writes` has never held.** `RefCpyV` assigns a
+handle and is not in `_SLOT_WRITE_OPS`, so without asking for itself this
+rule could never have fired at all. That is the **third** kind of write that
+record has never seen, after a behaviour through a pushed address and a store
+through the reference register -- and the widening is kept local to this one
+rule, because `slot_writes` feeds several fold rules and this file records
+what the last broad widening cost. A `ClrVPtr` deliberately does not count:
+its value IS null, so the fallback is already right about it.
+
+**The defect was worse than this section said.** It is not only that one
+operand read oddly: on the first iteration `local_6` is null, so the
+recovered loop breaks immediately, chooses nothing, and the function goes on
+to `setTypeElementaire(local_5, ...)` with null. A recovered Crazy Party
+cannot switch a combatant's element type at all.
+
+| title | lines | calls | goto |
+|---|---|---|---|
+| Super Egg Hunt | 5,239 | 1,623 | 0 -- unchanged |
+| Battle of the Hunter | 4,269 | 1,334 | 0 -- unchanged |
+| The Gate | 34,031 | 8,681 | 0 -- unchanged |
+| Field Wars | 7,942 | 3,005 | 0 -- unchanged |
+| Manamon 1 | 82,156 -> **82,157** | 26,510 -> **26,509** | 0 |
+| Crazy Party | 174,166 | 90,194 | 0 -- counts unchanged |
+
+**Manamon 1's one fewer call is one fewer DUPLICATED call**, which this file
+counts as the result rather than a cost: `interact.bgt` called
+`will_collide(local_2, local_4, local_9)` twice, and the second is now the
+`__nvgt_ret_44` the first produced. Its four other changed files are the rule
+working -- and one of them is a method call on `null`:
+
+```
+before:  if (!((local_1 is local_5)
+                || (interacts[local_2].get_importance() >= null.get_importance())))
+after:   ... >= local_1.get_importance()
+```
+
+which could only ever have thrown. `battle.bgt` passes a real handle to five
+`handle_callbacks` where it passed `null`.
+
+**What is owed**: Crazy Party's row above is its BROAD measurement -- the
+variant that also counted `ClrVPtr`. The narrowed run was stopped by the host
+for system memory before writing that title, which is the third time this
+file records that happening. Every other title is byte-identical between the
+two variants, and narrowing can only shrink the change set, so the row is
+bounded by two measurements that agree; it is still a bound rather than a
+reading, and it is marked as one.
 
 So the state is: three places that build a comparison now give a `null`
 operand the operator the language wants; every title that can be built here
@@ -12325,9 +12387,14 @@ tool -- reported as issue #7, about two NVGT games detected as neither engine.
 `bgt identify` now records how many bytes are appended past the last PE
 section and says, when there are any, that this is probably a build whose
 packaging is unverified rather than a game of neither engine. It adds no
-detection: a profile still has to be verified against samples, and neither of
-those two games is on this machine, so **why they fail is assumed and not
-measured.**
+detection: a profile still has to be verified against samples.
+
+**And one of those two games explains itself.** Crazy Party switched engines
+from BGT to NVGT after **beta 78**, so beta 82 is an NVGT game and its
+packaging is simply not one of the verified profiles -- which also confirms
+that the beta 77 in this corpus is correctly read as BGT. That is the reason
+rather than the guess this paragraph first carried, and it came from the
+person who knows the title rather than from a measurement here.
 
 # Claims from outside, and what each one was worth
 

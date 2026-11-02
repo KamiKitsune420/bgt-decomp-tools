@@ -1482,6 +1482,10 @@ class FuncDecompiler:
                           if i.name == "JMP" and _jump_target(i) > i.pos]
         #: Where each frame slot is written, by bytecode position.
         self.slot_writes: dict[int, list[int]] = {}
+        #: Handle assignments by slot, built on first use. Only
+        #: `_written_inside_this_loop` reads it, so widening what counts as a
+        #: write here cannot reach the fold rules that share `slot_writes`.
+        self._handle_writes: dict[int, list[int]] | None = None
         #: Writes through a behaviour, kept apart from the opcode ones
         #: because they answer a narrower question -- see below.
         self.behaviour_writes: dict[int, list[int]] = {}
@@ -1956,6 +1960,57 @@ class FuncDecompiler:
     def var_atom(self, off: int) -> Atom:
         return Atom("var", self.name_of(off), 1, data_type=self.var_types.get(off))
 
+    def _written_inside_this_loop(self, off: int) -> bool:
+        """Is this slot assigned inside a loop that encloses the read?
+
+        The question `_deref`'s null fallback has to ask before answering,
+        and it is deliberately narrow: the read must be inside a loop and the
+        slot must be written inside that same loop. A write ANYWHERE else
+        leaves the fallback alone, so a handle slot the frame merely zeroed --
+        a member's initialisation, an omitted handle argument -- still reads
+        as the null it holds.
+
+        The write may be before the read or after it. After is the case worth
+        having, because that is the back edge; before is a slot already
+        carrying a value, which is not null either.
+
+        **`RefCpyV` is a write and `slot_writes` does not hold it**, which is
+        why this asks for itself rather than reading that record alone. A
+        handle assignment is exactly the shape that carries a value round a
+        loop, so without it this rule could never fire. That makes three
+        kinds of write that record has never seen -- a behaviour through a
+        pushed address, a store through the reference register, and this --
+        and the widening is kept local on purpose: `slot_writes` feeds several
+        fold rules, and this file records what happened the last time one of
+        their inputs was widened for everybody at once.
+
+        **A `ClrVPtr` does not count**, because nulling a handle is a write
+        whose value IS null, so the fallback's answer is already right for
+        it: only a write that carries a VALUE makes null the wrong answer.
+
+        That exclusion is **inert on every title measured** -- the trees come
+        out byte-identical with it and without it -- and it is kept for the
+        reason the `FREE`-must-exist condition beside it is: counting a null
+        store as a value is a wrong claim, waiting for the first title whose
+        only write inside a loop is one. It was first written up here as
+        fixing two Manamon 1 rows, and the measurement refuted that: those
+        rows are `RefCpyV` writes and are the rule working, not its cost.
+        """
+        if self._handle_writes is None:
+            self._handle_writes = {}
+            for op in self.instrs:
+                if op.name == "RefCpyV":
+                    self._handle_writes.setdefault(
+                        _s16(op.w_arg), []).append(op.pos)
+        writes = (list(self.slot_writes.get(off, ()))
+                  + self._handle_writes.get(off, []))
+        if not writes:
+            return False
+        now = self._pos()
+        return any(head <= now <= back
+                   and any(head <= write <= back for write in writes)
+                   for head, back in self.back_edges)
+
     def _deref(self, a: Atom) -> Atom:
         """Resolve an address atom to the value it points at, preferring
         the expression bound to a temp slot over the placeholder name."""
@@ -1987,6 +2042,29 @@ class FuncDecompiler:
             # live in `list_values`, not in `temps` -- so it is not one of
             # these: `array<string>(null)` for an initialiser list is "No
             # matching signatures to 'string[](<null handle>)'".
+            # **...unless the write is the back edge, below this read.** The
+            # rule above is a LINEAR reading of "nothing wrote it", and a
+            # loop-carried handle is written at the bottom of the loop and
+            # read at the top: on the simulation's one pass down the body
+            # nothing has written it yet, and the honest answer for iteration
+            # one is also the wrong answer for every other one.
+            #
+            # Crazy Party's `Combattant::switchType` is the instance. It
+            # re-rolls an element type until it differs from the current one,
+            # and its loop condition is `chosen is null || chosen == <the
+            # current type>` -- where `chosen` is written by the `RefCpyV` at
+            # the bottom. Folded to null, the receiver of the second operand
+            # became the constant, so the guard asked the wrong question and
+            # the re-roll was decided by it.
+            #
+            # It also made one slot read two ways three instructions apart --
+            # `CmpPtr` renders it `local_6` through `_slot_atom`, which asks
+            # whether the slot is named, while `_deref` answered `null` -- so
+            # one condition said both. Two read paths with one of them
+            # stricter is the recurring shape here.
+            if (a.offset is not None
+                    and self._written_inside_this_loop(a.offset)):
+                return self.var_atom(a.offset)
             if (a.offset > 0 and a.offset not in self.declared
                     and a.offset not in self.parameter_slots
                     and a.offset not in self.list_values
