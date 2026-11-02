@@ -313,8 +313,21 @@ class Frame(wx.Frame):
 
         def job():
             self.say("Recovering %s" % path)
-            project = bgt_project.recover(path, out, progress=self.say, **options)
+            # `recover_any` picks the engine's half, so an NVGT game dropped
+            # on this window is recovered rather than refused with a message
+            # about a missing BGT trailer.
+            done = bgt_project.recover_any(path, out, progress=self.say,
+                                           **options)
             self.say("")
+            if done.project is None:
+                for name, value in sorted(
+                        (done.manifest.get("diagnostics") or {}).items()):
+                    self.say("%s: %s" % (name, value))
+                if done.ignored:
+                    self.say("These options belong to the BGT half and were "
+                             "not applied: %s" % ", ".join(done.ignored))
+                return "Recovered an NVGT game to %s" % out
+            project = done.project
             for line in project.summary().splitlines():
                 self.say(line)
             report = project.compile_report

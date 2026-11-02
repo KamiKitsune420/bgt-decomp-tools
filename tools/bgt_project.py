@@ -59,7 +59,8 @@ import shutil
 import sys
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import (Any, Dict, List, NamedTuple, Optional, Sequence,
+                    Tuple)
 
 try:                      # installed as a package
     from . import (as_opcodes, bgt_api, bgt_apicheck, bgt_asir,
@@ -1703,6 +1704,67 @@ def inline_prefix(order: List[str],
                 "section it calls empty")
 
 
+class Recovered(NamedTuple):
+    """What `recover_any` produced, and which engine's half produced it.
+
+    One of the two payloads is set. The caller reads `engine` rather than
+    guessing from the type, and `ignored` names the options that did not
+    apply to the engine actually used -- dropping those silently is how a
+    recovery comes out missing its data with nothing said about it.
+    """
+    engine: str
+    project: Optional["Project"] = None
+    manifest: Optional[Dict[str, Any]] = None
+    ignored: Sequence[str] = ()
+
+
+def recover_any(exe_path: str, out_dir: str,
+                progress=lambda message: None, **options) -> Recovered:
+    """Recover a game with whichever engine's half it needs.
+
+    `bgt recover` used to run the BGT chain whatever it was handed, so an
+    NVGT game failed with `no xproc10 trailer -- not a BGT executable`, which
+    reads as a broken tool rather than as the wrong command -- and it failed
+    that way even when `bgt identify` had just named the engine correctly.
+    Reported as issue #7.
+
+    `engine.identify` is the function that exists to make this decision, and
+    it claims an engine only when that engine's own verifying layer agrees,
+    so routing on it cannot send a BGT game down the NVGT path or the reverse.
+    An executable it cannot place is still handed to the BGT chain, because
+    that is where the more detailed refusal comes from.
+    """
+    try:                      # installed as a package
+        from . import engine as engine_mod
+    except ImportError:       # run directly from a checkout
+        import engine as engine_mod
+
+    identity = engine_mod.identify(exe_path)
+    if identity.engine != engine_mod.NVGT:
+        return Recovered(engine_mod.BGT,
+                         project=recover(exe_path, out_dir,
+                                         progress=progress, **options))
+
+    progress("%s is an NVGT game -- recovering with the NVGT half"
+             % os.path.basename(exe_path))
+    try:                      # installed as a package
+        from .nvgt import recover as nvgt_recover
+    except ImportError:       # run directly from a checkout
+        import recover as nvgt_recover
+
+    # The two halves take different options, and the BGT ones are the
+    # defaults here, so say which of them this path cannot honour instead of
+    # appearing to have applied them.
+    ignored = sorted(name for name, value in options.items()
+                     if name not in ("make_zip",) and value
+                     not in (None, False, (), []))
+    exporter = (nvgt_recover.generate_archive
+                if out_dir.lower().endswith(".zip")
+                else nvgt_recover.generate_project)
+    manifest = exporter(exe_path, out_dir, 800, progress)
+    return Recovered(engine_mod.NVGT, manifest=manifest, ignored=ignored)
+
+
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
             timeout: float = 600.0, with_data: bool = True,
@@ -2190,15 +2252,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
 
-    project = recover(args.exe, args.output, args.include,
-                      make_zip=not args.no_zip, compile_check=args.compile,
-                      timeout=args.timeout, with_data=not args.no_data,
-                      extract_data=args.extract_data,
-                      stock_includes=not args.no_stock_includes,
-                      with_game_files=not args.no_game_files,
-                      decrypt_files=not args.no_decrypt_files,
-                      progress=(lambda m: None) if args.quiet
-                      else (lambda m: print("  %s" % m, flush=True)))
+    done = recover_any(args.exe, args.output,
+                       include_dirs=args.include,
+                       make_zip=not args.no_zip, compile_check=args.compile,
+                       timeout=args.timeout, with_data=not args.no_data,
+                       extract_data=args.extract_data,
+                       stock_includes=not args.no_stock_includes,
+                       with_game_files=not args.no_game_files,
+                       decrypt_files=not args.no_decrypt_files,
+                       progress=(lambda m: None) if args.quiet
+                       else (lambda m: print("  %s" % m, flush=True)))
+    if done.project is None:
+        print("recovered with the NVGT half -- %s"
+              % json.dumps(done.manifest.get("diagnostics", {})))
+        if done.ignored:
+            print("these options are the BGT half's and were not applied: %s"
+                  % ", ".join(done.ignored))
+        return 0
+    project = done.project
     print(project.summary())
     if project.compile_report is not None and not project.compile_report.ok:
         for diagnostic in project.compile_report.errors[:20]:

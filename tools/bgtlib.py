@@ -15,9 +15,12 @@ appended past the last section as an overlay, encrypted and compressed.
            |         -> AngelScript bytecode
            `- 12-byte trailer  "xproc10\\0" + LE u32 overlay offset
 
-Everything here was read out of strike.exe (Psycho Strike) with Ghidra; see
-STRIKE-DECOMP.md in the Psycho Strike folder for the derivation of each step.
-The seed is brute-forced rather than assumed, so builds that changed it still work.
+Every step here was read out of a game's own runtime with Ghidra rather than
+inferred from byte patterns -- `asCReader` and the chain above are statically
+linked into every BGT executable, so the build in front of you describes
+itself. The key seed and the key GENERATOR are both searched rather than
+assumed, so a build that changed either still opens: the 2010 engine advances
+its key material by addition where every later one multiplies.
 """
 
 import hashlib

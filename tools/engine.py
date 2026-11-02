@@ -85,7 +85,17 @@ class Identity:
                        ", %d embedded pack%s" % (len(packs), "" if len(packs) == 1 else "s")
                        if packs else ""))
         reasons = "; ".join("%s: %s" % kv for kv in self.rejected.items())
-        return "%s: not recognised (%s)" % (name, reasons or "no candidates")
+        appended = self.facts.get("appended_bytes") or 0
+        # An executable with a payload appended and no engine claiming it is a
+        # different situation from one with nothing appended, and the two used
+        # to read the same. Most often it is an NVGT build whose packaging
+        # parameters have not been verified here -- official releases change
+        # them per build, and this toolkit refuses to guess at one.
+        tail = ("; %d bytes ARE appended, so this is probably a build whose "
+                "packaging is not verified here rather than a game of neither "
+                "engine" % appended) if appended else ""
+        return "%s: not recognised (%s%s)" % (name, reasons or "no candidates",
+                                              tail)
 
 
 def _probe_bgt(data: bytes, ident: Identity) -> bool:
@@ -123,6 +133,12 @@ def _probe_nvgt(data: bytes, ident: Identity) -> bool:
                                 "-- no compiled payload")
         return False
 
+    # Something IS appended here, which is worth recording even when no
+    # profile reads it: "not recognised" reads as "not an audio game at all",
+    # and the commonest reason an NVGT game lands here is a build whose
+    # packaging parameters have not been verified against samples yet. That is
+    # a gap this toolkit declines to guess past, not a failure to look.
+    ident.facts["appended_bytes"] = len(data) - start
     try:
         info, stream = extract.extract_data(data)
     except (ValueError, OSError) as exc:

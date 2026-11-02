@@ -1,24 +1,45 @@
 """
 as_module -- reader for the AngelScript module that BGT embeds in a game executable.
 
-Two serialization dialects turn up across Aaron Baker's BGT titles, and they differ
-only in how a string is written. Everything else -- big-endian integers, the encoded
-varint, the record layouts -- is shared.
+Two serialization dialects turn up, and **which one a module uses is a fact
+about the BGT version that built it, never about who wrote the game.** One
+developer with two versions of the toolkit produces two dialects; two
+developers on one version produce the same one. This file used to name the
+dialects after an author, which is misleading in exactly the way that
+matters when a new title does not parse -- suspect a different BGT version
+before suspecting a modified engine. Reported as issue #2.
 
-    TAGGED   (Psycho Strike, Paladin of the Sky)
+    TAGGED   (the older AngelScript)
         0x00        empty
         0x6E 'n'    new string:  eu(len) then len bytes, appended to savedStrings
         0x72 'r'    back-ref:    eu(index) into savedStrings
 
-    LEN2     (Manamon 2 -- newer AngelScript)
+    LEN2     (the newer AngelScript)
         eu(v); v even -> new string of v/2 bytes, appended to savedStrings
                v odd  -> back-reference to savedStrings[(v-1)/2]
 
-Which one a module uses is detected, not assumed: only one of them parses the enum
-section to its declared member counts and lands on a coherent boundary.
+**The dialects differ in RECORD LAYOUT as well, not only in strings** -- the
+script-object flag moves, a funcdef gains a traits byte, an object variable is
+two fields rather than three, and so on. The claim that everything but the
+string encoding is shared was the single most expensive wrong sentence in this
+reader's history, so it is corrected rather than softened.
 
-Ground truth for the record layouts is asCReader in the game's own binary; see
-STRIKE-DECOMP.md for the Psycho Strike derivation, which this follows.
+Note an empty string in LEN2 does **not** occupy a savedStrings slot, which is
+checkable rather than assumed: one 2.4 MB module holds 31,834 of them, the
+first at its fourth field, with 76,718 back-references after it -- and its tail
+lands exactly on EOF. Were they indexed, every one of those references would be
+off by a growing amount and nothing would land. (Issue #3.)
+
+Which dialect a module uses is detected, not assumed, and so is every field
+that varies between builds of one dialect: each candidate is parsed and the one
+whose tail lands exactly on EOF wins, with the assumptions this reader already
+held tried first so a tie cannot re-describe a module that already parsed.
+
+Ground truth for the record layouts is asCReader in the game's own binary --
+it is statically linked into every BGT executable, so the layout for the build
+in front of you is in the file in front of you. Do not infer it from byte
+patterns: that reliably produces answers which are confident, plausible and
+wrong.
 """
 
 import re

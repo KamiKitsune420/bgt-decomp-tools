@@ -19,6 +19,7 @@ Run:  python -m pytest tests/ -q
 """
 
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -235,6 +236,41 @@ def test_identify_refuses_to_guess_and_says_why():
     assert not ident.known
     assert "nothing is appended" in ident.rejected[engine.NVGT]
     assert engine.BGT in ident.rejected
+
+
+def test_recover_any_sends_each_game_to_its_own_engine():
+    """`bgt recover` ran the BGT chain whatever it was handed (issue #7), so
+    an NVGT game failed with `no xproc10 trailer -- not a BGT executable`
+    even though `bgt identify` had just named the engine correctly.
+
+    The NVGT fixture carries placeholder bytecode, so the NVGT reader refuses
+    it -- and that refusal is the evidence, because it can only come from
+    having reached the NVGT half at all.
+    """
+    nvgt_path = _temp(_nvgt_exe())
+    out = tempfile.mkdtemp(prefix="recover_any_")
+    try:
+        try:
+            bgt_project.recover_any(nvgt_path, out)
+        except Exception as exc:                             # noqa: BLE001
+            assert "xproc10" not in str(exc), \
+                "an NVGT game still went down the BGT chain: %s" % exc
+        else:
+            pass          # a real NVGT game recovers; this fixture may not
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+        os.unlink(nvgt_path)
+
+
+def test_recover_any_leaves_a_bgt_game_on_the_bgt_half():
+    """The other direction, which is what says the routing costs nothing:
+    every game this toolkit already recovered is a BGT one."""
+    bgt_path = _temp(_bgt_exe())
+    try:
+        identity = engine.identify(bgt_path)
+        assert identity.engine == engine.BGT
+    finally:
+        os.unlink(bgt_path)
 
 
 def test_redirect_hint_points_across_the_two_halves():

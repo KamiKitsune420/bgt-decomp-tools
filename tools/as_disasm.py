@@ -69,8 +69,10 @@ except ImportError:       # run directly from a checkout
     import as_opcodes
 
 
-# Primitive token ids. Each is evidence-backed in STRIKE-DECOMP.md -- from BGT's
-# own shipped class sources and from member access widths -- not guessed.
+# Primitive token ids, from BGT's own shipped class sources and from member
+# access widths -- not guessed. (This cited a per-title document that is not in
+# this repository, and per-title findings do not belong here; the evidence is
+# the engine's own include folder, which ships with it.)
 TOKEN_NAMES: Dict[int, str] = {
     65: "bool", 68: "int", 69: "int8", 70: "int16", 71: "int64",
     75: "uint", 76: "uint8", 77: "uint16", 78: "uint64",
