@@ -424,6 +424,33 @@ class CollapsedChainTests(unittest.TestCase):
                  "}")
         self.assertNotIn("collapsed_chain", kinds(whole))
 
+    def test_the_SAME_slot_tested_BOTH_ways_is_an_exclusive_or(self):
+        """`(x != 0) && !a || (x == 0) && a` is an XOR the author wrote, not
+        a collapse: a collapse repeats the SAME test, because it is one slot
+        read twice for one operand. Discarding the operator counted the two
+        as a repeat, and all three of Crazy Party's survivors were that --
+        an XOR, an `(x == 0) || (x != 0 && y)`, and a minesweeper corner
+        check that enumerates four corners."""
+        xor = ("void f() {\n"
+               "    if (((local_3 != 0) && !accepte)"
+               " || ((local_3 == 0) && accepte)) {\n"
+               "        go();\n"
+               "    }\n"
+               "}")
+        self.assertNotIn("collapsed_chain", kinds(xor))
+
+    def test_the_same_test_REPEATED_is_still_caught(self):
+        """The other direction, which is what makes the narrowing safe. The
+        pre-fix Field Wars and cs server recoveries still report nine each
+        with it in place, and both fixed trees report zero."""
+        same = ("void f() {\n"
+                "    if (((key_down(KEY_UP) && (local_14 != 0))"
+                " && (local_24 != 0)) && (local_14 != 0)) {\n"
+                "        go();\n"
+                "    }\n"
+                "}")
+        self.assertIn("collapsed_chain", kinds(same))
+
     def test_ONE_operator_is_not_a_chain(self):
         """A single merge has one destination and nothing to overwrite, so a
         repeat there is the author's own and not this shape."""

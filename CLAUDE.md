@@ -8890,12 +8890,32 @@ baseline it is meant to measure.
 
 Swept over every title in the corpus:
 
-| title | `collapsed_chain` |
-|---|---|
-| Field Wars | **9** |
-| cs server | **9** |
-| Crazy Party | **3** |
-| Super Egg Hunt, The Gate, BTH, rage room, cs client, constant velocity, Manamon 1 | 0 |
+| title | `collapsed_chain`, when this was written | now |
+|---|---|---|
+| Field Wars | **9** | **0** |
+| cs server | **9** | **0** |
+| Crazy Party | 3 | **1** |
+| Super Egg Hunt, The Gate, BTH, rage room, cs client, constant velocity, Manamon 1 | 0 | 0 |
+
+**The two nines are fixed** by the web-local naming above. Crazy Party's three
+were the instrument: the term pattern captured the slot NAME and discarded the
+operator, so `(x != 0)` and `(x == 0)` counted as a repeat -- and a condition
+testing one slot *both ways* is an exclusive-or the author wrote. All three
+were that shape, including
+
+```
+if (((local_3 != 0) && !accepte) || ((local_3 == 0) && accepte))
+```
+
+A collapse repeats the **same** test, because it is one slot read twice for
+one operand, so keeping the operator loses nothing: the pre-fix Field Wars
+and cs server trees still report nine each with the narrowing in place, and
+both directions are pinned by a test.
+
+The one survivor is read and benign -- `Demineur`'s mine placement re-rolls
+while the cell is taken or is one of the four corners, which repeats
+`(x == 0)` across two conjuncts. A signature is a lead and not a verdict, and
+one explained row on one title is where that one rests.
 
 **And `empty_arm` was widened**, because it could only see an empty `if`
 arm: `_empty_else` was consulted only to upgrade an already-empty arm to

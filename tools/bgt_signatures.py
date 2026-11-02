@@ -74,7 +74,13 @@ _ELSE_EMPTY = re.compile(r"^\s*(?:\}\s*)?else\s*\{\s*\}\s*$")
 #: A slot tested for truth, the way the renderer spells a term of a
 #: short-circuit chain: `(local_14 != 0)`. A chain's terms are each their own
 #: value, so one appearing twice means a term was lost.
-_CHAIN_TERM = re.compile(r"\((" + r"(?:local|arg)_?\d+" + r")\s*(?:!=|==)\s*0\)")
+#: A chain term, **with its operator**. Discarding the operator counted
+#: `(x != 0)` and `(x == 0)` as a repeat -- and a condition that tests one
+#: slot both ways is an exclusive-or the author wrote, not a collapse. All
+#: three of Crazy Party's survivors were that shape:
+#: `((local_3 != 0) && !accepte) || ((local_3 == 0) && accepte)`.
+#: A collapse repeats the SAME test, which is still caught.
+_CHAIN_TERM = re.compile(r"\((" + r"(?:local|arg)_?\d+" + r")\s*(!=|==)\s*0\)")
 #: The head of a condition worth looking at. Only `if` and `while`: a `for`
 #: header holds three clauses, so one name in two of them is ordinary.
 _CONDITION = re.compile(r"\b(?:if|while)\s*\(")
