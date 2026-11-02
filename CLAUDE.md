@@ -3205,6 +3205,8 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 | Ljudfarmen | 283 | 25 | 2011-02-18 18:26 |
 | Grodan Gun | 295 | 26 | 2011-09-19 11:10 |
 | Antony | 312 | 27 | 2012-02-05 15:23 |
+| Screaming Strike | 394 | -- | 2012-07-24 |
+| a 2013 BGT, from a pack tool | 427 | -- | 2013-04-24 |
 | BGT 1.3 | 432 | 32 | 2014-06-01 00:41 |
 | Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
 | Paladin of the Sky | 432 | 32 | stock |
@@ -3226,9 +3228,17 @@ was taken before those refusals existed. Re-derived, not reinterpreted.)
 ### Three engines between 1.0 and 1.3, and they date the format break
 
 The three Swedish titles are stock BGT of three versions nobody here had a
-sample of, and they turn a two-point line into a five-point one. **Every count
-rises monotonically with the build date**, which is what says these are
-successive versions of one engine rather than forks: 240, 283, 295, 312, 432.
+sample of, and they turn a two-point line into a seven-point one. **Every
+count rises monotonically with the build date**, which is what says these are
+successive versions of one engine rather than forks: 240, 283, 295, 312, 394,
+427, 432.
+
+The last two came free, from asking the question of every BGT executable on
+this machine rather than of the titles in this document: a stub carries its
+own runtime, so one scan over the game folders dates every engine on disk.
+Ten more turned up, and the two that are new versions are Screaming Strike's
+(July 2012) and a 2013 one inside somebody's pack-building tool. Everything
+from 2014-06-01 is stock 1.3 by its own timestamp.
 
 What that dates is the format break this file had been attributing to "the
 2010 engine":
@@ -3239,14 +3249,20 @@ What that dates is the format break this file had been attributing to "the
 | key generator | add | add | multiply | multiply |
 | module stored | raw | raw | LZ77 | LZ77 |
 | pack-size field | **absent** | **absent** | `"0 "` | `"0 "` |
-| namespace in a type declaration | absent | absent | present | present |
-| enum section | **absent** | **absent** | absent | present |
+| namespace in a type declaration | absent | absent | **present** | present |
+| enum section | absent | absent | absent | **present** |
+| encoded integer | plain base-128 | plain base-128 | plain base-128 | **sign flag** |
 
-**All five differences move together, between September 2011 and February
-2012.** That is one release doing the lot, which is worth knowing before
-treating any of them as independently trialled: a title that adds where later
-ones multiply also stores raw, also writes no pack field, and also predates
-namespaces.
+**Two breaks, not one**, and the first draft of this table said otherwise. Four
+things move between September 2011 and February 2012 -- the key generator, the
+compression, the pack-size field and the namespace -- and **the module's own
+integer encoding and its enum section move later**, somewhere between February
+2012 and June 2014. Antony multiplies, compresses, writes `"0 "` and writes a
+namespace, and still reads 0x59 as 89 rather than as a two-byte value.
+
+Which is worth the correction twice over: the claim came from three titles and
+the refutation came from reading the third one properly rather than assuming it
+sat on the later side of everything.
 
 And the AngelScript underneath moved with it. Ljudfarmen carries the literal
 `2.20.2`, which is the version string BGT 1.0 carries too, and neither it nor
@@ -11607,6 +11623,80 @@ So this is a **third generation** beside `tagged` and `len2`, not a third
 the record layout and the section list that move. The pattern is the one
 this document already states -- *the dialects differ in record layout, not
 only in strings* -- reached from the other end of the version line.
+
+### ...and the ENCODED INTEGER has no sign flag, which is the expensive one
+
+The declaration records read perfectly until the first size of 0x59, and
+then the reader takes two bytes where the format spends one. This file's
+highest-value item says the encoded integer *looks* like a continuation-bit
+varint and is not -- the lead byte's top bit is a **sign flag** and the width
+is a run of set bits below it, so `0x40` and up is already a wide form. **In
+this generation it really is the continuation-bit varint**: 0x59 is 89, which
+is a plausible class size and leaves the next record starting exactly on its
+`n` tag, where the other reading gives 6,510 and a tag of 0x0A.
+
+Which is the same trap this document describes, inverted. The sign-flag
+reading is correct for every title here that parses, and reaching for it on
+an older module desynchronises on the first value of 64 or more -- *"which in
+a real module can be thousands of records in"*, or, here, at byte 0x3F.
+
+Measured on all three, with the two hypotheses crossed:
+
+| title | encoded integer | namespace | declarations read |
+|---|---|---|---|
+| Ljudfarmen | plain base-128 | absent | **5 / 5** |
+| Grodan Gun | plain base-128 | absent | **9 / 9** |
+| Antony | plain base-128 | **present** | **7 / 7** |
+
+Each title reads only under its own pair and dies within 0x30 bytes under
+the other three, which is what makes this evidence rather than a tuning: the
+wrong namespace answer fails on the second record, and the wrong integer
+answer fails on the first size above 63.
+
+Grodan Gun's nine are `event`, `player`, `object`, `sound_pool_item`,
+`sound_pool`, `dynamic_menu_item`, `dynamic_menu`, `preload`,
+`number_speaker` -- a game's own classes and BGT's library ones, with sizes
+of 32, 60, 48, 89, 44, 21, 52, 24 and 40 bytes.
+
+### Where it stops now, and why that is the place to read the binary
+
+All three then reach the funcdef section and stop inside the first record.
+Grodan Gun's, from 0x9D:
+
+```
+01                 funcdef count = 1
+66                 'f', so ReadFunction
+6e 0d              'n', eu(13)
+"menu_callback"
+42 00 00 02 05     <- and here
+6f 72 06 01 00 00 00 05 6f 6e 06 "string" 00 00 ...
+```
+
+`42` is where the signature begins, and it is not a string tag -- the reader
+takes it as the start of a return data type and lands on `6f` ('o'), which is
+no tag at all. The newer `ReadFunctionSignature` reads name, the `$dlgte`
+shortcut, a return type, the parameters, the in/out flags, the funcType, the
+defaults, the owner, a traits byte and a namespace, in that order; at least
+the first of those differs here, and the legacy token numbering this file
+records (`t + (t>=36) + (t>=64)`, so BGT's 65/68/79/92 are bool/int/float/
+double) puts 0x42 = 66 squarely in the token range -- which is a reading, not
+a result.
+
+**That is where guessing stops being worth it.** Three fields in and already
+one correction to this document's own table, and the next one is a record with
+ten fields. `asCReader::ReadFunctionSignature` is statically linked into each
+of those three executables, the stub is uncompressed in a game, and
+`bgtlib.read_trailer` gives the split so a Ghidra import does not grind
+through the encrypted overlay -- which is what this file's first rule says to
+do and what two earlier attempts in it only reached after inferring something
+confident and wrong first.
+
+**Nothing is wired into `as_module` for any of this**, deliberately. Both
+findings would be per-build fields trialled against the exact-EOF landing, and
+no 2011 or 2012 module lands on EOF yet -- so wiring them now would add two
+flags that can never be selected, which is dead code dressed as progress.
+They are written down here with the bytes that prove them, which is what the
+next attempt actually needs.
 
 **Not attempted here, deliberately.** Extending the reader to it is a real
 piece of work (no enum section, no namespaces, probably funcdef and body
