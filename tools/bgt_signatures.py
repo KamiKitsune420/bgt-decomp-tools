@@ -11,13 +11,14 @@ signature below is here because a real, reported bug left it behind:
 |---|---|
 | `self_identical` | a collapsed snapshot -- `this.damage = this.damage;` |
 | `tautology` | the same collapse inside a condition -- `if (a == a)` |
-| `empty_arm` | "an `if` with an empty arm is a condition that has lost its value" |
+| `empty_arm` | "an `if` with an empty arm is a condition that has lost its value" -- either arm, since a fold that collapses the second one leaves `} else { }` |
 | `two_empty_arms` | the stronger form, which found the folded `\\|\\|` chain |
 | `double_assign` | a name assigned twice in a row and then read several times in one expression -- `get_percent_of_range`. The DESTINATION of an assignment is not a read of it: counting it made BGT's own `x = f(x)` chain a hit, 81 rows of 105 |
 | `identity_cast` | `double(int(x))`, which is only an identity when `x` is already integral -- the weakest of these, since the text cannot tell a truncation from a no-op |
 | `bare_read` | a statement that only reads -- the borrowed handle hoisted out of its guard |
 | `duplicated_call` | the same call text three or more times in one statement, a numeric conversion excepted -- re-evaluating `int(x)` costs nothing |
 | `same_argument` | one call reading one slot for several arguments -- a safezone whose six bounds are one number |
+| `collapsed_chain` | a condition chaining three or more terms and testing one of them twice -- a movement test whose timer term was overwritten |
 
 **A hit is a lead, not a verdict**, and the discipline is the same as for
 `bgt audit`: the original wrote some of these itself. Paladin's `battle`
@@ -70,13 +71,26 @@ _IF_EMPTY = re.compile(r"\bif\s*\(.*\)\s*\{\s*\}\s*$")
 _IF_OPEN = re.compile(r"\bif\s*\(.*\)\s*\{\s*$")
 _ELSE_EMPTY = re.compile(r"^\s*(?:\}\s*)?else\s*\{\s*\}\s*$")
 
+#: A slot tested for truth, the way the renderer spells a term of a
+#: short-circuit chain: `(local_14 != 0)`. A chain's terms are each their own
+#: value, so one appearing twice means a term was lost.
+_CHAIN_TERM = re.compile(r"\((" + r"(?:local|arg)_?\d+" + r")\s*(?:!=|==)\s*0\)")
+#: The head of a condition worth looking at. Only `if` and `while`: a `for`
+#: header holds three clauses, so one name in two of them is ordinary.
+_CONDITION = re.compile(r"\b(?:if|while)\s*\(")
+#: How many short-circuit operators make a CHAIN. Two, because a chain needs
+#: three terms before the compiler has to recycle a destination slot: with one
+#: operator there is a single merge and a single destination, and nothing to
+#: overwrite.
+CHAIN_OPERATORS = 2
+
 #: What `bgt recover` writes at the top of a file it replaced with BGT's own
 #: source. Such a file's text is the engine's, not the recovery's, so its
 #: shapes say nothing about this decompiler.
 _STOCK_MARKER = "BGT's own copy of this file"
 
 KINDS = ("self_identical", "tautology", "empty_arm", "two_empty_arms",
-         "same_argument",
+         "same_argument", "collapsed_chain",
          "double_assign", "identity_cast", "bare_read", "duplicated_call")
 
 #: How many times one call text has to appear in a single statement before it
@@ -84,6 +98,26 @@ KINDS = ("self_identical", "tautology", "empty_arm", "two_empty_arms",
 #: without a temporary; three is what `file_menu` and `play_extended_1d`
 #: looked like, and what this file records as a correctness number.
 DUPLICATION_LIMIT = 3
+
+
+def _condition_text(line: str, at: int):
+    """The bracket-matched condition starting at the `(` at `at`.
+
+    Bracket-matched rather than patterned, for the reason `same_argument`
+    already records: a pattern with one level of nesting cannot see
+    `(local_1 < float(maxpos))`, and a condition is full of those. None when
+    the brackets do not close on this line, which is the honest answer rather
+    than a truncated condition read as a whole one.
+    """
+    depth = 0
+    for i in range(at, len(line)):
+        if line[i] == "(":
+            depth += 1
+        elif line[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return line[at:i + 1]
+    return None
 
 
 def mask(line: str) -> str:
@@ -105,6 +139,19 @@ def _empty_else(lines: List[str], j: int) -> bool:
         return True
     return (bool(re.match(r"^(?:\}\s*)?else\s*\{\s*$", here))
             and j + 1 < len(lines) and lines[j + 1].strip() == "}")
+
+
+def _arm_above_was_empty(lines: List[str], j: int) -> bool:
+    """Whether the `if` arm this `else` belongs to was already reported.
+
+    Both arms empty is one construct and one row: the `if` line fires
+    `empty_arm` -- and `two_empty_arms` -- so firing again at the `else`
+    would count one lost condition twice.
+    """
+    if j >= 1 and _IF_EMPTY.search(lines[j - 1].strip()):
+        return True
+    return (j >= 2 and bool(_IF_OPEN.search(lines[j - 2].strip()))
+            and lines[j - 1].strip() == "}")
 
 
 #: A call's name and the text between its brackets, found by bracket
@@ -217,6 +264,25 @@ def scan(text: str) -> List[Tuple[str, int, str]]:
             hit("empty_arm", i)
             if _empty_else(lines, i + 1 if inline else i + 2):
                 hit("two_empty_arms", i)
+        #: **An empty ELSE under a non-empty arm is the same signal**, and
+        #: this shape could not see one: `_empty_else` was consulted only to
+        #: upgrade an already-empty `if` arm. A collapsed fold leaves exactly
+        #: that when the arm that folded away is the second one -- `cs`'s
+        #: `netloop` lost a nested ternary's two string arms and came out
+        #:
+        #:     if (get_player_index_from(local_15) > -1) {
+        #:         local_15 = local_59[local_33];
+        #:     } else {
+        #:     }
+        #:
+        #: and the sweep read 0 while every admin was listed with no AFK
+        #: marker. Only the literal audit caught it.
+        #:
+        #: Counted at the `else` rather than at the `if`, so a run of them
+        #: cannot be collapsed into one row by accident, and only when this
+        #: line is not itself the empty-arm case already reported above.
+        elif _empty_else(lines, i) and not _arm_above_was_empty(lines, i):
+            hit("empty_arm", i)
 
         #: Two assignments to one name in a row, then a statement reading it
         #: more than once: one scratch slot carrying several operands, which
@@ -274,6 +340,41 @@ def scan(text: str) -> List[Tuple[str, int, str]]:
                     writes += 1
             if writes > 1:
                 hit("same_argument", i)
+                break
+
+        #: **A chain of three or more terms that tests one of them twice.**
+        #: Each term of an `&&` is its own value, so a chain reading one slot
+        #: twice has lost a term -- and what it lost is whatever that slot
+        #: held first.
+        #:
+        #: The compiler nests `&&` to the left and cycles two or three
+        #: scratch slots through the merges, so in a long chain a slot is a
+        #: destination more than once. Rendered as variables, each arm's
+        #: computation becomes an unconditional statement and the later
+        #: merges overwrite the earlier terms. Field Wars' movement is the
+        #: case: `flytimer.elapsed > flytime && !inac && me.x < maxpos &&
+        #: key_up(KEY_LSHIFT) && key_up(KEY_RSHIFT)` came out as
+        #:
+        #:     if (key_down(KEY_RIGHT) && (local_14 != 0) && (local_22 != 0)
+        #:         && (local_24 != 0) && (local_14 != 0) && (local_22 != 0))
+        #:
+        #: with the timer term and the `!inac` term gone and two terms tested
+        #: twice. The game compiled, ran, and nothing moved on a held key.
+        #:
+        #: **Nine shapes swept that title and reported nothing**, which is
+        #: why this one exists: the assignments interleave across three
+        #: slots, so `double_assign` wants two in a row and does not see
+        #: them, and the repeat is `x != 0 && ... && x != 0` rather than
+        #: `x == x`, so `tautology` does not either.
+        for m in _CONDITION.finditer(line):
+            cond = _condition_text(line, m.end() - 1)
+            if cond is None:
+                continue
+            if cond.count("&&") + cond.count("||") < CHAIN_OPERATORS:
+                continue
+            terms = _CHAIN_TERM.findall(cond)
+            if any(terms.count(t) > 1 for t in terms):
+                hit("collapsed_chain", i)
                 break
 
         counts: Dict[str, int] = {}

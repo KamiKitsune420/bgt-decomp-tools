@@ -8372,6 +8372,179 @@ argument for the trace: a fold rule's answer depends on four tables and
 a position, and the method that fires is not the one that looks
 likeliest.
 
+#### A CHAIN of three or more terms, and why the obvious fix is REJECTED
+
+The two halves above are right and they are not the whole of it. A
+**chain** -- `a && b && c && d` -- is a different shape from a single
+`&&`, and nothing in this file had looked at one. **This section is a
+diagnosis and an instrument, not a fix**: four attempts are recorded
+below, every one of them measured, and every one rejected for breaking
+something else.
+
+`CompileBooleanOperator` nests to the left, so five terms is four merges,
+and the allocator hands a scratch slot out again once a merge's
+destination has been consumed. Field Wars' player movement is five terms
+over **three slots**, so two of them are a destination twice:
+
+```
+L118: CpyVtoR4 14 ; JLowNZ L119 ; SetV4 22,0 ; JMP L120   dest 22
+L120: CpyVtoR4 22 ; JLowNZ L121 ; SetV4 24,0 ; JMP L122   dest 24
+L122: CpyVtoR4 24 ; JLowNZ L123 ; SetV4 14,0 ; JMP L124   dest 14  <- again
+L124: CpyVtoR4 14 ; JLowNZ L125 ; SetV4 22,0 ; JMP L126   dest 22  <- again
+L126: CpyVtoR4 22 ; JLowZ  L127                           the `if`
+```
+
+Every one of those is a **destination**, and the fold rules exempt only
+the ARM operands -- `_conditionally_bound` says so outright, because a
+lone destination may be a variable the compiler reused, which is Psycho
+Strike's `find_likely_request`. So every slot here is promoted to a
+variable, every arm's computation becomes an unconditional statement, and
+the later merges overwrite the earlier terms:
+
+```
+source:     flytimer.elapsed > flytime && !inac && me.x < maxpos
+                && key_up(KEY_LSHIFT) && key_up(KEY_RSHIFT)
+
+recovered:  local_24 = (flytimer.get_elapsed() > flytime);
+            local_14 = local_24;                       // the TIMER, parked
+            ...
+            local_14 = (inac ? 1 : 0);                 // ...overwritten
+            if (key_down(KEY_UP) && (local_14 != 0) && (local_24 != 0)
+                && (local_21 != 0))
+```
+
+-- the flight timer computed, parked, overwritten and never tested, and in
+the companion block two terms tested twice with `!inac` gone. **The game
+compiled, ran, and nothing moved on a held key**, which is how it was
+reported: *"none of the timers work when it comes to walking"*. The timers
+were never the problem.
+
+#### The `cs` server has it too, and its author's source names the cost
+
+The nine rows on that title are what makes this more than one game's
+movement, because its source is in hand and `part_0.bgt` is the game's
+**own** code rather than a library file. Every one is a permission check
+in the command dispatcher:
+
+| the author's `server.bgt` | recovered |
+|---|---|
+| `!players[i].dev and players[i].tempdev and players[i].admin and flag==1` | `!dev && tempdev && (local_16 != 0) && (local_16 != 0)` |
+| `!dev and !tempdev and !admin` | collapsed the same way |
+| `parsed[0]=="/baselist"&&dev&&tempdev` | collapsed the same way |
+
+**The `admin` term is gone from the recovered server's dispatcher**, which
+decides who may run an administrative command.
+
+**`bgt libcheck` cannot see any of this**, and says so by not moving: 194
+of 196 before and after every attempt below. A collapsed condition still
+*contains* its calls, in the right order, with the right literals, which
+this file already records about that score -- and the author's own text
+for these bodies is in `server.bgt`, the main script, which `--include`
+never reaches.
+
+#### The tenth shape, which is what this section ships
+
+`bgt signatures` swept Field Wars and reported **nothing** -- all nine
+shapes zero -- while that title's player could not walk:
+
+- `double_assign` wants a name assigned twice **in a row**, and a chain's
+  assignments interleave across three slots;
+- `tautology` wants `x == x`, and this is `x != 0 && ... && x != 0`.
+
+`collapsed_chain` is a condition with **two or more** short-circuit
+operators that tests one slot more than once. Two operators, because a
+chain needs three terms before the compiler has to recycle a destination:
+with one merge there is one destination and nothing to overwrite. The
+condition is bracket-matched rather than patterned, for the reason
+`same_argument` already records -- `(me.x < float(maxpos))` has a level of
+nesting in it, and a pattern that cannot see one under-reports the very
+baseline it is meant to measure.
+
+Swept over every title in the corpus:
+
+| title | `collapsed_chain` |
+|---|---|
+| Field Wars | **9** |
+| cs server | **9** |
+| Crazy Party | **3** |
+| Super Egg Hunt, The Gate, BTH, rage room, cs client, constant velocity, Manamon 1 | 0 |
+
+**And `empty_arm` was widened**, because it could only see an empty `if`
+arm: `_empty_else` was consulted only to upgrade an already-empty arm to
+`two_empty_arms`, so an empty `else` under a non-empty arm was invisible
+-- which is exactly what a collapsed fold leaves when the arm that folded
+away is the second one. It now reports either arm, once per construct.
+Baseline: Crazy Party 85, Field Wars and The Gate 10, Manamon 1 8, cs
+client 6, cs server 4, Egg Hunt 3, rage room 1, BTH and constant velocity
+0.
+
+#### Four attempts, and what each one broke
+
+Every one of these fixed Field Wars' nine and the server's nine. Every
+one was rejected, and the pattern is worth more than any of them: **a
+slot is reused for unrelated values in one body, so no exemption keyed on
+the slot NUMBER can be safe, and the two position-keyed attempts never
+fired at all.**
+
+| attempt | Field Wars | what it broke |
+|---|---|---|
+| 1. `_stale_fold` exempts `merge_operands \| merge_chain_links`, a chain link being any destination some merge tests | 9 -> 0 | the server's nested ternary: `" (AFK)"` and `" (active)"` gone, `get_player_index_from` 32 -> 30 |
+| 2. ...with chain links derived by ADJACENCY -- a link's own merge-label load is the next merge's test | 9 -> 0 | the same ternary; adjacency alone does not undo it |
+| 3. ...and `_stale_fold` narrowed to the chain links only | 9 -> 0 | the ternary comes back, and `/godmode` breaks: see below |
+| 4. ...keyed on the bind position, then on the read position | **9 -> 9** | nothing, because neither position ever matches and the fix is simply undone |
+
+**Attempt 3 is the one that nearly shipped, and `/godmode` is why it did
+not.** The author wrote a toggle whose arms are the constants `false` and
+`true`:
+
+```
+source:    players[index].godmode = (players[index].godmode == true
+                                     ? false : true);
+at HEAD:   players[local_24].godmode = (local_16 != 0);
+attempt 3: players[local_24].godmode = true;
+```
+
+A ternary over 0 and 1 matches the short-circuit shape exactly -- this
+file already records that hazard for `_begin_bool_merge` -- and its
+destination slot is **also** a destination in the four-term `&&` that
+guards the command, so exempting by slot folded its arms away. Godmode
+could be switched on and never off. Trading a visible failure for a
+silent wrong program is the one trade this file refuses, so attempt 3
+came out.
+
+**The widened `empty_arm` is what caught it**, which is the argument for
+shipping the instruments on their own: `if (godmode) { } else { }` with
+both arms gone, in a shape the sweep could not see an hour earlier.
+
+#### What the next attempt should know
+
+- **The slot is the wrong key and the position is the right one**, but
+  neither position tried is where the decision is made. `temp_bound[off]`
+  is the bind and `_pos()` is the read, and in Field Wars' flight chain
+  `_stale_fold` is asked about slot 22 at read 2162 with the chain's own
+  merge loads at 2047 and 2060 -- so the value that collapses is bound and
+  read somewhere neither of those describes.
+- **The attribution probe disagrees with the behaviour**, and the
+  behaviour is the authority. Wrapping the three candidate rules named
+  `_stale_fold`, and a second probe over the same body shows it returning
+  False at every one of its 630 calls on those slots while the output is
+  still collapsed. One of the two probes is wrong and which is not
+  established; the line counts and the sweep are not in doubt.
+- **`is_named` after a walk says nothing.** Names accumulate during
+  simulation, so every promoted slot is named by the end. Asked that way
+  it answers True for all three slots, which reads as "they were declared
+  all along" and is an artifact.
+- **Two oracle shapes were written and both are inert.** A five-term `&&`
+  over a global reproduces the slot recycling exactly -- destinations 5,
+  4, 5, 4 -- and so does the same with a call on a global object as its
+  first term, as Field Wars has; `merge_chain_links` comes out correctly
+  as `{2, 8, 9}`, and **no fold rule is asked about those slots at all**.
+  The defect is the shape *plus a cascade*: something promotes one term,
+  that promotion emits a statement, and every earlier parked term is then
+  stale by rule six. A bare chain in a fixture cannot supply the first
+  domino. Neither shape was kept -- padding that number with shapes which
+  cannot fail is the trap the whole command is organised against.
+
 #### ...and `duplicated_call` was counting CONVERSIONS
 
 The same correction one shape over. This one is a correctness number --

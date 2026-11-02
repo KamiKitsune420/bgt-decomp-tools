@@ -384,6 +384,132 @@ class SameArgumentTests(unittest.TestCase):
                 "__nvgt_held_17_280, __nvgt_held_17_264);\n")
         self.assertEqual(kinds(text), [])
 
+class CollapsedChainTests(unittest.TestCase):
+    """A condition chaining three or more terms and reading one twice.
+
+    Each term of an `&&` is its own value, so a chain that reads one slot
+    twice has lost a term -- and what it lost is whatever that slot held
+    first. Field Wars' player movement is the case:
+
+        source     flytimer.elapsed > flytime && !inac && me.x < maxpos
+                       && key_up(KEY_LSHIFT) && key_up(KEY_RSHIFT)
+
+    which recovered with the timer term computed, parked in a slot,
+    overwritten by the `!inac` term and never tested. The project recovered
+    with 0 residual gotos and a verified split, it compiled, it ran, and
+    nothing moved on a held key.
+
+    **Nine shapes swept that title and reported nothing**, which is why this
+    one exists: the assignments interleave across three slots, so
+    `double_assign` wants two in a row and misses them, and the repeat is
+    `x != 0 && ... && x != 0` rather than `x == x`, so `tautology` misses it
+    too.
+    """
+
+    def test_a_chain_that_reads_one_slot_twice_is_reported(self):
+        collapsed = ("void walk() {\n"
+                     "    if (((key_down(KEY_UP) && (local_14 != 0))"
+                     " && (local_24 != 0)) && (local_14 != 0)) {\n"
+                     "        me.y += 1;\n"
+                     "    }\n"
+                     "}")
+        self.assertIn("collapsed_chain", kinds(collapsed))
+
+    def test_a_chain_whose_terms_are_all_distinct_is_not(self):
+        whole = ("void walk() {\n"
+                 "    if (((key_down(KEY_UP) && (local_14 != 0))"
+                 " && (local_24 != 0)) && (local_21 != 0)) {\n"
+                 "        me.y += 1;\n"
+                 "    }\n"
+                 "}")
+        self.assertNotIn("collapsed_chain", kinds(whole))
+
+    def test_ONE_operator_is_not_a_chain(self):
+        """A single merge has one destination and nothing to overwrite, so a
+        repeat there is the author's own and not this shape."""
+        pair = ("void walk() {\n"
+                "    if ((local_14 != 0) && (local_14 != 0)) {\n"
+                "        me.y += 1;\n"
+                "    }\n"
+                "}")
+        self.assertNotIn("collapsed_chain", kinds(pair))
+
+    def test_the_condition_is_bracket_matched_not_patterned(self):
+        """`me.x < float(maxpos)` has a level of nesting in it, and a pattern
+        that cannot see one under-reports the baseline it is meant to
+        measure -- which `same_argument` already records paying for."""
+        nested = ("void walk() {\n"
+                  "    if (((key_down(KEY_UP) && (local_14 != 0))"
+                  " && (me.x < float(maxpos))) && (local_14 != 0)) {\n"
+                  "        me.y += 1;\n"
+                  "    }\n"
+                  "}")
+        self.assertIn("collapsed_chain", kinds(nested))
+
+
+class EmptyElseTests(unittest.TestCase):
+    """An empty `else` is the same lost condition as an empty `if` arm.
+
+    `_empty_else` was consulted only to upgrade an already-empty arm to
+    `two_empty_arms`, so an empty `else` under a NON-empty arm was invisible
+    -- and that is the shape a collapsed fold leaves when the arm that folded
+    away is the second one. `cs`'s `netloop` lost a nested ternary's two
+    string arms and came out
+
+        if (get_player_index_from(local_15) > -1) {
+            local_15 = local_59[local_33];
+        } else {
+        }
+        local_41.insert_last((local_59[local_33] + ""));
+
+    -- every admin listed with no AFK marker -- and the sweep read 0. Only
+    the literal audit caught it.
+    """
+
+    def test_an_empty_else_under_a_full_arm_is_reported(self):
+        text = ("void f() {\n"
+                "    if (get_index(name) > -1) {\n"
+                "        local_15 = names[i];\n"
+                "    } else {\n"
+                "    }\n"
+                "}")
+        self.assertIn("empty_arm", kinds(text))
+
+    def test_the_shape_it_could_always_see_still_counts(self):
+        """An empty THEN arm, which Paladin's TTS selector is six of."""
+        text = ("void f() {\n"
+                "    if (voice.rate == local_12) { }\n"
+                "    else { speak(\"Rate.\"); }\n"
+                "}")
+        self.assertIn("empty_arm", kinds(text))
+
+    def test_an_empty_THEN_arm_in_the_BRACE_STYLE_is_a_separate_gap(self):
+        """Written `if (c) {` / `} else {` with a non-empty else, the empty
+        arm is still invisible -- `split` wants the next line to be exactly
+        `}` and here it is `} else {`.
+
+        Pre-existing and left alone: widening it is a change to the shape
+        this sweep has always had, and it wants its own measurement. Pinned
+        so the gap is a decision rather than a surprise.
+        """
+        text = ("void f() {\n"
+                "    if (voice.rate == local_12) {\n"
+                "    } else {\n"
+                "        speak(\"Rate.\");\n"
+                "    }\n"
+                "}")
+        self.assertNotIn("empty_arm", kinds(text))
+
+    def test_an_else_with_a_body_is_not_reported(self):
+        text = ("void f() {\n"
+                "    if (get_index(name) > -1) {\n"
+                "        local_15 = names[i];\n"
+                "    } else {\n"
+                "        local_15 = \"\";\n"
+                "    }\n"
+                "}")
+        self.assertNotIn("empty_arm", kinds(text))
+
 
 if __name__ == "__main__":
     unittest.main()
