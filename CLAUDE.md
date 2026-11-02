@@ -6961,6 +6961,95 @@ change here is measured on five titles; widening the signal in the
 middle of that measurement is how the previous attempt came to change
 7,627 lines.
 
+#### Taken, and a BIND is not a CALL
+
+The attempt above was made, and the hazard it predicted was not the one
+that bit. Counting occurrences is right; counting them against **binds**
+is not.
+
+`_lost_calls` collected `(position, text)` once per `_bind` of a call
+value, deduplicated by position, and reported any site past the number
+of times the text appears in the output. On eight titles that claimed
+**11** recovered calls -- and seven of the eleven were a call emitted
+twice over, as a bare statement ahead of the expression that already
+held it.
+
+**`weaponloop` is the one that showed it**, because the `cs` server came
+with its author's source:
+
+```
+source:    if(players[i].name==x or players[i].safe()
+              or teammates(weapons[i].owner.name,players[i].name))
+
+emitted:   teammates(weapons[local_1].owner.name, players[local_39].name);
+           if ((... || players[local_39].safe())
+               || teammates(weapons[local_1].owner.name, ...)) {
+```
+
+One call, bound **three** times -- the register capture, then a copy on
+the way into each of the two `||` merges -- so the census saw three
+sites, found one occurrence, and emitted two. That is the duplication
+this file counts as a correctness defect, and it is how it was caught:
+the server fell from 194 of its author's 196 functions to **193**, which
+is the only instrument in this project that could have said so.
+
+**`Atom.origin` was tried as the identity and cannot be it.** A copy
+inherits it, which is exactly why it looked right. The probe settles it
+in one line: the call runs at **3621** and its two origins are **3623**
+and **3631**, because `_value_origin` stamps where a value was first
+*bound* -- the right answer for its own question, *"has anything run
+since"*, and the wrong answer for *"is this the same call"*.
+
+So the record to ask is the instruction. `invocation_sites` keeps every
+position an impure call was rendered at -- a **set**, because `_body`
+re-simulates a function once per pass and a list would count each call
+once per pass -- and `call_binds` keeps only the fact that the value
+reached a slot, which is the census's guard and nothing more: a call
+rendered inline as an argument, or spelled as syntax the way `opCmp` is
+under `cmp_pair`, never reaches one and is not its business.
+
+#### What it cost, and the one call it found
+
+| title | lines | calls | goto | split |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,302 | 1,607 | 0 | verified |
+| **The Gate** | 34,943 -> **34,944** | 8,665 -> **8,666** | 0 | verified |
+| Battle of the Hunter | 4,373 | 1,334 | 0 | verified |
+| Field Wars | 9,021 | 3,001 | 0 | verified |
+| rage room | 8,683 | 2,369 | 0 | verified |
+| cs server | 10,130 | 3,033 | 0 | verified |
+| cs client | 8,178 | 2,858 | 0 | verified |
+| constant velocity | 3,883 | 1,767 | 0 | verified |
+
+**Seven of eight are byte-identical**, and the eighth gains one line:
+
+```
+local_18 = (create_main_character() ? 1 : 0);
+if (local_18 == 0) { speak("Cancelled", true, false, true); continue; }
+load_resources();                         <- this
+if (music.get_playing()) { ...fade out... }
+```
+
+`main_menu`, at the moment a new game starts. A recovered Gate began
+one with **nothing loaded**, and no count in this file could have shown
+it -- the project recovers clean, compiles, and runs.
+
+**Confirmed by the instrument that is not this one**: `bgt audit
+--calls` on that title goes from 144 bodies and 158 values the text does
+not hold to **143 and 157**, which is the bytecode saying the same thing
+from the other side.
+
+All four ground-truth scores are exactly as they were -- rage room
+291/292, the `cs` client 218/218, the server 194/196, constant velocity
+94/95, 0 differing on all but the server's one -- and `bgt oracle` is
+**52/52** with its `counter` at 13, which is the shape that rejected the
+webs attempt and the reason that attempt is recorded above rather than
+taken.
+
+**One real lost call across eight titles, where counting binds claimed
+eleven.** That ratio is the measurement: a census that over-reports does
+not merely add noise, it writes a duplicated call into the output.
+
 #### What the Cast flush cost, measured
 
 | title | lines | goto | split | calls |

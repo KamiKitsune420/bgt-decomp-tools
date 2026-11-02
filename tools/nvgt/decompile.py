@@ -700,12 +700,40 @@ def _lost_calls(fd: "FuncDecompiler", events: list) -> list:
     """
     emitted = [part for e in events if isinstance(e.data, tuple)
                for part in e.data if isinstance(part, str)]
-    lost, seen = [], set()
-    for pos, text in fd.call_binds:
-        if pos in seen or any(text in part for part in emitted):
-            continue
-        seen.add(pos)
-        lost.append((pos, text))
+    whole = "\n".join(emitted)
+    #: **Calls against OCCURRENCES, not membership.** Asking whether a text
+    #: appears anywhere lets one rendering vouch for every call that reads
+    #: alike, which this function's own notes record as the seventh
+    #: `menu_add_item` "masked by its own identical siblings". It is also
+    #: what let `int v = bump(); v = bump();` lose a call: the second renders
+    #: `bump()`, so the first was judged present, and the recovery called it
+    #: once and returned the wrong number.
+    #:
+    #: **What is counted is the CALL, not the bind.** A bind is not a call:
+    #: `weaponloop`'s one `teammates(...)` is bound three times -- the
+    #: register capture, then two copies on the way into a short-circuit
+    #: merge -- so counting binds reported two losses and emitted the call
+    #: twice over as bare statements. That is worse than the masking it was
+    #: meant to fix, and it showed where this project can see such a thing:
+    #: `cs`'s server fell from 194 of its author's 196 functions to 193.
+    #:
+    #: `origin` was tried as the identity and cannot be it, for a reason
+    #: worth keeping: `_value_origin` stamps where a value was first BOUND,
+    #: because its question is "has anything run since" -- so that call runs
+    #: at 3621 and its origins are 3623 and 3631.
+    #:
+    #: A call the renderer spells as SYNTAX -- `opCmp` under `cmp_pair` --
+    #: occurs zero times, so it is caught by the same rule that catches a
+    #: genuinely dropped call, exactly as it was before.
+    lost = []
+    for text in {t for _pos, t in fd.call_binds}:
+        positions = sorted(fd.invocation_sites.get(text, ()))
+        #: the earliest unaccounted calls are the lost ones: a later
+        #: rendering is the one that survived, which is what
+        #: `int v = bump(); v = bump();` shows
+        for pos in positions[:max(0, len(positions) - whole.count(text))]:
+            lost.append((pos, text))
+    lost.sort()
     return lost
 
 
@@ -1592,6 +1620,10 @@ class FuncDecompiler:
         #: and "no entry" there is not "never read" -- the measurement that
         #: rejected the first attempt at this.
         self.call_binds: list[tuple[int, str]] = []
+        #: text -> every instruction position that call was rendered at. The
+        #: census counts these against the output, because a call bound three
+        #: times is still one call -- see `_lost_calls`.
+        self.invocation_sites: dict[str, set[int]] = {}
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -1762,6 +1794,12 @@ class FuncDecompiler:
         if self.purity.is_pure_call(ins):
             return
         self.invocations[calltxt] = self._pos()
+        #: **Every position this text was called from**, which is what
+        #: identifies a call -- `invocations` keeps only the last, so
+        #: `bump(); bump();` is one entry and the census could not tell one
+        #: call from two. A SET, because `_body` re-simulates a function once
+        #: per pass and a list would count each call once per pass.
+        self.invocation_sites.setdefault(calltxt, set()).add(self._pos())
 
     def _discarded_call(self, off: int) -> None:
         """A call whose result nothing reads still ran: emit it where it ran.
@@ -1862,7 +1900,15 @@ class FuncDecompiler:
             # position already, so a later copy of it keeps that one.
             self._value_origin(a)
             if a.text in self.invocations:
-                self.call_binds.append((self.invocations[a.text], a.text))
+                #: **Only that it WAS bound**, which is the census's guard:
+                #: a call rendered inline as an argument, or spelled as
+                #: syntax, never reaches a slot and is not its business. The
+                #: position here is the store's, and it is deliberately not
+                #: used to identify the call -- `invocation_sites` is, because
+                #: a bind is not a call. `weaponloop`'s one `teammates(...)`
+                #: is bound three times, once at the register capture and
+                #: twice more on the way into a short-circuit merge.
+                self.call_binds.append((self._pos(), a.text))
 
     def _emit_declare(self, off: int) -> None:
         """Emit a bare declaration for a named variable (default-constructed)."""

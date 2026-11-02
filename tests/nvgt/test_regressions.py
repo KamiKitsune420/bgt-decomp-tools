@@ -2060,10 +2060,29 @@ class LostCallTests(unittest.TestCase):
         def __init__(self, text):
             self.data = ("", text)
 
-    def _fd(self, binds):
+    def _fd(self, calls, bound=None):
+        """`calls` is (position, text) per CALL INSTRUCTION.
+
+        A bind is not a call, which is the correction this fixture carries:
+        `weaponloop`'s one `teammates(...)` is bound three times -- the
+        register capture, then two copies on the way into a short-circuit
+        merge -- so a census that counted binds emitted it twice over as bare
+        statements, and `cs`'s server fell from 194 of its author's 196
+        functions to 193.
+
+        `bound` is the census's guard and nothing more: a call rendered inline
+        as an argument, or spelled as syntax, never reaches a slot and is not
+        its business. It defaults to every text in `calls`.
+        """
         from decompile import FuncDecompiler
         fd = object.__new__(FuncDecompiler)
-        fd.call_binds = binds
+        texts = [t for _pos, t in calls] if bound is None else list(bound)
+        #: the position in a bind is the STORE's, and deliberately unused for
+        #: identity -- so anything is as good as anything here
+        fd.call_binds = [(0, t) for t in texts]
+        fd.invocation_sites = {}
+        for pos, text in calls:
+            fd.invocation_sites.setdefault(text, set()).add(pos)
         return fd
 
     def test_a_call_whose_text_reaches_no_statement_is_lost(self):
@@ -2080,33 +2099,79 @@ class LostCallTests(unittest.TestCase):
         lost = _lost_calls(fd, [self._Ev("local_1 = handle.load(local_3);")])
         self.assertEqual(lost, [])
 
-    def test_two_binds_of_ONE_call_are_reported_once(self):
-        """`CpyRtoV4` parks the result in the slot the register left it in and
-        `CpyVtoV4` copies it into the slot a dead local owns. That is two
-        binds of one call, and emitting both would be the duplication this
-        project counts as a correctness defect."""
-        from decompile import _lost_calls
-        fd = self._fd([(23, "bump()"), (23, "bump()")])
-        self.assertEqual(_lost_calls(fd, []), [(23, "bump()")])
+    def test_two_calls_that_read_ALIKE_are_two_calls(self):
+        """Calls against OCCURRENCES, not membership.
 
-    def test_two_calls_that_READ_ALIKE_are_two_calls(self):
-        """Deduplicating by text instead would collapse them -- and
-        `load_sound` is exactly this shape, one call in each arm of an `if`,
-        which is also why an end-of-body sweep cannot find them: by `RET` the
-        slot holds whichever arm ran last."""
+        This used to under-report on purpose: the check was "does this text
+        appear anywhere", so one rendering vouched for every call that reads
+        alike. It is what `int v = bump(); v = bump();` needed -- the second
+        renders `bump()`, the first was judged present, and the recovery
+        called it once and returned the wrong number. `bgt oracle` reported
+        that as `declared_reassigned` 7 -> 6 with its `counter` 13 -> 12.
+
+        The earliest unaccounted call is the lost one, because the rendering
+        that survived is the later store.
+        """
         from decompile import _lost_calls
         fd = self._fd([(23, "bump()"), (46, "bump()")])
-        self.assertEqual(_lost_calls(fd, []),
+        self.assertEqual(_lost_calls(fd, [self._Ev("x = bump();")]),
+                         [(23, "bump()")])
+
+    def test_both_are_reported_when_NEITHER_reached_a_statement(self):
+        """`load_sound` is this shape, one call in each arm of an `if` -- which
+        is also why an end-of-body sweep cannot find them: by `RET` the slot
+        holds whichever arm ran last."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "bump()"), (46, "bump()")])
+        self.assertEqual(_lost_calls(fd, [self._Ev("x = 1;")]),
                          [(23, "bump()"), (46, "bump()")])
 
-    def test_a_shared_text_under_reports_rather_than_over_reports(self):
-        """Where two calls read alike and only one reached a statement, the
-        other is not reported. The test is a substring test over the body, so
-        it cannot tell them apart -- and a call wrongly reported would be
-        emitted twice, so this is the safe way round."""
+    def test_neither_is_reported_when_both_reached_one(self):
         from decompile import _lost_calls
         fd = self._fd([(23, "bump()"), (46, "bump()")])
-        self.assertEqual(_lost_calls(fd, [self._Ev("x = bump();")]), [])
+        self.assertEqual(
+            _lost_calls(fd, [self._Ev("x = bump();"), self._Ev("y = bump();")]),
+            [])
+
+    def test_a_call_BOUND_several_times_is_still_ONE_call(self):
+        """The correction `cs`'s server found. `weaponloop` reads
+
+            if (a == b || players[i].safe()
+                || teammates(weapons[i].owner.name, players[i].name))
+
+        and the compiler binds that third operand three times -- the register
+        capture, then two copies on the way into the two `||` merges. Counting
+        binds reported two losses and emitted the call twice over as bare
+        statements ahead of the condition that already held it, which is the
+        duplication this project counts as a correctness defect.
+
+        `Atom.origin` was tried as the identity and cannot be it: the call
+        runs at 3621 and its origins are 3623 and 3631, because
+        `_value_origin` stamps where the value was first BOUND -- the right
+        answer for `_stale_fold`, whose question is "has anything run since".
+        """
+        from decompile import _lost_calls
+        fd = self._fd([(3621, "teammates(a, b)")],
+                      bound=["teammates(a, b)"] * 3)
+        self.assertEqual(
+            _lost_calls(fd, [self._Ev("if (x || teammates(a, b)) {")]), [])
+
+    def test_a_call_bound_several_times_and_LOST_is_reported_once(self):
+        """The other half of it: one call, three binds, nothing in the output
+        is one row and not three."""
+        from decompile import _lost_calls
+        fd = self._fd([(3621, "teammates(a, b)")],
+                      bound=["teammates(a, b)"] * 3)
+        self.assertEqual(_lost_calls(fd, [self._Ev("x = 1;")]),
+                         [(3621, "teammates(a, b)")])
+
+    def test_a_call_that_never_reached_a_slot_is_not_the_census_s_business(self):
+        """A call rendered inline as an argument, or spelled as syntax the way
+        `opCmp` is under `cmp_pair`, never reaches a slot. `call_binds` is the
+        guard that keeps those out, and it is the only thing it is for."""
+        from decompile import _lost_calls
+        fd = self._fd([(23, "bump()")], bound=[])
+        self.assertEqual(_lost_calls(fd, [self._Ev("x = 1;")]), [])
 
 
 class RecordedCallTests(unittest.TestCase):
@@ -2127,6 +2192,7 @@ class RecordedCallTests(unittest.TestCase):
 
         fd = object.__new__(FuncDecompiler)
         fd.invocations = {}
+        fd.invocation_sites = {}
         fd.call_sites = {}
         fd.purity = _Purity()
         fd.k, fd.instrs = 0, [None]
@@ -2147,6 +2213,9 @@ class RecordedCallTests(unittest.TestCase):
                         self._Named("load"), self._Ret(self._Named("bool")))
         self.assertEqual(fd.invocations, {"handle.load(local_3)": 7})
         self.assertEqual(fd.call_sites, {"handle.load(local_3)": 7})
+        #: and every position it was called from, which is what identifies a
+        #: call where `invocations` keeps only the last
+        self.assertEqual(fd.invocation_sites, {"handle.load(local_3)": {7}})
 
     def test_a_PURE_call_is_not_recorded(self):
         """Crazy Party computes `int(round(double((w - 1) / 2), 0))` twice per
