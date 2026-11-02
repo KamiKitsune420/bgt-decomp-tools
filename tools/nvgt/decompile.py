@@ -1237,6 +1237,16 @@ class Event:
 class FuncDecompiler:
     """Simulates one function body and produces structured source lines."""
 
+    #: `_slot_io` and `_successors` walk the whole body and are pure functions
+    #: of it, so they are memoised per instance -- `slot_webs` is asked per
+    #: SLOT and would otherwise rebuild both every time, which on a
+    #: 30,000-instruction body is the difference between seconds and minutes.
+    #: Class-level so an object built without `__init__`, which the analysis
+    #: tests do to keep a fixture down to ten instructions, gets the unwalked
+    #: state rather than an AttributeError.
+    _io_cache = None
+    _succ_cache = None
+
     def __init__(self, module: Module, fn: Function, comments: bool = False):
         self.m = module
         self.fn = fn
@@ -5620,6 +5630,8 @@ class FuncDecompiler:
         and `asBCTYPE_*` for the reads -- so neither is a hand-kept list that
         can fall behind the instruction set.
         """
+        if self._io_cache is not None:
+            return self._io_cache
         writes: list = []
         reads: list = []
         for ins in self.instrs:
@@ -5630,7 +5642,8 @@ class FuncDecompiler:
                     wrote = off
             writes.append(wrote)
             reads.append(_read_slots([ins]))
-        return writes, reads
+        self._io_cache = (writes, reads)
+        return self._io_cache
 
     def _successors(self) -> list:
         """The CFG, at instruction granularity.
@@ -5639,6 +5652,8 @@ class FuncDecompiler:
         target where there is one. `RET` and an unconditional `JMP` do not
         fall through; a conditional jump does both.
         """
+        if self._succ_cache is not None:
+            return self._succ_cache
         out: list = []
         for k, ins in enumerate(self.instrs):
             nexts: list = []
@@ -5650,6 +5665,7 @@ class FuncDecompiler:
                 if target is not None:
                     nexts.append(target)
             out.append(nexts)
+        self._succ_cache = out
         return out
 
     def slot_webs(self, slot: int) -> list:

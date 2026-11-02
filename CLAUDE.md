@@ -8629,37 +8629,117 @@ rather than spending a fixpoint on Crazy Party's 1,074,460-instruction
 generated function, and declining means no split, which is what this file
 does everywhere today.
 
-#### What wiring it showed, and the one decision left
+#### Attempt seven: `is_named`, asked of the VALUE -- and the oracle's verdict
 
-Promotion keyed on webs rather than slots was built and measured, and it is
-most of the way there:
+The step this section prescribed was taken: make `is_named` web-local. It
+fixes **all four reported defects at once**, and `bgt oracle` rejected it.
+Both halves are worth having.
 
-| | Field Wars | cs server |
+**The audit of its fifteen call sites is reusable**, and the split is clean:
+
+| asked of | sites | why |
 |---|---|---|
-| `collapsed_chain` | **9 -> 0** | **9 -> 0** |
-| residual gotos | 0 | 0 |
-| split verified | yes | yes |
-| the `admin` term | -- | **restored** |
-| `/godmode` toggle | -- | **broken** |
-| the AFK ternary | -- | **broken** |
+| the **value** | 12 -- `_bind`, the merge fold, `FREE`, `STOREOBJ`, the `?&out` argument, the receiver test, the constructor and destructor handlers, both ternary checks | every one runs at a position and wants to know what is in the slot THERE |
+| the **slot** | 2 -- `_stale_fold`'s behaviour-write narrowing, the declaration hoisting | one asks whether the source ever named the slot at all; the other is about names |
 
-So webs fix every collapsed chain in the corpus, and two ternaries regress --
-because **`is_named` is still asked of the SLOT**. A ternary's two arms are
-emitted as stores only when it answers yes, and a short-circuit needs it to
-answer no; with one answer per slot, `netloop`'s slot 57 cannot have both.
+`is_named_here` answers for the web containing the current position, and
+falls back to the old answer for a slot with one web -- so nothing moves for
+a slot that really is one variable.
 
-Letting a ternary's web claim the slot name was tried, and it is attempt 6
-again: `/godmode` and the AFK marker come back and the chains collapse
-(Field Wars 9 -> 11), because the shape test that finds a ternary claims far
-too many slots.
+**What makes a web a variable is having more than one definition**: two paths
+write it and one read sees both, which is what a declared local looks like
+once the compiler has laid it out. The exception is a short-circuit's own
+destination, which has two definitions as well -- the `SetV dest, 0|1` and
+the arm's store -- and must still fold or the structurer loses the condition;
+`sc_defs` records those positions while the merges are found, so the
+exception is exact rather than another shape guess.
 
-**The remaining step is to make `is_named` web-local**, which means auditing
-its 15 call sites -- each one a separate judgement about whether "named" is
-meant of the slot or of the value in it. That is a contained piece of work
-with a validated analysis under it, which is a much better place than this
-section started.
+#### It fixed all four, and the numbers were good
 
-#### What the next attempt should know
+| | before | after |
+|---|---|---|
+| Field Wars' movement conditions | the timer term parked and overwritten | **every term tested** |
+| the `cs` server's `admin` check | the term gone | **restored** |
+| `/godmode` | `godmode = true`, on and never off | **the toggle** |
+| the AFK marker in `/adminlist` | both literals gone | **both back** |
+
+`collapsed_chain` **0 on every title**; `empty_arm` down (`cs` server 6 -> 1,
+Field Wars 10 -> 9); residual gotos, dangling gotos, dangling `else`,
+unbalanced files, passthrough and bodies given up on **0 everywhere before
+and after**; every split verified. Lines fell on six of eight titles and the
+call count **rose on four and fell on none** -- Super Egg Hunt 1,607 ->
+1,623, The Gate 8,665 -> 8,679, Field Wars 3,001 -> 3,005, the `cs` server
+3,032 -> 3,060.
+
+Against the games that came with their source: rage room 291/292 and
+constant velocity 94/95 unchanged, the `cs` server 194/196 unchanged, and the
+`cs` client 218/218 -> 216/218. Those two are `position_sound_custom_2d` and
+`_3d`, and both are the ordering approximation this file records for
+`control::focus`: the author writes the rotation x-then-y and the recovery
+computed y-then-x, both from the old coordinates, both assigned correctly,
+with `sine` and `cosine` pure -- so unobservable, and the new rendering was
+tighter besides.
+
+#### And `bgt oracle` said no: 48 of 52, with one call lost
+
+**`counter` went 13 -> 12**, which is that fixture's whole purpose -- it
+counts the impure calls a recovery makes, so one fewer is one call lost. The
+four that moved name it exactly:
+
+| shape | expected | got |
+|---|---|---|
+| `declared_reassigned` | 7 | **6** |
+| `declared_as_loop_bound` | 36 | **28** |
+| `pre_and_post` | 757 | **777** |
+| `counter` | 13 | **12** |
+
+`declared_reassigned` is `int v = bump(); v = bump(); return v;`. The first
+store is dead -- overwritten before any read -- and webs prove it, where the
+old reading could not. Dropping a dead store is right; dropping it **with its
+call** is not, and `bump()` is impure by construction. So the recovery ran
+one `bump` instead of two and returned 6.
+
+That is the defect this file already records as *"a call whose result NOTHING
+READS is dropped, call and all"*, which `tools/nvgt/purity.py` and
+`_lost_calls` exist to prevent -- and webs reach the dead store by a path
+those do not cover. **The remaining item is one named mechanism with a
+failing reproducer in `bgt oracle`**, which is a far better place to start
+than a chain of six measurements.
+
+It also vindicates the fixture: every text sweep, every audit, both ground
+truth games and the whole corpus said this change was good, and the only
+instrument that caught a lost call was the one that runs the program.
+
+#### Two bugs in the analysis, and neither was caught by a count
+
+- **The worklist started from the entry alone**, so it ran exactly ONE round
+  and stopped: the entry's state is empty, propagating an empty set changes
+  nothing, and a node is re-queued only when its state changes. Every write
+  came out as its own web -- a plausible 163 writes, 163 webs -- and the tell
+  was `dynamic_menu`'s joystick flag reporting 4 and 4 when the answer is 1.
+- **The named-web answer was cached once for all slots**, from a `_webs` dict
+  that fills in lazily, so the cache was built from whichever slots the
+  simulation happened to ask about first. `cs`'s slot 57 was not among them,
+  so `/godmode` came out unnamed while a standalone probe of the same body
+  said the web WAS named. Two answers from one function, with the cache as
+  the only difference.
+
+And one thing that is **not** a bug, found by the constant audit: The Gate
+gained two rows, `find_good_weapon`'s two `local_15 = -100;` stores. Both are
+immediately followed by `continue` and the loop top reassigns the slot, so
+they are dead -- provably, which is the thing reaching definitions can show
+and a linear reading cannot. Those were correct to drop; they are constants,
+not calls, and that is the whole difference from `declared_reassigned`.
+
+#### What IS kept: the two whole-body walks are memoised
+
+`_slot_io` and `_successors` are pure functions of the body and were rebuilt
+once per slot, which made `slot_webs` quadratic in a way that showed on
+Manamon 1. Memoised per instance, Super Egg Hunt's whole recovery takes
+twelve seconds with the analysis present, and the output is byte-identical --
+checked, not assumed.
+
+#### What the next attempt should know#### What the next attempt should know
 
 - **Neither the slot nor the position is the key; the VALUE is**, and the
   decompiler has no handle on one. See the paragraph above: three correct
