@@ -475,6 +475,53 @@ def _inside(folder: str, candidate: str) -> bool:
 
 _UNUSABLE = re.compile(r'["<>|*?]|[\r\n]')
 
+#: What an embedded pack is written as. The original `#include`'s filename
+#: is NOT recoverable -- it was a compiler directive, never a string constant
+#: -- so this name is the toolkit's choice and has to be stated as one.
+EMBEDDED_PACK = "embedded_pack.dat"
+
+
+def embedded_pack(unpacked, out_dir: str, name: str = EMBEDDED_PACK
+                  ) -> Optional[Dict[str, Any]]:
+    """Write the pack the executable carries inside itself, if it has one.
+
+    BGT lets a game embed one pack in the program: `#include "sounds.dat"`
+    puts it inside, and the script then refers to it as **`"*"`** --
+    `set_sound_storage("*")`. Run from source that means a file on disk under
+    whatever name the `#include` gave; compiled, it means the copy inside the
+    executable.
+
+    `bgtlib.unpack_file` has returned these bytes all along as
+    `embedded_pack`, and the recovery path never read the field. Every title
+    in the corpus had one of **0 bytes**, so this went untested for as long as
+    it existed -- which is the definition of latent, and exactly how it comes
+    to be found by a user instead of by a test.
+
+    Battle of the Hunter is the first that has one: **5,411,932 bytes** of
+    `SFPv`, and no `.dat` beside the game at all. Recovered without it the
+    project compiles, runs, and has no sound -- which is how it was reported.
+
+    Three things make such a recovery correct, and it needs all three: the
+    pack written beside the project, an `#include` naming it, and the script
+    left saying `"*"`.
+    """
+    blob = getattr(unpacked, "embedded_pack", None)
+    if not blob or bytes(blob[:4]) != b"SFPv":
+        return None
+    target = os.path.join(out_dir, name)
+    with open(target, "wb") as fh:
+        fh.write(blob)
+    try:
+        survey = bgt_pack.survey(target)
+    except Exception as exc:                       # a short or odd pack
+        return {"name": name, "path": target, "embedded": True,
+                "error": str(exc), "entries": 0, "encrypted": 0,
+                "tags": [], "size": len(blob)}
+    survey = dict(survey)
+    survey.update(name=name, path=target, embedded=True)
+    return survey
+
+
 def data_packs(exe_path: str, module, sample: int = 0) -> List[Dict[str, Any]]:
     """The asset packs this module names, as they sit beside the game.
 
@@ -745,8 +792,20 @@ def bring_data(packs: Sequence[Dict[str, Any]], out_dir: str,
         if copy:
             target = os.path.join(out_dir, pack["name"].replace("/", os.sep))
             os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
-            shutil.copy2(pack["path"], target)
-            notes.append("%s copied (%.1f MB)" % (pack["name"], pack["size"] / 1e6))
+            # A pack already where it belongs needs no copying, and copying it
+            # onto itself is not a no-op -- Windows refuses the open with
+            # "the process cannot access the file because it is being used by
+            # another process" and the whole recovery dies. An embedded pack is
+            # written straight into the project, so it is always this case, and
+            # so is recovering into the game's own folder.
+            if os.path.normcase(os.path.abspath(pack["path"])) == \
+                    os.path.normcase(os.path.abspath(target)):
+                notes.append("%s is already in place (%.1f MB)"
+                             % (pack["name"], pack["size"] / 1e6))
+            else:
+                shutil.copy2(pack["path"], target)
+                notes.append("%s copied (%.1f MB)"
+                             % (pack["name"], pack["size"] / 1e6))
         if not extract:
             continue
         unopened = [tag for tag in (pack.get("tags") or ()) if tag not in keys]
@@ -935,18 +994,40 @@ def asset_gaps(exe_path: str, module, packs: Sequence[Dict[str, Any]],
     if not uses:
         return []
     notes: List[str] = []
+    embedded = [pack for pack in packs if pack.get("embedded")]
+    if embedded:
+        notes.append(
+            "%s was carried INSIDE the executable and has been written out as "
+            "%s, with an #include for it in the entry script -- the script "
+            'refers to it as "*", which means that include when run from '
+            "source and the copy inside the program once compiled"
+            % ("its asset pack" if len(embedded) == 1
+               else "%d asset packs" % len(embedded), embedded[0]["name"]))
     if not packs:
         folder = os.path.dirname(os.path.abspath(exe_path))
         asked = sorted({t.replace("\\", "/").lstrip("/") for t in
                         (getattr(module, "used_strings", ()) or ())
                         if t and 4 < len(t) < 64 and t.lower().endswith(".dat")})
-        notes.append(
-            "this game loads assets through %s and no pack was found beside "
-            "%s -- the recovered script will ask the engine for one by name "
-            "and can die at startup without it. Run recovery on the "
-            "executable in its own folder, or copy the data in by hand.%s"
-            % (" and ".join(uses), folder,
-               (" It names: " + ", ".join(asked[:8])) if asked else ""))
+        # A game that embeds its pack asks for `"*"`, so the names in the
+        # string constants are not what it opens -- Battle of the Hunter's
+        # only `.dat` constant is its SAVE file, and naming that here reads
+        # as a missing asset pack when nothing is missing.
+        star = any(text == "*" for text in
+                   (getattr(module, "used_strings", ()) or ()))
+        if star:
+            notes.append(
+                'this game asks the engine for "*", which means the pack '
+                "embedded in the executable -- and none was found there. "
+                "Either the executable was rebuilt without it, or it really "
+                "ships with no assets")
+        else:
+            notes.append(
+                "this game loads assets through %s and no pack was found beside "
+                "%s -- the recovered script will ask the engine for one by name "
+                "and can die at startup without it. Run recovery on the "
+                "executable in its own folder, or copy the data in by hand.%s"
+                % (" and ".join(uses), folder,
+                   (" It names: " + ", ".join(asked[:8])) if asked else ""))
     if "set_sound_decryption_key" in called:
         # Only extraction needs the key. A copied pack does not: the script
         # sets its own key at run time, from a literal this project carries.
@@ -1668,6 +1749,13 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     # always done, because a project that cannot find its sounds can die
     # at startup and the report is the only warning you get.
     packs = data_packs(exe_path, module)
+    # ...and the one the executable carries inside itself, which is a pack by
+    # every measure that matters and was simply never read. A game that embeds
+    # its assets has nothing beside it to find, so without this the report
+    # says "no pack was found" about a game that is not missing one.
+    inside = embedded_pack(unpacked, out_dir) if with_data or extract_data else None
+    if inside is not None:
+        packs = list(packs) + [inside]
     data_notes: List[str] = []
     keys: Dict[bytes, bytes] = {}
     if packs and extract_data:
@@ -1801,6 +1889,19 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         entry_lines.append("int __bgt_recovered_entry = 0;")
         entry_lines.append("")
     entry_lines += ['#include "%s"' % path for path in included]
+    # An embedded pack is included by the DIRECTIVE, not opened by name: the
+    # engine decides for itself whether an include is a script or a pack, and
+    # the script refers to it as "*". At most one pack per program may be
+    # included, which is why only the first is emitted.
+    for pack in packs:
+        if pack.get("embedded"):
+            entry_lines.append("")
+            entry_lines.append("// The pack this game carried inside its own")
+            entry_lines.append('// executable. The script asks for it as "*",')
+            entry_lines.append("// which is this include when run from source")
+            entry_lines.append("// and the copy inside the program once built.")
+            entry_lines.append('#include "%s"' % pack["name"])
+            break
     entry_lines.append("")
     entry_path = os.path.join(out_dir, project.entry)
     with open(entry_path, "w", encoding="utf-8") as fh:

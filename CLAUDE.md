@@ -2510,12 +2510,50 @@ the original `#include`'s filename is not recoverable, because it was a
 directive rather than a string constant, so the written name is this
 tool's choice.
 
-**It is latent across the whole corpus**, which is the honest way to put
-it: all ten titles here -- the five standings titles, the three with
-source, rage room and Screaming Strike -- have an embedded pack of
-**0 bytes**. So this is a documented shape with no sample, exactly like
-`string_compress` being registered and undocumented: provable, and not
-yet a changed report.
+**It was latent across the whole corpus, and then a user found one.**
+This said all ten titles here have an embedded pack of **0 bytes**, so the
+shape was provable and had no sample -- and that is exactly the state in which
+a gap is found by somebody playing a game rather than by a test.
+
+**Battle of the Hunter is the sample.** `bth.exe` carries **5,411,932 bytes**
+of `SFPv` inside itself, there is no `.dat` beside the game at all, and its
+script asks for `"*"`:
+
+```
+set_sound_storage("*");
+set_sound_decryption_key("wolves111", true);
+```
+
+Recovered, it compiled, it ran, and it had no sound -- which is how it was
+reported, and which no count in this file could have shown.
+
+**And the report was worse than silent, it was misleading.** With no pack
+found, `asset_gaps` lists the `.dat` names in the string constants as what the
+game "names". That title's only `.dat` constant is `tunmi13/bth/data.dat`,
+which is its **save file**, from `savedata`'s constructor. So the report named
+a save path as a missing asset pack, about a game that is missing nothing. A
+game that asks for `"*"` is now recognised and told apart from one that names
+a pack it cannot find.
+
+All three things a correct recovery needs are done, and it needs all three:
+
+| | |
+|---|---|
+| the pack written beside the project | `embedded_pack.dat` -- **the name is the toolkit's choice**, because the original `#include`'s filename was a directive and is not recoverable |
+| an `#include` naming it | emitted in the entry script, with a comment saying why |
+| the script left saying `"*"` | untouched; it already was |
+
+Measured: 20 files, 4,373 lines, 0 residual gotos, split verified, 1,339 calls
+read back, the key `wolves111` recovered from the module, **133 of 133 entries
+extracted**, and `compiled cleanly`.
+
+**One bug came out of wiring it**, and it is the kind worth recording. An
+embedded pack is written straight into the project, so the copy step then
+copied it onto itself -- and on Windows that is not a no-op, it is
+`PermissionError: the process cannot access the file because it is being used
+by another process`, which killed the whole recovery. A pack already where it
+belongs is now left alone, which also covers recovering into the game's own
+folder.
 
 #### The two reference LAYERS, and the Remarks `bgt_api` throws away
 

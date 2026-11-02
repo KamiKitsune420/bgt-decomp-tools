@@ -2811,6 +2811,80 @@ def test_the_chain_is_not_walked_without_the_recovered_SOURCE():
     assert counts == {"callsite": 0, "hashchain": 0}
 
 
+def test_the_pack_INSIDE_the_executable_is_written_out_and_included():
+    """A game may carry its one asset pack inside the program itself.
+
+    `#include "sounds.dat"` embeds it and the script then names it `"*"`.
+    `bgtlib.unpack_file` has always returned the bytes as `embedded_pack` and
+    the recovery path never read the field -- which went unnoticed because
+    every title in the corpus has one of **0 bytes**. Battle of the Hunter is
+    the first with a real one: 5.4 MB of `SFPv`, no `.dat` beside the game at
+    all, and a recovery that compiled, ran and had no sound.
+
+    Three things are needed and this checks all three: the pack written beside
+    the project, an `#include` naming it, and the script left saying `"*"`.
+    """
+    key = bgt_kdf.aes_key(b"wolves111")
+    pack = bgt_pack.build([
+        ("amb1.ogg", bgt_pack.encrypt_payload(b"OggS" + b"\0" * 28, key)),
+    ])
+
+    class FakeUnpacked:
+        embedded_pack = pack
+
+    with tempfile.TemporaryDirectory() as folder:
+        found = bgt_project.embedded_pack(FakeUnpacked(), folder)
+        assert found is not None
+        assert found["embedded"] is True
+        assert found["entries"] == 1
+        written = os.path.join(folder, found["name"])
+        assert os.path.isfile(written)
+        with open(written, "rb") as fh:
+            assert fh.read() == pack          # byte for byte, not re-serialised
+
+        # a pack already where it belongs is not copied onto itself: on Windows
+        # that is not a no-op, it is a PermissionError that kills the recovery
+        notes = bgt_project.bring_data([found], folder, extract=False, copy=True)
+        assert any("already in place" in n for n in notes), notes
+        with open(written, "rb") as fh:
+            assert fh.read() == pack
+
+        # nothing embedded, and nothing is claimed
+        class Empty:
+            embedded_pack = b""
+        assert bgt_project.embedded_pack(Empty(), folder) is None
+
+        class NotAPack:
+            embedded_pack = b"OggS not a pack at all"
+        assert bgt_project.embedded_pack(NotAPack(), folder) is None
+
+
+def test_a_game_that_asks_for_STAR_is_not_a_game_missing_its_pack():
+    """`set_sound_storage("*")` means the embedded pack, so the names in the
+    string constants are not what it opens.
+
+    Battle of the Hunter's only `.dat` constant is its SAVE file path, and the
+    report named that as if it were a missing asset pack -- which reads as a
+    broken recovery when nothing is missing at all.
+    """
+    class Module:
+        used_functions = [type("F", (), {"name": "set_sound_storage"})()]
+        used_strings = ["*", "tunmi13/bth/data.dat"]
+
+    notes = bgt_project.asset_gaps("bth.exe", Module(), [], {}, False, False)
+    joined = " ".join(notes)
+    assert '"*"' in joined, notes
+    assert "tunmi13/bth/data.dat" not in joined, notes
+
+    # ...while a game that really does name a pack still gets the old note
+    class ByName:
+        used_functions = [type("F", (), {"name": "set_sound_storage"})()]
+        used_strings = ["data/bgm.dat"]
+    plain = " ".join(bgt_project.asset_gaps("g.exe", ByName(), [], {}, False, False))
+    assert "no pack was found beside" in plain, plain
+    assert "data/bgm.dat" in plain, plain
+
+
 def test_a_file_the_GAME_encrypts_is_opened_and_the_stored_bytes_KEPT():
     """A pack entry can be stored plain and still be encrypted.
 
