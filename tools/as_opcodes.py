@@ -31,7 +31,11 @@ try:
 except ImportError:
     import upx
 
-# opcodes whose names are distinctive enough to anchor the table
+# Opcodes whose names are distinctive enough to say "this file holds an
+# AngelScript opcode table at all". Six of them, and **any one is enough**:
+# `PshVPtr` is not in the 2.20.2 AngelScript that BGT 1.0 and the 2011 engines
+# were built against, so demanding that one refused three shipped games whose
+# tables are present and readable. The others are in every generation here.
 ANCHORS = (b"PshVPtr", b"CALLSYS", b"SUSPEND", b"SetV4", b"PopPtr", b"CALLINTF")
 
 # operand count and instruction size, in dwords, per type -- transcribed from the
@@ -89,8 +93,7 @@ def extract(path: str, max_ops: int = 256) -> Dict[str, Any]:
 
     # Find a 16-byte-strided run whose first field points at a plausible opcode name.
     # Anchor on a known name so we do not have to scan the whole image blindly.
-    anchor_off = exe.find(ANCHORS[0])
-    if anchor_off < 0:
+    if not any(name in exe for name in ANCHORS):
         raise ValueError("no AngelScript opcode names found -- not a BGT/AngelScript binary")
 
     best = None

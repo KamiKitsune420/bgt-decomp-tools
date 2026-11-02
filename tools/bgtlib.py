@@ -26,7 +26,7 @@ its key material by addition where every later one multiplies.
 import hashlib
 import struct
 from dataclasses import dataclass
-from typing import NamedTuple, Optional, Sequence, Tuple
+from typing import Iterator, NamedTuple, Optional, Sequence, Tuple
 
 try:
     from Crypto.Cipher import AES
@@ -92,41 +92,71 @@ def trailer_is_stale(data: bytes, offset: int) -> bool:
         return False
 
 
-def split_overlay(data: bytes) -> Tuple[int, bytes, bytes]:
-    """Split the overlay into (embedded_pack, ciphertext).
+def _overlay_body(data: bytes) -> Tuple[int, bytes]:
+    """The overlay's bytes and the offset they really start at.
 
-    FUN_00472760 reads an ASCII decimal terminated by a space. That number is the
-    size of an optional pack file appended ahead of the script -- BGT can bundle
-    sounds into the exe. It is 0 in every title checked so far, which is why the
-    field reads as the two bytes "0 ".
+    The trailer stores an absolute file offset, so anything that rewrites the
+    PE part of the file (`upx -d`, a resource editor) leaves it pointing at the
+    wrong place while the overlay itself moves intact to the new end of the
+    image. Look there when the trailer's offset does not open on a pack-size
+    field. Nothing is trusted on this basis alone: the AES and container layers
+    still have to verify what is found.
     """
     offset = read_trailer(data)
     body = data[offset:len(data) - TRAILER_LEN]
 
     i = body.find(b" ", 0, 16)
-    if i < 0 or not body[:i].isdigit() and body[:i]:
-        # The trailer stores an absolute file offset, so anything that rewrites
-        # the PE part of the file (`upx -d`, a resource editor) leaves it
-        # pointing at the wrong place while the overlay itself moves intact to
-        # the new end of the image. Look there before giving up. Nothing is
-        # trusted on this basis alone: the AES and container layers still have
-        # to verify what is found.
+    if i < 0 or (not body[:i].isdigit() and body[:i]):
         pe_end = pe_image_end(data)
         moved = data[pe_end:len(data) - TRAILER_LEN] if pe_end else b""
         j = moved.find(b" ", 0, 16)
         if pe_end and pe_end != offset and j >= 0 and (moved[:j].isdigit() or j == 0):
-            offset, body, i = pe_end, moved, j
-        elif i < 0:
-            raise BgtError("no space-terminated length field at the start of the overlay")
-    try:
-        n = int(body[:i] or b"0")
-    except ValueError:
-        raise BgtError("length field %r is not a decimal number" % body[:i])
+            return pe_end, moved
+    return offset, body
 
-    start = i + 1
-    embedded = body[start:start + n] if n else b""
-    ciphertext = body[start + n:]
-    return offset, embedded, ciphertext
+
+def overlay_candidates(data: bytes) -> Iterator[Tuple[int, bytes, bytes]]:
+    """Every reading of the overlay, the better-evidenced one first.
+
+    FUN_00472760 reads an ASCII decimal terminated by a space. That number is
+    the size of an optional pack file appended ahead of the script -- BGT can
+    bundle sounds into the exe. It is 0 in almost every title, which is why the
+    field usually reads as the two bytes `"0 "`.
+
+    **The 2010 engine writes no such field**: its overlay opens on the
+    ciphertext. Grodan Gun and Ljudfarmen are both that shape, and it is the
+    third thing that generation does differently, after the key generator and
+    the absent compression -- and the one that would have kept them shut even
+    with the right key, because this reader required the field.
+
+    Both readings are offered rather than chosen, because the container header
+    verifies itself: 32 hex characters and an `=` cannot come out of the wrong
+    split. The field reading is yielded first, so a build that has one can
+    never be re-described as one that has not -- the same tie-break every
+    per-build field in this toolkit is trialled under.
+    """
+    offset, body = _overlay_body(data)
+
+    i = body.find(b" ", 0, 16)
+    if i >= 0 and (body[:i].isdigit() or i == 0):
+        n = int(body[:i] or b"0")
+        if i + 1 + n <= len(body):
+            start = i + 1
+            yield offset, (body[start:start + n] if n else b""), body[start + n:]
+
+    yield offset, b"", body
+
+
+def split_overlay(data: bytes) -> Tuple[int, bytes, bytes]:
+    """The overlay's best-evidenced reading as (offset, embedded_pack, ciphertext).
+
+    This is the single answer for callers that only need where the overlay is
+    -- a repack, an identification. `unpack` trials every reading instead,
+    because it has the container header to judge them with.
+    """
+    for reading in overlay_candidates(data):
+        return reading
+    raise BgtError("no overlay")
 
 
 # --------------------------------------------------------------------------
@@ -446,8 +476,24 @@ class Unpacked:
 
 
 def unpack(data: bytes, seed: Optional[int] = None) -> Unpacked:
-    """Run the full chain over the bytes of a BGT executable."""
-    overlay_offset, embedded, ciphertext = split_overlay(data)
+    """Run the full chain over the bytes of a BGT executable.
+
+    Every reading of the overlay is tried, best-evidenced first, because the
+    2010 engine writes no pack-size field and this is the layer that can tell:
+    a wrong split cannot produce the container's 32 hex characters and `=`.
+    """
+    failed: Optional[BgtError] = None
+    for reading in overlay_candidates(data):
+        try:
+            return _unpack_overlay(reading, seed)
+        except BgtError as exc:
+            failed = failed or exc
+    raise failed or BgtError("no overlay")
+
+
+def _unpack_overlay(reading: Tuple[int, bytes, bytes],
+                    seed: Optional[int]) -> Unpacked:
+    overlay_offset, embedded, ciphertext = reading
 
     if seed is None:
         seed, key, variant = find_seed(ciphertext)

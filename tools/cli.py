@@ -67,7 +67,7 @@ try:                      # installed as a package
                    bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
                    bgt_ghidra, bgt_oracle, bgt_drive,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
-                   bgt_unpack, bgt_validate,
+                   bgt_installer, bgt_unpack, bgt_validate,
                    bgtlib, engine, script_files)
 except ImportError:       # run directly from a checkout
     import as_disasm
@@ -90,6 +90,7 @@ except ImportError:       # run directly from a checkout
     import bgt_libcheck
     import bgt_pack
     import bgt_repack
+    import bgt_installer
     import bgt_unpack
     import bgt_validate
     import bgtlib
@@ -115,6 +116,10 @@ def cmd_unpack(args: argparse.Namespace) -> int:
         print()
     print("%d/%d unpacked" % (ok, len(args.exe)))
     return 0 if ok == len(args.exe) else 1
+
+
+def cmd_installer(args: argparse.Namespace) -> int:
+    return bgt_installer.main(list(args.installer) + ["-o", args.out])
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -707,6 +712,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--outdir")
     p.add_argument("--seed", type=lambda s: int(s, 0))
     p.set_defaults(func=cmd_unpack)
+
+    p = sub.add_parser("installer",
+                       help="the game inside an Inno Setup installer, "
+                            "without running it")
+    p.add_argument("installer", nargs="+")
+    p.add_argument("-o", "--out", required=True)
+    p.set_defaults(func=cmd_installer)
 
     p = sub.add_parser("info", help="trailer, seed and container only")
     p.add_argument("exe")

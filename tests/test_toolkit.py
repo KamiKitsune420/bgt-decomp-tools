@@ -1195,6 +1195,50 @@ def test_the_2010_search_does_not_re_describe_a_later_overlay():
     assert info.bytecode == module
 
 
+def _overlay_without_a_pack_field(module, stub_len=512):
+    """A 2010-shape overlay: ciphertext at the overlay's first byte.
+
+    Grodan Gun and Ljudfarmen are both this shape. There is no `"<n> "` ahead
+    of the ciphertext, which is the third thing that generation does
+    differently after the key generator and the absent compression -- and the
+    one that kept both titles shut even once the key was right, because this
+    reader required the field.
+    """
+    import hashlib
+    from Crypto.Cipher import AES
+
+    stub = bytes(range(256)) * (stub_len // 256)
+    head = (b"6188CAE85A13D82754756DC38920FA09=3 printf%d\x00"
+            % len(module))
+    plain = head + module
+    plain += b"\x00" * (-len(plain) % 16)
+    key = hashlib.sha256(bytes(bgtlib.keygen(0x11, bgtlib.ADD))).digest()
+    ct = AES.new(key, AES.MODE_CBC, key[:16]).encrypt(plain)
+    return stub + ct + b"xproc10" + NUL + struct.pack("<I", len(stub))
+
+
+def test_an_overlay_with_no_pack_field_still_opens():
+    module = b"\x00\x05a module that is stored as it stands " * 40
+    exe = _overlay_without_a_pack_field(module)
+    info = bgtlib.unpack(exe)
+    assert info.key_variant == bgtlib.ADD
+    assert info.bytecode == module
+    assert info.embedded_pack == b""
+
+
+def test_a_pack_field_is_still_read_where_one_is_written():
+    """The tie-break: the field reading is offered first, so a build that has
+    one can never be re-described as one that has not."""
+    module = b"\x01\x02module payload " * 300
+    exe = _synthetic_exe(module)                 # `_synthetic_exe` writes "0 "
+    info = bgtlib.unpack(exe)
+    assert info.bytecode == module
+    readings = list(bgtlib.overlay_candidates(exe))
+    assert len(readings) == 2
+    # the first drops the two field bytes, the second keeps them
+    assert len(readings[0][2]) + 2 == len(readings[1][2])
+
+
 def test_a_2010_overlay_whose_payload_is_not_a_module_is_refused():
     """`noDebugInfo` is the module's first byte, so it is 0 or 1 and nothing
     else. If a 2010 build turns out to compress after all, this is what says

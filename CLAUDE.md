@@ -76,11 +76,21 @@ Note the container header is **fixed-shape but not fixed-length**: the declared
 length is decimal, so a larger module means a longer header. Compute it, never
 hardcode it.
 
-### The GENERATOR varies too, and the 2010 engine adds where later ones multiply
+### The GENERATOR varies too, and the EARLY engines add where later ones multiply
 
-`v *= 3` above is the 2011 and 2014 engines'. **BGT 1.0 does `v += 3`**, and
-that one instruction is the whole reason this toolkit could not open a 2010
+`v *= 3` above is the 2012 and 2014 engines'. **BGT 1.0 does `v += 3`**, and
+that one instruction is the whole reason this toolkit could not open an early
 title — reported as issue #6 by somebody who had written a script that could.
+
+**This section used to call the two "the 2010 engine" and "the 2011 and 2014
+engines", and the dates were wrong.** Two shipped 2011 titles use the ADD
+generator — Ljudfarmen (February 2011) and Grodan Gun (September 2011) — and
+the first title here that multiplies is Antony, February 2012. So the
+generator changed somewhere between September 2011 and February 2012, and
+everything this file said about "the 2010 engine" is really about **the 2010
+and 2011 engines**. The constant names are fine; the prose was dating a format
+break from a single install's timestamp. See **Three engines between 1.0 and
+1.3** below for the five points that say so.
 
 Both generators were read out of the two installs, and the comparison is
 controlled rather than suggestive: they are otherwise identical instruction
@@ -104,32 +114,60 @@ variant collapses into `33 05 0f 2d` and then a three-byte cycle. The two
 share not one byte, which is why a 2010 title looks like "not a BGT
 executable" rather than like a corrupt one.
 
-**And the 2010 engine does not compress.** There is no LZ77 step and no
+**And the early engine does not compress.** There is no LZ77 step and no
 trailing `" <length>"` to read one back from: the number after `printf` is the
-module's own length, so the container's payload *is* the module. That half is
-the reporter's, not read from the binary, so it carries a guard — the payload
-must begin with `noDebugInfo`, which is 0 or 1 and nothing else — and a 2010
-build that turns out to compress after all will say so loudly instead of
-handing back a blob that parses as nothing.
+module's own length, so the container's payload *is* the module. That was the
+reporter's half rather than read from the binary, so it carries a guard — the
+payload must begin with `noDebugInfo`, which is 0 or 1 and nothing else — and
+**it is confirmed now**: Grodan Gun's payload is 63,364 bytes and the
+container declares 63,364, with `noDebugInfo` at its first byte.
 
 Both the seed and the variant are searched, with the verified variant first so
-a tie cannot re-describe a module that already parsed. Checked: all six titles
-with an executable here report exactly what they did before.
+a tie cannot re-describe a module that already parsed. Checked: every title
+with an executable here reports exactly what it did before.
 
-**What is not proven is the end-to-end case**, and it is worth stating because
-the obvious test is unavailable. No 2010 title is on this machine, and one
-cannot be built here either: the installed BGT 1.0 is the **demonstration**
-build, which says so itself — *"the compiler is not available in the
-demonstration version of BGT. If you wish to compile your game into a
-standalone executable, please consider purchasing the product"*. So the new
-path is covered by a fixture the toolkit builds itself, which exercises the
-chain rather than a real 2010 game. Q9 and Kringle Crash are the titles named
-in that issue, and either would settle it.
+### ...and the early overlay has NO PACK-SIZE FIELD, which is why the key was not enough
 
-**A third generation is reported to exist** — the betas, and the 2010-to-1.1
-transition — which this does not cover. `keygen` refuses an unknown variant
-name rather than falling back, so adding a third is one entry and cannot
-silently mis-open anything.
+The chain at the top of this file opens the overlay on `"<n> "` — an ASCII
+decimal and a space giving an optional embedded pack's size, usually the two
+bytes `"0 "`. **The 2010 and 2011 engines write no such field**: the overlay's
+first byte is the ciphertext.
+
+That is the third thing that generation does differently, after the generator
+and the absent compression, and it is the one that mattered most in practice:
+`split_overlay` *required* the field, so even with the right key those titles
+read as "no space-terminated length field at the start of the overlay" and
+never reached AES at all. A correct key is not an open game.
+
+`overlay_candidates` offers both readings, field first, and `unpack` keeps the
+one the **container header** accepts — 32 hex characters and an `=` cannot
+come out of a wrong split, so this is trialled the same way every per-build
+field here is, and a build that has a field can never be re-described as one
+that has not.
+
+### Proven end to end, on two shipped titles
+
+This section used to say the end-to-end case was unavailable: no early title
+was on this machine, and one could not be built either, because the installed
+BGT 1.0 is the **demonstration** build, which says so itself — *"the compiler
+is not available in the demonstration version of BGT"*. Two of BlastBay's own
+Swedish games settle it, and `bgt installer` is what got them out of their
+installers without running anything:
+
+| title | engine built | names | generator | module | overlay |
+|---|---|---|---|---|---|
+| Ljudfarmen | 2011-02-18 | 283 | **add** | 61,591 B, uncompressed | no pack field |
+| Grodan Gun | 2011-09-19 | 295 | **add** | 63,364 B, uncompressed | no pack field |
+| Antony | 2012-02-05 | 312 | multiply | 56,179 B, LZ77 | `"0 "` |
+
+All three open through `bgtlib.unpack` with the stock seed 0x11, and the
+module's declared length is its real length in every case. **All three are
+DEBUG builds** (`noDebugInfo = 0`), which is a separate windfall — see **A
+debug build keeps the names**.
+
+**A third generation is reported to exist** — the betas — which this does not
+cover. `keygen` refuses an unknown variant name rather than falling back, so
+adding a third is one entry and cannot silently mis-open anything.
 
 ### The 32 hex characters are a LICENCE MARK, not a checksum
 
@@ -154,11 +192,125 @@ decodes Super Egg Hunt, Manamon 1 and The Gate — three developers, 2014 to
 **All three carry that field byte for byte identically**, which is the other
 half of why it cannot be a checksum: nothing in it is derived from the module.
 So `*` against "pro unlimited" reads as a wildcard standing for "no particular
-game" rather than for an absent licence, and a "pro single" build is where a
-real code would be expected. None is on this machine to confirm that, so it is
-written down as the reading it is. It also explains a loose end: `build_overlay`
+game" rather than for an absent licence. It also explains a loose end: `build_overlay`
 hardcoded that exact constant as its default "container magic" and it worked,
 because it is the standard unlimited-build mark rather than anything per-title.
+
+#### A REAL code, which is what that reading predicted
+
+The three Swedish titles carry one, and it is the same one in all three:
+
+```
+container   799DC8538DC1F13BAAC1ACC842FC0AC0=3      Ljudfarmen, Grodan Gun
+            CE78822F4C79226536178463229B47B1=3      Antony
+licence     '1c594ad4'
+```
+
+Three things fall out of that, and the first is the one this file asked for:
+
+- **It is a code rather than a wildcard**, so the field really does hold what
+  this section says it holds — read out of a shipped game rather than argued
+  from an engine string.
+- **It is the same code under two different keys.** Ljudfarmen and Grodan Gun
+  decode under the **2010** key and Antony under the **2011** one, which is
+  the generation's own in each case, and the plaintext — `printf8\0` then
+  eight characters — verifies each. So the key moved with the engine and the
+  licence did not.
+- **It is the same code across three different modules**, which is the
+  checksum question answered from the other direction: nothing in the field is
+  derived from the script. The expectation this file recorded was that a real
+  code would turn up in a *"pro single"* build; it turns up at edition 3,
+  **"pro unlimited"**, in the engine author's own games. So the field is the
+  developer's licence, and `*` is what a released build of the engine stamps
+  rather than what an unlicensed one does.
+
+## The game inside an installer, read rather than run
+
+Almost every BGT game still downloadable ships as an **Inno Setup installer**,
+and both obvious ways in are wrong here: running a stranger's installer to get
+at a game is not a thing to do on somebody's machine, and the standard
+extraction tool is a binary to fetch and execute — which this environment
+declined, correctly. `bgt installer` reads the installer instead. It needs
+nothing fetched and executes nothing.
+
+**What makes that affordable is that the thing being looked for carries its own
+extent.** The installer's *names* live in a compressed header, and they are
+never needed: a BGT executable ends with `xproc10\0` and a little-endian stub
+length, so each game can be cut out of the payload exactly, and
+`bgtlib.unpack` is what accepts the cut. The guessing is all in the
+candidates; the acceptance is the format's own self-verification — which is
+the same division of labour as every trialled field in this document.
+
+Three layers:
+
+1. **The payload.** A single-file Inno 5.x setup stores the files as one chunk
+   introduced by `zlb\x1a`, then an LZMA1 stream — a properties byte and a
+   four-byte dictionary size, with **no uncompressed length**, so it is decoded
+   with an unknown output size and the stream's own end marker stops it.
+2. **The filter**, below.
+3. **The carve**, above.
+
+### The filter is the whole trap, and it imitates a new engine generation
+
+Inno rewrites the operand of every `call` and `jmp` in that stream before
+compressing it, because absolute addresses compress better than relative ones.
+It does that to the **whole stream**, not to the executables in it — so an
+`0xE8` inside a game's *compressed module* is rewritten too.
+
+How that presents itself is the part worth remembering. The carved game's
+container header decrypted perfectly, the blob carried its usual trailing
+uncompressed length, and the LZ77 decode then produced **11 KB of a real
+module** — readable class names and all — before failing on a match distance
+of 70,694,559. Every reading of that pointed at the compression: issue #6 even
+reports *"two earlier encryption methods"*, so a new generation's LZ77 was the
+comfortable answer, and it was wrong. The compression was never involved.
+
+The decoder, read from innospect's port of innoextract's `exefilter` rather
+than guessed:
+
+- 64 KiB blocks, aligned on the stream's own offsets;
+- at each `0xE8`/`0xE9`, a five-byte window — opcode plus a 32-bit operand;
+- a window that does not fit inside its block is skipped a byte at a time;
+- the operand's **high byte must be 0x00 or 0xFF**, or the window is untouched;
+- otherwise the low 24 bits become `(operand - window_end) & 0xFFFFFF`;
+- from Inno **5.3.9**, a set bit 23 of that value flips the high byte.
+
+The installer states its own version in its `Inno Setup Setup Data (x.y.z)`
+id, so the flip is read rather than assumed, and where that id cannot be read
+both forms are tried — a wrong choice shows up as a game that will not open.
+
+**Two things about localising it, because the first attempt localised it
+wrongly.** The decode raised at output byte 37,388, and the first *implausible*
+field was 26,000 bytes earlier: a match length of 14,571, where the same
+decoder on a title that decodes end to end never reads a length above 1,094.
+That looked like the cause and was not — it is a real 149-fold repeat of a
+98-byte run, and the bytes around it decode cleanly. What settles such a
+question is the **module**, whose every field is counted or length-prefixed, so
+a parse walks correctly up to the first corrupt byte: where the parse dies says
+where the decode went wrong, which is not where it raised.
+
+And **a carve has to be verified, not computed.** A payload can hold a second
+`xproc10` a few hundred bytes past the real one; ending the carve there keeps
+500 extra bytes, which shifts the ciphertext and leaves the chain failing deep
+inside LZ77, a long way from the cause. `bgt_installer.bgt_games` yields only
+what `unpack` opens, and `tests/test_installer.py` pins that case.
+
+### What it got out, and the one it correctly refused
+
+| installer | Inno | what came out |
+|---|---|---|
+| `antony_installer.exe` | 5.3.10 | one BGT game, 1,000,958 B, multiply |
+| `grodan_gun_installer.exe` | 5.3.10 | one BGT game, 1,703,372 B, **add** |
+| `ljudfarmen_installer.exe` | 5.3.10 | one BGT game, 1,450,716 B, **add** |
+| `q9_Swedish_installer.exe` | 5.3.3 | **nothing, and that is right** |
+
+Q9 is the refusal worth reading. Its payload decompresses to 12.2 MB holding
+`Software\BlastbayStudios\Q9ActionGame\1.0`, *"Unable to find the sound archive
+(sounds.dat)"* and **235 `SFPv` headers** — so it uses BGT's own pack format —
+and not one `xproc10`. It is native code by the same author, not a BGT script
+game, which is why issue #6 naming Q9 as a title that would settle the 2010
+case could never have worked. Kringle Crash, the other title named there, is
+from the same pre-BGT run of games.
 
 ## UPX-packed runtimes
 
@@ -202,6 +354,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `cli.py` | `bgt` — one entry point dispatching every subcommand below |
 | `bgtlib.py` | the chain as a library — `unpack_file(path)` returns every intermediate |
 | `bgt_unpack.py` | CLI: unpack one or more executables, report each layer, write bytecode |
+| `bgt_installer.py` | `bgt installer`: the game inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
@@ -250,6 +403,7 @@ pip install -e .        # then: bgt unpack game.exe -o out
 The whole workflow through the unified CLI:
 
 ```bash
+bgt installer game_setup.exe -o games/    # ...if that is all you were given
 bgt unpack game.exe -o work/
 bgt disasm work/game_bytecode.bin game.exe -o work/game.asm
 bgt lift   work/game_bytecode.bin game.exe -o work/game.as
@@ -344,8 +498,12 @@ python tests/test_toolkit.py        # the BGT known-answer tests alone
 `tests/test_recovery.py` those for project recovery — the IR adapter, the
 compiler driver and the project writer — `tests/test_integration.py` the checks
 that join the two halves (embedded-pack walk, NVGT packs, engine
-identification, the two integer codecs agreeing), and `tests/nvgt/` the NVGT
-suite, whose compiler-backed tests skip unless their
+identification, the two integer codecs agreeing),
+`tests/test_installer.py` the Inno Setup reader (filter vectors computed from
+the documented rule rather than from an encoder written as this decoder's
+inverse, and a synthetic installer built around a game whose bytes hold no
+`0xE8` or `0xE9`, so one layer's output cannot stand in for another's input),
+and `tests/nvgt/` the NVGT suite, whose compiler-backed tests skip unless their
 optional fixtures are configured (`tests/nvgt/README.md`). All of it runs on
 **synthetic inputs and owned fixtures only** — no game files — so it runs
 anywhere. Every subprocess they and the tools launch is given an explicit
@@ -3043,7 +3201,10 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 
 | engine | registered names | types | built |
 |---|---|---|---|
-| BGT 1.0 | 240 | 23 | 2010-12-30 |
+| BGT 1.0 | 240 | 21 | 2010-12-30 03:16 |
+| Ljudfarmen | 283 | 25 | 2011-02-18 18:26 |
+| Grodan Gun | 295 | 26 | 2011-09-19 11:10 |
+| Antony | 312 | 27 | 2012-02-05 15:23 |
 | BGT 1.3 | 432 | 32 | 2014-06-01 00:41 |
 | Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
 | Paladin of the Sky | 432 | 32 | stock |
@@ -3055,6 +3216,67 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
+
+(BGT 1.0's type count is 21 here where this table used to say 23. The names
+agree and only the types moved, which is `registered_types` having been
+corrected three times since -- the array return, the handle marker against
+either side, and a return type needing a separator -- so the earlier figure
+was taken before those refusals existed. Re-derived, not reinterpreted.)
+
+### Three engines between 1.0 and 1.3, and they date the format break
+
+The three Swedish titles are stock BGT of three versions nobody here had a
+sample of, and they turn a two-point line into a five-point one. **Every count
+rises monotonically with the build date**, which is what says these are
+successive versions of one engine rather than forks: 240, 283, 295, 312, 432.
+
+What that dates is the format break this file had been attributing to "the
+2010 engine":
+
+| | Ljudfarmen | Grodan Gun | Antony | BGT 1.3 |
+|---|---|---|---|---|
+| built | 2011-02 | 2011-09 | 2012-02 | 2014-06 |
+| key generator | add | add | multiply | multiply |
+| module stored | raw | raw | LZ77 | LZ77 |
+| pack-size field | **absent** | **absent** | `"0 "` | `"0 "` |
+| namespace in a type declaration | absent | absent | present | present |
+| enum section | **absent** | **absent** | absent | present |
+
+**All five differences move together, between September 2011 and February
+2012.** That is one release doing the lot, which is worth knowing before
+treating any of them as independently trialled: a title that adds where later
+ones multiply also stores raw, also writes no pack field, and also predates
+namespaces.
+
+And the AngelScript underneath moved with it. Ljudfarmen carries the literal
+`2.20.2`, which is the version string BGT 1.0 carries too, and neither it nor
+Grodan Gun has a `PshVPtr` opcode where 1.3 and Antony do -- so the 2011
+engines are built against the same AngelScript as 1.0, and Antony is the first
+here on a newer one. Their opcode tables read 201, 202 and 202 entries against
+1.3's 200.
+
+#### ...and reading those tables needed a one-line fix, of a familiar shape
+
+`as_opcodes.ANCHORS` is six opcode names "distinctive enough to anchor the
+table", and the guard that uses it read
+
+```python
+anchor_off = exe.find(ANCHORS[0])
+if anchor_off < 0:
+    raise ValueError("no AngelScript opcode names found -- not a BGT/AngelScript binary")
+```
+
+-- **`ANCHORS[0]` only**. `PshVPtr` is not in AngelScript 2.20.2, so all three
+titles were refused outright with a message saying they were not AngelScript
+binaries, while their tables sat there perfectly readable: `asBCInfo` is found
+by a strided-run scan that never used the anchor at all, which is only a cheap
+"is this the right kind of file" test. Any one of the six is enough, and the
+other five are in every generation here.
+
+This is the same shape as `bgt_api`'s handle marker and `_CALL`'s receiver
+chain: **a tuple that reads as a list of alternatives, with one caller that
+consults the first and stops.** It costs nothing until a file turns up that
+lacks that one entry, and then it reports the file as the wrong kind of thing.
 
 **Dating the FORK by the build in hand gets it backwards**, and this file
 used to call Manamon 1's engine "a 2017 fork". The copy installed here is
@@ -11148,13 +11370,21 @@ Two things worth keeping, and the second is the one that generalises:
   a *problem* in `recovery.json` rather than a statistic -- and the
   suite pins that no field name this file reads is absent from `Atom`.
 
-# A debug build keeps the names, and one shipped game is one
+# A debug build keeps the names, and FOUR shipped games are
 
 This file says in two places that a game's own file names and its local
 variable names are "stripped and unrecoverable", on the grounds that
 "BGT compiles with `noDebugInfo = 1`". **That is true of `-C` and false
 of `-c`**, and the installer registers both: `compile_release` passes
 `-C` and `compile_debug` passes `-c`.
+
+**And it is not a quirk of one title.** Screaming Strike was the first found;
+Antony, Grodan Gun and Ljudfarmen are all `noDebugInfo = 0` as well, which is
+BGT's own author shipping his own games from the debug build. So four of the
+corpus's titles carry local names, and three of them are the only samples here
+of the 2011 and 2012 engines -- see **The 2011 module is a third reader
+generation** below, which is what has to be read before any of that can be
+used.
 
 Checked by compiling a script of my own both ways -- the module's first
 byte is `noDebugInfo`, and a `-c` build writes 0 there. So the question
@@ -11338,6 +11568,58 @@ records as sufficient for `bgt.exe` -- on a machine that had already
 stopped a measurement for memory that session. What made progress instead
 was the thing this file keeps coming back to: a fixture whose answer is
 known, and the exact-EOF landing to judge it.
+
+## The 2011 module is a third reader generation, and the HEAD says so
+
+All three Swedish titles unpack to a module that this reader gets about
+0x20 bytes into. That is not a near miss, and the bytes say why: the
+section order itself differs.
+
+Grodan Gun's module, byte for byte from offset 0:
+
+```
+00        noDebugInfo = 0
+09        a count of NINE
+6e 05     'n', eu(5)
+"event"
+00 01 00 01    a four-byte flags field, big-endian
+20             eu(32)
+6e 06     'n', eu(6), "player"   <- the next record, immediately
+```
+
+`event`, `player`, `object` are **class** names, and the record is
+`str(name) u32(flags) eu(size)` -- which is `ReadTypeDeclaration` phase 1
+with **no namespace string**. So two things are true of this generation at
+once:
+
+- **There is no enum section.** The first count after `noDebugInfo` is the
+  class count, not the enum count, and `as_module` reads it as the latter
+  -- so it parses one "enum" named after a class and then declares a
+  class-count mismatch. Antony is the same.
+- **A type declaration carries no namespace.** Antony, ten months later,
+  writes an empty one (`00`) after the size, and 1.3 writes one too.
+  AngelScript gained namespaces in 2.22, and BGT 1.0's compiler has no
+  `namespace` keyword at all -- which this file already records from the
+  help file, now confirmed from the serialised format.
+
+So this is a **third generation** beside `tagged` and `len2`, not a third
+*dialect*: the string encoding is `tagged` in all three titles and it is
+the record layout and the section list that move. The pattern is the one
+this document already states -- *the dialects differ in record layout, not
+only in strings* -- reached from the other end of the version line.
+
+**Not attempted here, deliberately.** Extending the reader to it is a real
+piece of work (no enum section, no namespaces, probably funcdef and body
+differences, and the debug block present in all three), and the right way
+in is the one this file opens with: `asCReader::ReadInner` is statically
+linked into each of those three executables, so the layout for each build
+is in the binary in front of you. The stub is uncompressed in a game, and
+`bgtlib.read_trailer` gives the split for a Ghidra import that does not
+choke on the encrypted overlay.
+
+What is already paid for is everything below the module: all three open,
+their opcode tables read, their licence decodes, and the three engines are
+dated. The module is the next layer and it is untouched.
 
 # A whole game WITH its source, which is the strongest oracle yet
 
@@ -12408,11 +12690,12 @@ different kinds.
 | claim | how it was settled |
 |---|---|
 | #7 Recover fails on a game Identify calls NVGT | **true, from the code.** `recover` never called `identify`; it ran the BGT chain whatever it was handed, and `bgtlib` raises that exact string. No sample needed |
-| #6 BGT 1.0 adds 3 where later versions multiply | **true, from both binaries** -- the controlled comparison above |
-| #6 the 32 hex characters are a licence mark | **true**, on three titles, by a plaintext that verifies itself |
+| #6 BGT 1.0 adds 3 where later versions multiply | **true, from both binaries** -- the controlled comparison above, and since then **proven end to end** on two shipped 2011 titles |
+| #6 the 32 hex characters are a licence mark | **true**, on three titles, by a plaintext that verifies itself -- and since then on three more that carry a **real code** rather than `*` |
 | #3 an empty LEN2 string must occupy a `savedStrings` index | **refuted by measurement** -- see below |
 | #2 the dialects were named after a game's author | **true, and worse than reported** -- see below |
-| #6 BGT 1.0 does not compress | **taken on the reporter's word**, with a guard that fails loudly |
+| #6 BGT 1.0 does not compress | **confirmed**: Grodan Gun's payload is 63,364 bytes against a container declaring 63,364 |
+| #6 two earlier encryption methods exist | **one was the early overlay's missing pack field**, which is not encryption and is fixed. A LZ77 decode that looked like a second was Inno's call-instruction filter, not an engine at all |
 | #7 two NVGT games detected as neither engine | **not checked.** Neither file is here; the cause is assumed |
 | #5 the overlay key is the hex-ASCII text | **already answered in the code it is about**, and not dismissed -- see below |
 | #1, #4 a third serialization dialect | **not checkable.** Nobody here has the module |
@@ -12420,6 +12703,13 @@ different kinds.
 **Three were fixed, one was refuted, one was corrected, and four could not be
 checked at all** -- and keeping those apart is the whole value of the table. A
 report is not a measurement, and neither is a rebuttal.
+
+**Two of those rows have since moved, and both moved by getting a FILE.** The
+end-to-end case and the uncompressed payload were the two halves taken on the
+reporter's word, and three of BlastBay's own installers settled both. Nothing
+about the reasoning changed; what changed is that somebody pointed at
+agarchive.net. A claim that cannot be checked is worth keeping written down
+rather than closed, because the sample may arrive.
 
 ## The empty-string claim, refuted by a module that is full of them
 
@@ -12496,6 +12786,15 @@ the same as Super Egg Hunt's. A module at that offset came from the engine
 whose generator and dialect are verified here, so "a third dialect" and "a
 different key derivation" are hard to hold together with the reporter's own
 numbers. That is a reason to ask for the file, not a reason to close the issue.
+
+**And a third serialization generation does exist**, which is worth saying
+beside #1 and #4 without crediting them with it: the 2011 engines write no
+enum section and no namespace in a type declaration (see **The 2011 module is
+a third reader generation**). That is not what those issues describe -- they
+describe a module at 0xDDC00, which is 1.3's stub length, where this one comes
+from a 1.7 MB 2011 runtime -- so it neither confirms nor refutes them. It does
+mean "a serialization this reader does not have" has stopped being
+hypothetical.
 
 ## Recovering a game now picks the engine's half for you
 

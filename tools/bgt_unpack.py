@@ -58,13 +58,17 @@ def angelscript_probe(bc):
         # anything. `bgt identify` and `as_module` decide it by parsing.
         style = "dialect not visible here (no enums) -- trial parse decides"
     elif nxt == 0x6E:
-        style = "tagged strings ('n'/'r') -- Psycho Strike lineage"
+        style = "tagged strings ('n'/'r') -- the older AngelScript"
     elif nxt % 2 == 0:
         style = "len*2 savedStrings -- newer AngelScript"
     else:
         style = "unrecognised (next byte 0x%02X)" % nxt
 
-    return "noDebugInfo=%d  enums=%s  %s" % (no_debug, count, style)
+    # The count is the enum count in the 2014 generation and the *class* count
+    # in the 2011 one, which has no enum section at all -- so it is named for
+    # where it sits rather than for what it counts. The trial parse is what
+    # answers either question.
+    return "noDebugInfo=%d  first count=%s  %s" % (no_debug, count, style)
 
 
 def report(path, outdir=None, seed=None):
