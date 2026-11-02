@@ -24,6 +24,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt audit  recovered/ game.exe         did the recovery lose a value? every
                                            callee, literal and numeric constant
                                            the bytecode holds, against the text
+    bgt drive recovered/ --scenario ctrl   ...and does it ANSWER right when run?
     bgt signatures recovered/              ...and does the text say something no
                [--against OTHER]            author would write? a shape per bug
                                             class, swept, and the delta to a
@@ -64,7 +65,7 @@ try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
                    bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
-                   bgt_ghidra, bgt_oracle,
+                   bgt_ghidra, bgt_oracle, bgt_drive,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_unpack, bgt_validate,
                    bgtlib, engine, script_files)
@@ -81,6 +82,7 @@ except ImportError:       # run directly from a checkout
     import bgt_signatures
     import bgt_to_nvgt
     import bgt_oracle
+    import bgt_drive
     import bgt_compile
     import bgt_crack
     import bgt_ghidra
@@ -389,6 +391,29 @@ def cmd_signatures(args: argparse.Namespace) -> int:
     if args.json:
         argv += ["--json", args.json]
     return _run(bgt_signatures.main, argv, prog="bgt signatures")
+
+
+def cmd_drive(args: argparse.Namespace) -> int:
+    """`bgt drive` runs a recovered game's own functions and watches what they
+    answer. Every other check reads the recovery; this one runs it, silently
+    and with no window, which is the only way to catch a defect that compiles
+    cleanly and computes the wrong thing."""
+    argv = [args.project]
+    for flag, values in (("--watch", args.watch), ("--call", args.call),
+                         ("--hold", args.hold), ("--setup", args.setup)):
+        for value in values or ():
+            argv += [flag, value]
+    if args.scenario:
+        argv += ["--scenario", args.scenario]
+    for flag, value in (("--for", args.duration), ("--every", args.every),
+                        ("--tick", args.tick), ("--timeout", args.timeout),
+                        ("--build", args.build), ("--compiler", args.compiler)):
+        if value is not None:
+            argv += [flag, str(value)]
+    for flag in ("keep", "show_probe"):
+        if getattr(args, flag):
+            argv.append("--" + flag.replace("_", "-"))
+    return _run(bgt_drive.main, argv, prog="bgt drive")
 
 
 def cmd_tonvgt(args: argparse.Namespace) -> int:
@@ -896,6 +921,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strict", action="store_true",
                    help="exit 1 if any signature is reported")
     p.set_defaults(func=cmd_signatures)
+
+    p = sub.add_parser("drive",
+                       help="run a recovered game's own functions, silently, "
+                            "and watch what they answer")
+    p.add_argument("project", help="a directory of recovered .bgt files")
+    p.add_argument("--watch", action="append", metavar="EXPR",
+                   help="an expression to sample each tick (repeatable)")
+    p.add_argument("--call", action="append", metavar="STMT",
+                   help="a statement to run each tick (repeatable)")
+    p.add_argument("--hold", action="append", metavar="KEY",
+                   help="a key to hold down for the whole run")
+    p.add_argument("--setup", action="append", metavar="STMT",
+                   help="a statement to run once before the loop")
+    p.add_argument("--scenario", metavar="NAME",
+                   help="a ready-made run: %s"
+                        % ", ".join(sorted(bgt_drive.SCENARIOS)))
+    p.add_argument("--for", dest="duration", type=int, metavar="MS",
+                   help="how long to drive (default 1000)")
+    p.add_argument("--every", type=int, metavar="MS",
+                   help="how often to sample (default 100)")
+    p.add_argument("--tick", type=int, metavar="MS",
+                   help="the loop's own wait (default 5)")
+    p.add_argument("--timeout", type=float, metavar="S")
+    p.add_argument("--build", choices=("debug", "release"),
+                   help="build and run an executable, where the answer "
+                        "could depend on get_SCRIPT_COMPILED()")
+    p.add_argument("--compiler", metavar="PATH", help="bgt.exe")
+    p.add_argument("--keep", action="store_true",
+                   help="leave the probe and its table in the project")
+    p.add_argument("--show-probe", action="store_true",
+                   help="print the probe script instead of running it")
+    p.set_defaults(func=cmd_drive)
 
     p = sub.add_parser("files",
                        help="which source files a module was built from (BGT or NVGT)")

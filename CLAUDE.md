@@ -133,6 +133,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
+| `bgt_drive.py` | `bgt drive`: runs a recovered game's own functions with keys held down and watches what they answer -- silently, and with no window |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
 | `bgt_to_nvgt.py` | `bgt tonvgt`: a recovered BGT project as one NVGT compiles -- and unlike the BGT side it can ask, because NVGT's compiler is a console program |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
@@ -191,6 +192,7 @@ bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt recover game.exe -o recovered/ --no-game-files  # ...without the game's other data
 bgt compile recovered/game.bgt            # just the compiler, on any script
 bgt oracle                                # does a recovery still COMPUTE the same?
+bgt drive recovered/ --scenario ctrl      # ...and does the GAME's own code answer right?
 bgt apicheck recovered/ game.exe          # every call, against the build's own declarations
 bgt audit    recovered/ game.exe          # ...and did it LOSE a value?
 bgt signatures recovered/                 # ...and does the text say something odd?
@@ -6075,6 +6077,91 @@ Two things make it a check rather than a demo:
 What it does *not* do is cover a title's own code: 31 shapes are 31 shapes.
 It is the fastest way to find out whether a change broke a construct, and
 `measure.py` over four titles is still what says whether it broke a *program*.
+
+## Running a GAME's own code, silently
+
+`bgt oracle` runs 51 shapes written here. `bgt libcheck` reaches the
+functions BGT ships source for -- 47 to 155 of a title's hundreds. Every
+bug ever reported from playing these games has been in neither set, and
+the only instrument that has ever found one is somebody pressing a key.
+
+```bash
+bgt drive recovered/ --scenario ctrl
+bgt drive recovered/ --watch "k_ctrl(1)" --hold KEY_LCONTROL
+bgt drive recovered/ --watch "player.x" --hold KEY_RIGHT --for 1000 --every 100
+```
+
+It calls any function of a recovered project with any keys held down,
+samples any expressions on a clock, and prints a table. The engine's own
+`force_key_down(int)` supplies the input and `file::write` the output,
+because a BGT script has no stdout: the engine is a GUI program.
+
+**It makes no sound and opens no window**, and both halves were measured
+rather than assumed:
+
+- `set_sound_master_volume(-100.0)` is the engine's own registered master
+  gain, so a game that loads and plays its whole soundtrack does it into
+  silence. These are audio games; a harness that drove them audibly could
+  not be run while anybody was using the computer.
+- **A forced key does not go through a window.** Asked directly, a script
+  with no window at all answers `down=1 pressed=1` after
+  `force_key_down(KEY_LCONTROL)` -- which matters twice over, because
+  `bgt_compile.check` treats a window of the script's own as an outcome
+  and kills the process to report it. The first version called
+  `show_game_window` and was killed before it could write its table; the
+  run came back `started` with no rows, which reads like a broken
+  recovery.
+
+### It reproduces a reported bug and its fix, in both directions
+
+The control-key defect this file records was reported as *"when I press
+control to fire the weapon it is like it is stuck"* and found by reading
+the bytecode. Driven, with the LEFT control held:
+
+| Field Wars, `k_ctrl(1)` | answer |
+|---|---|
+| recovered before the fix | **0** |
+| recovered after it | **1** |
+
+That is the whole of the defect, in one command, with no sound and
+nothing on screen. `k_ctrl(2)` is `key_released` and reads 0 in both,
+which is the control that says the 0 means something.
+
+### Three things it has to get right
+
+- **`main` is not in the entry script.** It is one of the game's own
+  global functions, so `bgt recover` writes it into
+  `includes/functions/part_0.bgt` -- consistently, across every title
+  here. `bgt_compile.stage` renames `main` in the script it is handed,
+  which is right for a compile-only check, where `-c` means nothing runs
+  and disarming is cosmetic. To RUN one, the file that really declares it
+  has to be found. It is renamed for the run and **restored in a
+  `finally`**, from a copy taken before it was touched: a run that left a
+  project with no `main` would look exactly like a broken recovery, and
+  the next thing anybody would do is blame the decompiler.
+- **The probe lives in the project directory.** BGT resolves everything
+  relative against the *script's own* directory -- an `#include` and
+  `set_sound_storage("data/bgm.dat")` alike -- and this file already
+  records a staged copy one level down being given repointed includes and
+  *still* reporting `could not load pack data/bgm.dat.` So it goes in
+  beside the entry under a reserved prefix, exactly as `check_project`
+  does, and nothing has to be rewritten or guessed.
+- **`string(bool)` is `1`, not `true`.** All five of `string(bool)`,
+  `string(int)`, `string(double)`, `"" + bool` and `"x" + int` were put to
+  the compiler before one was picked, and then the engine was asked what
+  they *produce*. A canned scenario expecting the word would have reported
+  a correct recovery as wrong, which is the shape this file keeps
+  recording.
+
+### What it cannot drive
+
+A game's own main loop, because that loop does not return: Field Wars'
+movement lives inside `game()`, so there is no function to call and no
+tick to sample between. Driving those needs the loop broken into steps,
+which is a change to the recovery rather than to the harness and is not
+done here. A tool that implied otherwise would be worse than one that
+says so -- and the honest limit is still wide, because an input reader,
+a menu helper, a formula and every library class ARE functions.
 
 ## When a folded temporary stops being the value the bytecode computed
 
