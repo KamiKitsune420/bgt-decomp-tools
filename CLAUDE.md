@@ -8558,6 +8558,107 @@ came out.
 shipping the instruments on their own: `if (godmode) { } else { }` with
 both arms gone, in a shape the sweep could not see an hour earlier.
 
+#### The problem has a NAME, and two decompilers have met it
+
+Searched for rather than re-derived, and the answer reframes everything
+above: **this is the standard hard problem of decompilation, and the best
+commercial tool punts it to a human.**
+
+- **Hex-Rays.** Its own documentation says a compiler "can actually reuse
+  the *same stack location* for different variables active at different
+  times", and what IDA offers is a manual `Split variable` (Shift-S) that
+  "introduce[s] a new variable for the same stack location" -- adding that
+  "the decompiler does not perform any checks". So the industry-leading
+  decompiler does not solve this automatically; it gives the user a knife
+  and no guard.
+- **angr solved the narrow version, and had this exact bug.** Pull request
+  #7479 is titled "Consider variable liveness ranges when recognizing stack
+  variables from SSA VVars", and its commit message is "split a seeded stack
+  region among vvars whose live ranges interfere". What it fixed: `h += f()`
+  on 386, where the old `h` and the call's result shared a slot and were both
+  live at the concatenation, **rendered as `v0 + v0`**.
+
+`v0 + v0` is `(local_14 != 0) && (local_14 != 0)` under another name. The
+same bug, in a mainstream decompiler, fixed by adding an interference check.
+
+- **There is no other AngelScript decompiler to borrow from.** The search
+  turned up one disassembler (`asumagic/angelscript-disassembler`, a modified
+  `asbuild` that prints bytecode) and the SDK's own compiler-side sample. The
+  only general-purpose AngelScript *decompiler* it found is this one.
+
+#### `slot_webs`, which is the machinery that fix needs
+
+So the fix is not a fold rule, and `_promote_temp`'s own docstring already
+says why one is not enough: *"The slot gets one name, not a name per
+promotion"*, because a fresh name per promotion split `dynamic_menu`'s
+joystick edge flag in two and "pressing up disarmed down". That failure and
+the collapsed chain are **the same question asked from both ends**, and
+neither can be answered without knowing whether two definitions of a slot
+INTERFERE.
+
+`FuncDecompiler.slot_webs(slot)` answers it: reaching definitions over the
+instruction-level CFG, then union the definitions that share a use. A web is
+one source variable; two webs in one slot are two variables the compiler gave
+one slot.
+
+**Validated against three cases whose answer is known independently**, two of
+which pull in opposite directions:
+
+| case | must | answer |
+|---|---|---|
+| `dynamic_menu::run_extended` slot 20, the joystick flag | **not** split | 4 writes, 2 reads -> **1 web** |
+| Field Wars `game` slots 14 / 22 / 24 | split | 163/136/67 writes -> **140/110/57 webs** |
+| `cs` `netloop` slot 57, chain and `/godmode` ternary | split | separated |
+
+and on the same body it leaves alone what should be left alone: slots 9 and
+13 of `run_extended` are 2 writes and 8 reads each and come out as **one**
+web, while its genuine temporaries (76 writes, 74 reads) come out as 74.
+
+**The worklist has to start from every instruction.** Seeded from the entry
+alone it ran exactly ONE round and stopped -- the entry's state is empty,
+propagating an empty set changes nothing, and a node is re-queued only when
+its state changes, so no definition was ever reached. Every write then came
+out as its own web, *including the joystick flag's four*, and the analysis
+looked like it was working: 163 writes, 163 webs, which is a plausible number
+for a slot that really does carry 163 temporaries. The tell was the flag
+reporting 4 and 4 when the right answer is 1.
+
+**It is shipped as analysis only**, and the four recovered trees are
+byte-identical with it present. A body over `WEB_ANALYSIS_LIMIT` declines
+rather than spending a fixpoint on Crazy Party's 1,074,460-instruction
+generated function, and declining means no split, which is what this file
+does everywhere today.
+
+#### What wiring it showed, and the one decision left
+
+Promotion keyed on webs rather than slots was built and measured, and it is
+most of the way there:
+
+| | Field Wars | cs server |
+|---|---|---|
+| `collapsed_chain` | **9 -> 0** | **9 -> 0** |
+| residual gotos | 0 | 0 |
+| split verified | yes | yes |
+| the `admin` term | -- | **restored** |
+| `/godmode` toggle | -- | **broken** |
+| the AFK ternary | -- | **broken** |
+
+So webs fix every collapsed chain in the corpus, and two ternaries regress --
+because **`is_named` is still asked of the SLOT**. A ternary's two arms are
+emitted as stores only when it answers yes, and a short-circuit needs it to
+answer no; with one answer per slot, `netloop`'s slot 57 cannot have both.
+
+Letting a ternary's web claim the slot name was tried, and it is attempt 6
+again: `/godmode` and the AFK marker come back and the chains collapse
+(Field Wars 9 -> 11), because the shape test that finds a ternary claims far
+too many slots.
+
+**The remaining step is to make `is_named` web-local**, which means auditing
+its 15 call sites -- each one a separate judgement about whether "named" is
+meant of the slot or of the value in it. That is a contained piece of work
+with a validated analysis under it, which is a much better place than this
+section started.
+
 #### What the next attempt should know
 
 - **Neither the slot nor the position is the key; the VALUE is**, and the

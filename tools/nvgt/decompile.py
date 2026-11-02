@@ -84,6 +84,10 @@ CONV_OPS = {
 #: the compiler -- from the ones it merely reads, which may be the source's
 #: own. Reading is not writing: an arm that calls a method on a local pushes
 #: that local's slot, and counting the push would unforce a real variable.
+#: How big a body `slot_webs` will analyse. Above this it declines, and
+#: nothing is split -- the behaviour this file has everywhere today.
+WEB_ANALYSIS_LIMIT = 60000
+
 _SLOT_WRITE_OPS = (
     {"SetV1", "SetV2", "SetV4", "SetV8",
      "CpyVtoV4", "CpyVtoV8", "CpyRtoV4", "CpyRtoV8",
@@ -5608,6 +5612,136 @@ class FuncDecompiler:
                         slots.add(off)
         return slots
 
+    def _slot_io(self) -> tuple:
+        """Per instruction: the slot it writes, and the slots it reads.
+
+        Both halves come from the machinery this file already derives from
+        AngelScript's own operand naming -- `_SLOT_WRITE_OPS` for the write
+        and `asBCTYPE_*` for the reads -- so neither is a hand-kept list that
+        can fall behind the instruction set.
+        """
+        writes: list = []
+        reads: list = []
+        for ins in self.instrs:
+            wrote = None
+            if ins.name in _SLOT_WRITE_OPS:
+                off = _s16(ins.w_arg)
+                if off > 0:
+                    wrote = off
+            writes.append(wrote)
+            reads.append(_read_slots([ins]))
+        return writes, reads
+
+    def _successors(self) -> list:
+        """The CFG, at instruction granularity.
+
+        Fallthrough unless the instruction cannot fall through, plus the jump
+        target where there is one. `RET` and an unconditional `JMP` do not
+        fall through; a conditional jump does both.
+        """
+        out: list = []
+        for k, ins in enumerate(self.instrs):
+            nexts: list = []
+            if ins.name not in ("JMP", "RET"):
+                if k + 1 < len(self.instrs):
+                    nexts.append(k + 1)
+            if ins.name in (*JUMP_OPS, "JMP"):
+                target = self.pos_of.get(_jump_target(ins))
+                if target is not None:
+                    nexts.append(target)
+            out.append(nexts)
+        return out
+
+    def slot_webs(self, slot: int) -> list:
+        """The sets of writes to `slot` that are ONE source variable.
+
+        A web is a maximal group of definitions joined by a use they can both
+        reach -- the term comes from register allocation, where this analysis
+        runs the other way round. Two writes that no single read sees are two
+        variables that happened to be given one slot, and splitting them is
+        what `Split variable` does by hand in Hex-Rays.
+
+        **The interference check is the whole point.** Without it, naming each
+        promotion separately breaks a variable the compiler wrote in one
+        branch and read in another: `dynamic_menu`'s joystick edge flag came
+        apart into two names, the UP arm wrote one and only the DOWN arm read
+        it, so pressing up disarmed down. That is why this file settled on one
+        name per slot -- and one name per slot is what collapses a
+        short-circuit chain whose slot is promoted for an unrelated value
+        2,000 instructions away. Webs are the thing that lets both be right.
+
+        Returns a list of frozensets of instruction POSITIONS, in the order
+        their earliest write appears, or an empty list when the slot has
+        fewer than two writes and so cannot be split.
+        """
+        #: Crazy Party's generated `ajouteLangue` is 1,074,460 instructions,
+        #: and a per-slot fixpoint over it would cost more than it can buy.
+        #: Declining is the conservative answer -- no split, which is what
+        #: this file does everywhere today.
+        if len(self.instrs) > WEB_ANALYSIS_LIMIT:
+            return []
+        writes, reads = self._slot_io()
+        defs = [k for k, off in enumerate(writes) if off == slot]
+        if len(defs) < 2:
+            return []
+        uses = [k for k, got in enumerate(reads) if slot in got]
+        if not uses:
+            return []
+        succ = self._successors()
+
+        #: reaching definitions for this one slot, to a fixpoint. `state[k]`
+        #: is the set of definition indices live on entry to instruction k.
+        state: list = [frozenset() for _ in self.instrs]
+        #: **Every instruction starts on the worklist, not just the entry.**
+        #: Seeded with `{0}` alone this ran exactly ONE round and stopped: the
+        #: entry's state is empty, propagating an empty set changes nothing,
+        #: and a node is only re-queued when its state changes -- so no
+        #: definition was ever reached and every write came out as its own
+        #: web, including the ones that must not be split. The tell was
+        #: `dynamic_menu`'s joystick flag reporting 4 writes and 4 webs when
+        #: the right answer is one.
+        pending = set(range(len(self.instrs)))
+        rounds = 0
+        limit = 40 * len(self.instrs) + 1000
+        while pending and rounds < limit:
+            rounds += 1
+            k = pending.pop()
+            here = state[k]
+            after = frozenset({k}) if writes[k] == slot else here
+            for nxt in succ[k]:
+                merged = state[nxt] | after
+                if merged != state[nxt]:
+                    state[nxt] = merged
+                    pending.add(nxt)
+
+        #: ...then union the definitions that share a use. Union-find, so a
+        #: chain of shared uses joins transitively.
+        parent = {k: k for k in defs}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for use in uses:
+            live = sorted(state[use])
+            for other in live[1:]:
+                union(live[0], other)
+
+        groups: dict = {}
+        for k in defs:
+            groups.setdefault(find(k), []).append(k)
+        webs = [frozenset(self.instrs[k].pos for k in sorted(members))
+                for _root, members in sorted(groups.items())]
+        #: a definition no use can see is a dead store, and belongs with
+        #: nothing -- it is reported as its own web so a caller can tell.
+        return webs
     def _tested_as_bool(self, slot: int, start: int, window: int = 4) -> bool:
         """Is this slot loaded and then tested as a boolean, right here?
 
