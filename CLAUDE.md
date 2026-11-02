@@ -134,6 +134,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
 | `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
+| `bgt_to_nvgt.py` | `bgt tonvgt`: a recovered BGT project as one NVGT compiles -- and unlike the BGT side it can ask, because NVGT's compiler is a console program |
 | `bgt_repack.py` | the chain in reverse — rebuild an executable around a modified module |
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
 | `bgt_validate.py` | run the whole pipeline over several titles and compare, stage by stage |
@@ -174,6 +175,12 @@ bgt asm    work/game_bytecode.bin game.exe \
            --replace sounds.dat=my.dat -o work/modified.bin
 bgt repack game.exe work/modified.bin -o patched.exe
 bgt validate game.exe patched.exe
+```
+
+...or ported to the other engine, which can be compiled on every run:
+
+```bash
+bgt tonvgt recovered/ -o ported/          # convert, then `nvgt -c` judges it
 ```
 
 Or, in one command, the whole thing as a project the compiler judges:
@@ -10620,6 +10627,117 @@ question with a known answer available in one command, on a title whose
 every line can be read side by side -- which is what `bgt roundtrip` has
 been approximating with a rebuild. The two should agree, and checking that
 they do is the cheapest validation of the round trip there is.
+
+# Porting to NVGT, which can be compiled on every run
+
+The two engines share a language and almost nothing else, so this is a
+smaller job than it sounds and a **measurable** one:
+
+```bash
+bgt tonvgt recovered/ -o ported/
+```
+
+**Why this can be honest where the BGT side cannot.** `bgt compile` drives a
+GUI program and puts a modal dialog on somebody's screen, which is why this
+file keeps calling a whole-title compile a thing to spend deliberately.
+NVGT's compiler is a **console program** -- `nvgt -c script.nvgt`, exit codes,
+warnings on request -- so a conversion is compiled on every run and the report
+is what the compiler said rather than what it hoped.
+
+Measured on every title that can be measured here:
+
+| title | renames | reported | conflicts | `nvgt -c` |
+|---|---|---|---|---|
+| Battle of the Hunter | 1 | 0 | 0 | **compiled cleanly** |
+| constant velocity | 0 | 0 | 0 | **compiled cleanly** |
+| Super Egg Hunt | 1 | 2 | 0 | 1 error |
+| Manamon 1 | 124 | 6 | 1 | **1 error**, in 83,371 lines |
+| The Gate | 35 | 0 | 1 | 3 errors |
+| cs server | 11 | 1 | 0 | 14 errors |
+| cs client | 10 | 8 | 0 | 17 errors |
+| rage room | 3 | 212 | 0 | 212 errors |
+
+Four mechanical steps and three reports. The steps: every `.bgt` becomes a
+`.nvgt`, every `#include` is repointed, the entry script gains
+`#include "bgt_compat.nvgt"` -- NVGT's own BGT compatibility layer, and the
+reason this is a small job -- and the names the two engines spell differently
+are renamed.
+
+## A rename has to know what it is renaming on
+
+`get_length` is the one that makes the point, and the engine was asked rather
+than a registration read:
+
+```
+string[] a;   a.length()        compiles
+              a.get_length()    "No matching symbol 'get_length'"
+sound s;      s.get_length()    compiles -- `uint64 get_length() property`
+```
+
+So a blanket rename breaks every sound. The receiver's **declared type**
+decides, and the project's own text is where that is written down -- with one
+wrinkle this file has met before: a recovered local is called `local_16` in
+every function that has one, so a project-wide map drops it for disagreeing
+with itself. The nearest declaration above the use is the answer, which is
+what a reader does and what the hoisting in these files makes exact --
+`bgt signatures` resolves an unsigned comparison the same way.
+
+**`string[]@` ends in `@`, not in `]`.** The first version declined every
+handle-to-array in the corpus, which is why Battle of the Hunter sat at three
+errors instead of none. And `lstrip("const")` is not how a prefix comes off:
+it strips those five *characters*, so it turned `string[]@` into `ring[]@`.
+
+**Some accessors are a plain PROPERTY there**, so the brackets come off as
+well as the prefix. NVGT registers `network_event`'s members with
+`RegisterObjectProperty`, so `e.get_peer_id()` is `e.peer_id` -- 10 sites on
+the cs client, and its error count fell 55 -> 17 with those and `get_length`
+together.
+
+## What it will not do
+
+Guess at a difference in **meaning**. Three are named with every site, and
+each is reported rather than rewritten:
+
+| | |
+|---|---|
+| `library::call` | returns `var@` in NVGT and `dictionary@` in BGT, so the result is not read with `.get(...)`. **All 212 of rage room's errors**, that title being a BASS wrapper |
+| `downloader`'s progress | a `float` in NVGT where BGT's `get_progress()` is used as a truth value -- written straight across, `!d.get_progress()` compiles and polls forever |
+| `network::request` | returns a `const network_event@`, so the handle it is assigned to has to be `const` too |
+
+A rewrite there would produce source that compiles and does something else,
+which this repository treats as the worst outcome available.
+
+## A name the GAME declares that NVGT already has
+
+The last class, and the only one that is the port's problem rather than the
+converter's. Manamon 1 declares `class sleep` and NVGT has a global `sleep`;
+The Gate declares `log` and NVGT has that too. One compiler error each -- and
+Manamon 1's is its **only** one across 83,371 lines.
+
+**The compiler is asked, not the text.** A static scan has to know what is in
+*scope*, and one got it wrong in both directions at once: it missed `sleep`,
+and it reported `map` and `note`, which NVGT declares in files nobody
+included. `Name conflict. 'X' is a global function.` is exact and complete, so
+that is what is read -- this file's first rule, applied one engine over.
+
+The cure is a project-wide rename, which is the author's call: a class name
+reaches into string literals and saved data, and a tool that renamed it would
+be guessing about both.
+
+## Two sets, and they are deliberately different sizes
+
+`Nvgt.known` is every name NVGT's engine registers plus every
+`include/*.nvgt` declaration, and it is used to report an **absence**.
+`Nvgt.linked` is the engine plus `bgt_compat.nvgt` alone, because a converted
+project includes that and nothing else of the library.
+
+The asymmetry is the point and it is this file's own rule: for an absence a
+broad set is right, since **a name a check wrongly holds is a gap it will
+never report**; for a conflict the opposite holds, since a conflict wrongly
+reported is noise. `get_length` is the reminder that a name-only check has a
+ceiling either way -- `sound::get_length` exists, so the name is "known"
+while the call on an array is not. The compiler closes that, which is why it
+is the judge and the reports are a pre-filter.
 
 # Repacking
 

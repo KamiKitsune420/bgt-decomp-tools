@@ -38,6 +38,7 @@ bgt -- one entry point for the whole toolkit, BGT and NVGT alike.
     bgt ghidra decompile game.exe --string _builtin_function_
 
   NVGT
+    bgt tonvgt recovered/ -o ported/       port it to NVGT, and compile it there
     bgt nvgt recover game.exe -o src.zip   complete, browsable source project
     bgt nvgt decompile game.exe -o game.nvgt
     bgt nvgt disasm game.exe -o game.asm
@@ -62,7 +63,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
-                   bgt_roundtrip, bgt_signatures,
+                   bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
                    bgt_ghidra, bgt_oracle,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_unpack, bgt_validate,
@@ -78,6 +79,7 @@ except ImportError:       # run directly from a checkout
     import bgt_audit
     import bgt_roundtrip
     import bgt_signatures
+    import bgt_to_nvgt
     import bgt_oracle
     import bgt_compile
     import bgt_crack
@@ -387,6 +389,28 @@ def cmd_signatures(args: argparse.Namespace) -> int:
     if args.json:
         argv += ["--json", args.json]
     return _run(bgt_signatures.main, argv, prog="bgt signatures")
+
+
+def cmd_tonvgt(args: argparse.Namespace) -> int:
+    """`bgt tonvgt` ports a recovered BGT project to NVGT and compiles it.
+
+    The two engines share a language and almost nothing else, so the work is
+    not translating one -- it is finding the handful of names that genuinely
+    differ. Converted naively, a whole 5,302-line title came out at two
+    compiler errors.
+
+    Unlike `bgt compile`, this can check itself on every run: NVGT's compiler
+    is a console program, so there is no modal dialog and nobody's screen to
+    interrupt.
+    """
+    argv = [args.project, "-o", args.output]
+    if args.nvgt:
+        argv += ["--nvgt", args.nvgt]
+    if args.no_compile:
+        argv.append("--no-compile")
+    if args.json:
+        argv += ["--json", args.json]
+    return _run(bgt_to_nvgt.main, argv, prog="bgt tonvgt")
 
 
 def cmd_recover(args: argparse.Namespace) -> int:
@@ -842,6 +866,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scratch", metavar="DIR",
                    help="where to write a module unpacked from an exe")
     p.set_defaults(func=cmd_roundtrip)
+
+    p = sub.add_parser("tonvgt",
+                       help="port a recovered BGT project to NVGT, and let "
+                            "NVGT's own compiler judge it")
+    p.add_argument("project", help="a directory of recovered .bgt files")
+    p.add_argument("-o", "--output", required=True,
+                   help="where to write the converted project")
+    p.add_argument("--nvgt", metavar="PATH",
+                   help="nvgt.exe or the folder holding it (else "
+                        "NVGT_COMPILER, else the usual places)")
+    p.add_argument("--no-compile", action="store_true",
+                   help="convert without asking the compiler")
+    p.add_argument("--json", metavar="FILE", help="write the report")
+    p.set_defaults(func=cmd_tonvgt)
 
     p = sub.add_parser("signatures",
                        help="shapes in recovered text that no author "
