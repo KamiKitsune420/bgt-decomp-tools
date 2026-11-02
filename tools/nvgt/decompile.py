@@ -5056,6 +5056,25 @@ class FuncDecompiler:
         if has_out and pop_out is not None and pop_out.is_ptr \
                 and pop_out.offset is not None:
             # result lands directly in the caller's slot
+            #
+            #: **A value type returned BY VALUE is still a call**, and this
+            #: branch did not say so. A registered function returning one
+            #: uses the stack return-address protocol -- the destination is
+            #: pushed deepest, before the call -- so its result never passes
+            #: through the value register, and only the register branch below
+            #: recorded anything. So `invocations` never held it,
+            #: `call_binds` is gated on that, and `_lost_calls` could not see
+            #: such a call at all.
+            #:
+            #: `string` is the commonest such type in these games, which is
+            #: what makes the hole wide: every `input_box`, `string_replace`
+            #: or `get_item_name` whose result the original discards is a
+            #: call the recovery drops with the store. rage room's `mainmenu`
+            #: is the named instance -- the author's own source asks for a
+            #: name, throws the answer away on the next line, and the
+            #: recovery dropped the prompt with it, so choosing "change
+            #: name" did nothing at all.
+            self._record_call(ins, calltxt, fr, ret)
             self._bind(pop_out.offset, Atom("call", calltxt))
         elif ret is not None and ret.format() != "void":
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)

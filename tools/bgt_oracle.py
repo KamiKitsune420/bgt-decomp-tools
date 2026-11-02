@@ -96,6 +96,10 @@ int bump()
 // already gone.
 int other_counter = 0;
 
+// A third, for the value-type-return shape below, so that a loss there
+// cannot be hidden by either of the other two counters moving.
+int string_counter = 0;
+
 int bump_other()
 {
     other_counter += 1;
@@ -128,6 +132,33 @@ void call_into_a_dead_local_per_arm(bool which)
     int ignored = 0;
     if (which) ignored = bump();
     else ignored = bump_other();
+}
+
+// **A call that returns a VALUE TYPE by value**, which is a different branch
+// of the simulation and was invisible to the lost-call census for as long as
+// it existed. Such a call does not pass its result through the value
+// register: the destination slot is pushed before the call and the result
+// lands straight in it, so only the register path ever recorded the call,
+// and `string` is the commonest such type in these games.
+//
+// This is rage room's `mainmenu`, whose author wrote exactly this -- ask for
+// a name, overwrite it on the next line -- so a recovery that drops the dead
+// store drops the prompt with it and "change name" asks nothing.
+//
+// `bump_text` has to be the game's own function rather than an engine one,
+// because an engine call's purity comes from a checked list and a script
+// function's is computed from its body: this one writes a global, so it is
+// impure, and dropping it is a lost call rather than a tidy-up.
+string bump_text()
+{
+    string_counter += 1;
+    return "called " + string_counter;
+}
+
+void call_returning_a_value_type_into_a_dead_local()
+{
+    string ignored = bump_text();
+    ignored = "overwritten before anything reads it";
 }
 
 class holder
@@ -693,7 +724,9 @@ void main()
     call_into_a_dead_local();
     call_into_a_dead_local_per_arm(true);
     call_into_a_dead_local_per_arm(false);
+    call_returning_a_value_type_into_a_dead_local();
     report += "dead_local_other=" + other_counter + "|";
+    report += "dead_local_value_type=" + string_counter + "|";
     report += "counter=" + counter + "|";
     file f;
     f.open("REPORT_NAME", "wb");
