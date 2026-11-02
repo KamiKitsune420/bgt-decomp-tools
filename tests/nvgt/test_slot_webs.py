@@ -164,5 +164,184 @@ class DecliningTests(unittest.TestCase):
         self.assertLess(decompile.WEB_ANALYSIS_LIMIT, 1000000)
 
 
+class WebLocalNamingTests(unittest.TestCase):
+    """`is_named_here` -- the whole-body answer, asked of one web.
+
+    The slot is the wrong unit for this question and the file records it
+    failing in both directions: one answer for the body collapses a
+    short-circuit chain whose slot is promoted for an unrelated value two
+    thousand instructions away, and a fresh name per promotion splits a
+    variable the compiler wrote in one branch and read in another.
+    """
+
+    def _fd(self, named, webs, sc_defs=(), pos=0):
+        from decompile import FuncDecompiler
+
+        class _Ins:
+            def __init__(self, pos):
+                self.pos = pos
+
+        fd = object.__new__(FuncDecompiler)
+        fd.var_names = {off: "local_%d" % off for off in named}
+        fd._web_cache = {off: list(w) for off, w in webs.items()}
+        fd.sc_defs = set(sc_defs)
+        fd.instrs = [_Ins(p) for p in range(0, 400)]
+        fd._pos = lambda: pos
+        return fd
+
+    def test_an_unnamed_slot_is_unnamed_everywhere(self):
+        fd = self._fd(named=(), webs={})
+        self.assertFalse(fd.is_named_here(4))
+
+    def test_ONE_web_keeps_the_whole_body_answer(self):
+        """Nothing to split, so nothing moves -- which is what keeps every
+        slot that really is one variable exactly as it was."""
+        fd = self._fd(named=(4,), webs={4: []})
+        self.assertTrue(fd.is_named_here(4))
+
+    def test_a_web_with_TWO_definitions_is_a_variable(self):
+        """Two paths write it and a read sees both, which is what a declared
+        local looks like once the compiler has laid it out."""
+        fd = self._fd(named=(4,), webs={4: [frozenset({10, 20}),
+                                            frozenset({300})]}, pos=30)
+        self.assertTrue(fd.is_named_here(4))
+
+    def test_a_web_with_ONE_definition_is_a_temporary(self):
+        fd = self._fd(named=(4,), webs={4: [frozenset({10, 20}),
+                                            frozenset({300})]}, pos=320)
+        self.assertFalse(fd.is_named_here(4))
+
+    def test_the_governing_definition_is_the_LATEST_at_or_before_here(self):
+        """Which is how the simulation walks a body."""
+        webs = {4: [frozenset({10}), frozenset({100, 200})]}
+        self.assertFalse(self._fd(named=(4,), webs=webs, pos=50)
+                         .is_named_here(4))
+        self.assertTrue(self._fd(named=(4,), webs=webs, pos=150)
+                        .is_named_here(4))
+
+    def test_before_every_write_it_keeps_the_whole_body_answer(self):
+        """There is no definition to ask about, so guessing is worse than
+        answering what the body says."""
+        fd = self._fd(named=(4,), webs={4: [frozenset({10}),
+                                            frozenset({20})]}, pos=5)
+        self.assertTrue(fd.is_named_here(4))
+
+    def test_a_SHORT_CIRCUIT_destination_is_not_a_variable(self):
+        """It has two definitions as well -- the `SetV dest,0|1` and the
+        arm's store -- and must still fold, or the structurer loses the
+        condition. Field Wars' movement conditions and the `cs` server's
+        command dispatcher are what forcing it costs."""
+        fd = self._fd(named=(4,), webs={4: [frozenset({10, 20}),
+                                            frozenset({300})]},
+                      sc_defs=(10, 20), pos=30)
+        self.assertFalse(fd.is_named_here(4))
+
+    def test_a_real_variable_that_ALSO_takes_a_merge_is_still_a_variable(self):
+        """Psycho Strike's `find_likely_request` is `int local_1 = -1;` whose
+        slot is also a merge's destination. Excluding by slot folded its
+        arms away and remade the `|| true` defect from a new direction, so
+        only the merge's OWN definitions are excluded."""
+        fd = self._fd(named=(1,), webs={1: [frozenset({10, 20, 30}),
+                                            frozenset({300})]},
+                      sc_defs=(30,), pos=40)
+        self.assertTrue(fd.is_named_here(1))
+
+
+class ReferenceRegisterWriteTests(unittest.TestCase):
+    """A slot written THROUGH the reference register is written.
+
+    `a++` is `LDV 1 ; INCi`, so the increment names no slot and
+    `slot_writes` -- the record that is supposed to hold every write --
+    could not see it. `pre_and_post` returned 777 for 757 because of it,
+    and `bgt oracle` is what said so.
+    """
+
+    def _writes(self, names):
+        """Call the REAL walk, never a copy of it.
+
+        The first version of this test re-implemented the loop, which is the
+        trap this project records about building an inverse from the same
+        table: it would have agreed with a wrong table.
+        """
+        from decompile import _ref_register_writes
+
+        class _Ins:
+            def __init__(self, pos, name, arg):
+                self.pos, self.name, self.w_arg = pos, name, arg
+
+        return _ref_register_writes(
+            [_Ins(k, name, arg) for k, (name, arg) in enumerate(names)])
+
+    def test_an_increment_through_the_register_writes_the_loaded_slot(self):
+        self.assertEqual(self._writes([("LDV", 1), ("INCi", 0)]), {1: [1]})
+
+    def test_a_write_through_it_counts_too(self):
+        self.assertEqual(self._writes([("LDV", 7), ("WRTV4", 0)]), {7: [1]})
+
+    def test_the_run_ENDS_when_something_else_is_loaded(self):
+        """The register then holds a member, a global or a returned
+        reference, so a write after it is not a write to any slot this can
+        name."""
+        self.assertEqual(
+            self._writes([("LDV", 1), ("LoadThisR", 0), ("INCi", 0)]), {})
+        self.assertEqual(
+            self._writes([("LDV", 1), ("CALLSYS", 0), ("INCi", 0)]), {})
+
+    def test_a_second_LDV_redirects_it(self):
+        self.assertEqual(
+            self._writes([("LDV", 1), ("INCi", 0), ("LDV", 2), ("DECi", 0)]),
+            {1: [1], 2: [3]})
+
+    def test_pre_and_post_s_own_shape(self):
+        """`int a = 5; int b = a++; int c = ++a;` -- both increments act on
+        slot 1 through the register, and neither names it."""
+        self.assertEqual(
+            self._writes([("SetV4", 1), ("LDV", 1), ("RDR4", 2), ("INCi", 0),
+                          ("CpyVtoV4", 3), ("LDV", 1), ("INCi", 0),
+                          ("RDR4", 2), ("CpyVtoV4", 4)]),
+            {1: [3, 6]})
+
+
+class PromoteOnceTests(unittest.TestCase):
+    """Promoting one slot twice assigns it to itself.
+
+    `_promote_temp` ends by putting the slot's own name into `temps[off]`, so
+    a second promotion emits `local_4 = local_4;` at the FIRST one's bind
+    position -- which is how it was found: one `CpyVtoV4 4 3` emitting three
+    statements. 630 of them across eight titles, 459 on the `cs` server
+    alone.
+    """
+
+    def test_a_value_that_is_already_the_slot_s_name_emits_nothing(self):
+        from decompile import FuncDecompiler, Atom
+        fd = object.__new__(FuncDecompiler)
+        fd.temps = {4: Atom("var", "local_4", 1)}
+        fd.temp_bound = {4: (76, 3)}
+        fd.var_names = {4: "local_4"}
+        fd.events = []
+        back = fd._promote_temp(4)
+        self.assertEqual(fd.events, [])
+        self.assertEqual(back.text, "local_4")
+
+    def test_the_originals_own_self_assignment_is_NOT_this(self):
+        """Paladin's `arg0 = arg0;` is a real `string::opAssign` in the
+        bytecode, rendered at its own instruction through the call path --
+        so a value that is a CALL still promotes."""
+        from decompile import FuncDecompiler, Atom
+        fd = object.__new__(FuncDecompiler)
+        fd.temps = {4: Atom("call", "local_4")}
+        fd.temp_bound = {4: (76, 3)}
+        fd.var_names = {4: "local_4"}
+        fd.var_types = {}
+        fd.events = []
+        fd.forced_slots = set()
+        fd.consumed_temps = set()
+        fd.mixed_boolean_slots = set()
+        fd.stmt_count = 0
+        fd.stmt_texts = []
+        fd._promote_temp(4)
+        self.assertEqual(len(fd.events), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

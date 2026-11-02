@@ -88,6 +88,21 @@ CONV_OPS = {
 #: nothing is split -- the behaviour this file has everywhere today.
 WEB_ANALYSIS_LIMIT = 60000
 
+#: Opcodes that write through the REFERENCE register rather than naming a
+#: slot. `a++` is `LDV 1 ; INCi`, so the increment's operand mentions nothing
+#: -- which made it invisible to `slot_writes`, the record that is supposed to
+#: hold every write.
+_REF_WRITE_PREFIXES = ("INC", "DEC", "WRTV")
+
+#: ...and the opcodes that put something ELSE in that register, which is where
+#: a run of writes through it ends. `LDV` is the only one that loads a frame
+#: slot; the rest load a member, a global or a returned reference, so a write
+#: after one of them is not a write to any slot this can name.
+_REF_LOAD_OPS = frozenset({
+    "LDV", "LDG", "LoadThisR", "LoadRObjR", "LoadVObjR", "PopRPtr",
+    "LdGRdR4", "ChkRefS", "PshRPtr",
+})
+
 _SLOT_WRITE_OPS = (
     {"SetV1", "SetV2", "SetV4", "SetV8",
      "CpyVtoV4", "CpyVtoV8", "CpyRtoV4", "CpyRtoV8",
@@ -95,6 +110,48 @@ _SLOT_WRITE_OPS = (
      "NOT", "NEGi", "NEGf", "NEGd", "NEGi64", "IncVi", "DecVi"}
     | set(BINARY) | set(IMM_BINARY) | CONV_OPS
 )
+
+
+def _ref_register_writes(instrs: list[Instr]) -> dict[int, list[int]]:
+    """Slot -> the positions written THROUGH the reference register.
+
+    `a++` is `LDV 1 ; INCi`, so the increment's operands name nothing and the
+    write was invisible to `slot_writes` -- the record that is supposed to
+    hold every write. That is the third place in this file where a write
+    cannot be seen by the record built from operands, after a behaviour's
+    pushed address and `ALLOC`'s stacked destination.
+
+    `pre_and_post` is what found it, and `bgt oracle` is what reported it:
+
+        int a = 5;
+        int b = a++;        // b = 5, a = 6
+        int c = ++a;        // a = 7, c = 7
+        return a*100 + b*10 + c;                    // 757
+
+        SetV4 1 5 ; LDV 1 ; RDR4 2 ; INCi ; CpyVtoV4 3 2
+                  ; LDV 1 ; INCi ; RDR4 2 ; CpyVtoV4 4 2
+
+    Slot 2 is the compiler's scratch, so a value taken out of it folds -- and
+    the value is `local_1`, read after `INCi` has changed slot 1. Nothing
+    could see that, so the recovery returned 777.
+
+    A jump between the load and the write makes the write conditional, and it
+    is recorded anyway: the only consumer asks whether anything MAY have
+    changed the slot, so a write that might not happen is the safe direction
+    -- it promotes a value to a variable, which is verbose and correct.
+    """
+    out: dict[int, list[int]] = {}
+    held: int | None = None
+    for op in instrs:
+        if op.name == "LDV":
+            held = _s16(op.w_arg)
+        elif op.name in _REF_LOAD_OPS or op.name.startswith("CALL"):
+            #: the register now holds a member, a global or a returned
+            #: reference -- something this cannot name
+            held = None
+        elif held is not None and op.name.startswith(_REF_WRITE_PREFIXES):
+            out.setdefault(held, []).append(op.pos)
+    return out
 
 
 def _read_slots(instrs: list[Instr]) -> set[int]:
@@ -1344,6 +1401,16 @@ class FuncDecompiler:
         #: Such a slot was already constructed, so the source named it --
         #: see `_reused_object_slot`.
         self.assigned_slots: set[int] = set()
+        #: **A slot written through the reference register**, which no
+        #: operand names -- see `_ref_register_writes`. Recorded into
+        #: `slot_writes` rather than kept apart, because it is the same
+        #: question that record already answers: has this slot been written
+        #: since? The behaviour writes are separate for a reason that does
+        #: not apply here -- they are narrowed to NAMED slots, where this is
+        #: an ordinary write by an ordinary opcode that happens to address
+        #: its target indirectly.
+        self.slot_writes.update(_ref_register_writes(self.instrs))
+
         for index, op in enumerate(self.instrs):
             if op.name in _SLOT_WRITE_OPS:
                 self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
@@ -1407,6 +1474,11 @@ class FuncDecompiler:
             #: threshold.
             if callee in _ASSIGN_OPS:
                 self.assigned_slots.add(_s16(op.w_arg))
+        #: The reference-register pass above runs first, so a slot's writes
+        #: can arrive out of order. Every caller compares them against a
+        #: range, so sort rather than leave that to luck.
+        for writes in self.slot_writes.values():
+            writes.sort()
         #: (loop head, back edge) for every backward jump. A read inside the
         #: loop runs once per iteration, so a value computed before the loop
         #: cannot be folded into it -- the loop body may assign the slot, and
@@ -1496,6 +1568,12 @@ class FuncDecompiler:
         # its value through are excluded, and those are recognisable from the
         # bytecode alone -- a slot that holds an `&&` is never one of the
         # source's own locals.
+        #: `slot_webs` is a fixpoint per slot, so the answer is kept.
+        #: **Per slot**, not one answer for all of them: an earlier version
+        #: cached a single verdict built from whichever slots the simulation
+        #: happened to ask about first, so `cs`'s slot 57 came out unnamed
+        #: while a standalone probe of the same body said it was named.
+        self._web_cache: dict[int, list] = {}
         self.short_circuit_slots = self._short_circuit_slots()
         #: The OPERAND slots: what an arm writes, with the merge
         #: destinations taken out. The fold rules exempt these and not the
@@ -1694,7 +1772,86 @@ class FuncDecompiler:
         return f"tmp{off}" if off >= 0 else f"tmp_{-off}"
 
     def is_named(self, off: int) -> bool:
+        """Did the source name this slot ANYWHERE in the body?
+
+        The whole-body question, and the right one for two callers: whether a
+        behaviour write counts (`_stale_fold`) and what to declare. Everything
+        that runs at a position wants `is_named_here` instead.
+        """
         return off in self.var_names
+
+    def _webs_of(self, off: int) -> list:
+        if off not in self._web_cache:
+            self._web_cache[off] = self.slot_webs(off)
+        return self._web_cache[off]
+
+    def _web_is_a_variable(self, web) -> bool:
+        """Is this group of writes a variable the source declared?
+
+        **More than one definition reaching one read** is what a declared
+        local looks like once the compiler has laid it out: two paths write
+        it and a read sees both. A single definition is what a temporary
+        looks like.
+
+        A short-circuit's destination has two definitions as well -- the
+        `SetV dest,0|1` and the arm's store -- and must still fold or the
+        structurer loses the condition, so `sc_defs` is excluded. That is a
+        recorded fact about the merges this body contains and not another
+        guess at a shape.
+
+        A web holds instruction **positions**, which `slot_webs` converts to
+        before returning them; indexing `instrs` with one is out of range.
+        """
+        return len([pos for pos in web if pos not in self.sc_defs]) >= 2
+
+    def is_named_here(self, off: int) -> bool:
+        """Is the value in this slot AT THIS POSITION a named variable?
+
+        One slot can serve several source variables -- the compiler reuses an
+        offset for locals that are live at different times, and the module
+        records no declaration for a scalar at all. Answered for the whole
+        body, that single answer is wrong in both directions at once, and
+        this file has paid for each:
+
+        * **Named, once, for the body.** A chain like `a && b && c && d` is
+          four merges over three recycled slots, so two of them are a
+          destination twice -- and one unrelated promotion 2,000
+          instructions away names the slot for good. Every arm's
+          computation then becomes an unconditional statement and the later
+          merges overwrite the earlier terms: Field Wars' movement
+          conditions lost their timer, the `cs` server's command dispatcher
+          lost its `admin` check, and `/godmode` became `godmode = true`.
+        * **A fresh name per promotion.** `dynamic_menu`'s joystick edge
+          flag came apart into two names, the UP arm wrote one and only the
+          DOWN arm read it, so pressing up disarmed down.
+
+        Webs are what lets both be right: a definition's own group is asked,
+        and a group is only split from another when no read sees both.
+
+        Falls back to the whole-body answer wherever there is nothing to
+        split -- one web, a slot with a single write, or a body over
+        `WEB_ANALYSIS_LIMIT` -- so nothing moves for a slot that really is
+        one variable.
+        """
+        if not self.is_named(off):
+            return False
+        webs = self._webs_of(off)
+        if len(webs) < 2:
+            return True
+        here = self._pos()
+        #: the definition governing this position is the latest one at or
+        #: before it, which is how the simulation walks the body. A web holds
+        #: POSITIONS, so they compare directly.
+        best, best_pos = None, None
+        for web in webs:
+            for pos in web:
+                if pos <= here and (best_pos is None or pos > best_pos):
+                    best, best_pos = web, pos
+        if best is None:
+            #: before every write -- keep the whole-body answer rather than
+            #: guess, since there is no definition to ask about
+            return True
+        return self._web_is_a_variable(best)
 
     def var_atom(self, off: int) -> Atom:
         return Atom("var", self.name_of(off), 1, data_type=self.var_types.get(off))
@@ -1882,7 +2039,7 @@ class FuncDecompiler:
                 #: of another slot and the question belongs at that slot's
                 #: own read. `_value_origin` is where it is answered.
                 return
-        if self.is_named(off):
+        if self.is_named_here(off):
             self._emit_assign(off, a)
         else:
             self.consumed_temps.discard(off)
@@ -2315,7 +2472,7 @@ class FuncDecompiler:
                 value = Atom("call",
                              f"({merge['first'].text} {merge['op']} {operand.text})",
                              data_type=DataType(token_type=67))
-                if not self.is_named(off):
+                if not self.is_named_here(off):
                     # Only a temporary carries the merged value onward; a
                     # named variable keeps its own identity, and its later
                     # writes are statements that this alias would outlive.
@@ -2678,7 +2835,7 @@ class FuncDecompiler:
             off = _s16(ins.w_arg)
             self.obj_reg = self._slot_atom(off)
             self.consumed_temps.add(off)
-            if not self.is_named(off):
+            if not self.is_named_here(off):
                 self.consumed_temps.discard(off)
                 self.temps[off] = Atom("null", "null", 2)
             return
@@ -2711,7 +2868,7 @@ class FuncDecompiler:
             self.consumed_temps.discard(off)
             # FREE also zeroes the frame slot. The compiler uses this to pass
             # null handles even when no ClrVPtr instruction is present.
-            if not self.is_named(off):
+            if not self.is_named_here(off):
                 self.consumed_temps.discard(off)
                 self.temps[off] = Atom("null", "null", 2)
             return                       # end of a temp lifetime: no source
@@ -3522,6 +3679,22 @@ class FuncDecompiler:
         value = self.temps[off]
         pos, _ = self.temp_bound[off]
         name = self.var_names.setdefault(off, f"local_{off}")
+        #: **Already promoted.** This method ends by putting the slot's own
+        #: name into `temps[off]`, so a second promotion of the same offset
+        #: would emit `local_4 = local_4;` -- at the first one's bind
+        #: position, which is how it was found: one `CpyVtoV4 4 3` emitting
+        #: three statements. The value is here and the name is its name, so
+        #: there is nothing left to assign.
+        #:
+        #: It takes two reads in different parts of the body to reach, which
+        #: is why it only shows once `is_named_here` can answer differently
+        #: at two positions of one slot.
+        #:
+        #: The original's own `arg0 = arg0;` is NOT this and is still
+        #: emitted: that one is a real `string::opAssign` in the bytecode,
+        #: rendered at its own instruction through the call path.
+        if value.kind == "var" and value.text == name:
+            return value
         # **The slot's own type wins; the value's is only the fallback.**
         # Overriding with the value's type was tried and is badly wrong: a
         # scratch slot that carries a bool here and an int there then gets
@@ -4295,7 +4468,7 @@ class FuncDecompiler:
                 wrong_type = (dt.token_type == 60 and dt.is_reference
                               and declared is not None
                               and _bare_type(output_type) != _bare_type(declared))
-                if not self.is_named(off) or wrong_type:
+                if not self.is_named_here(off) or wrong_type:
                     value = self.temps.get(off)
                     local = f"__nvgt_out_{off}_{ins.pos}"
                     output_type = copy.copy(output_type)
@@ -4355,7 +4528,8 @@ class FuncDecompiler:
         base = fr.name if fr is not None else sig.split("(", 1)[0]
         cls, meth = (base.split("::", 1) + [""])[:2] if "::" in base else ("", base)
         if (has_this and pop_this is not None and pop_this.offset is not None
-                and pop_this.offset > 0 and not self.is_named(pop_this.offset)
+                and pop_this.offset > 0
+                and not self.is_named_here(pop_this.offset)
                 and pop_this.offset in self.temps and pop_this.offset in self.var_types
                 and not self.var_types[pop_this.offset].is_object_handle
                 and not fr.flags_byte & 1 and not meth.startswith("$")
@@ -4468,7 +4642,7 @@ class FuncDecompiler:
                 return
             if dst is not None and dst.is_ptr and dst.offset is not None:
                 if not args:
-                    if self.is_named(dst.offset):
+                    if self.is_named_here(dst.offset):
                         self._emit_declare(dst.offset)   # `string s;`
                     else:
                         self.consumed_temps.discard(dst.offset)
@@ -4476,7 +4650,7 @@ class FuncDecompiler:
                     return
                 src = self._deref(args[0]) if copy_ctor else Atom(
                     "call", f"{typename}({', '.join(a.text for a in args)})")
-                if self.is_named(dst.offset) and not self._reused_object_slot(
+                if self.is_named_here(dst.offset) and not self._reused_object_slot(
                         dst.offset, src):
                     self._emit_assign(dst.offset, src)
                 else:
@@ -4528,7 +4702,7 @@ class FuncDecompiler:
             # no later sweep can see it.
             if meth in DTORS and pop_this is not None:
                 off = pop_this.offset
-                if off is not None and not self.is_named(off):
+                if off is not None and not self.is_named_here(off):
                     held = self.temps.get(off)
                     if held is not None and held.kind == "call":
                         self._discarded_call(off)
@@ -4749,7 +4923,7 @@ class FuncDecompiler:
             # whatever x was -- a literal is repeatable where a constructor
             # call is not, and that is the whole test.
             as_is = next((a for a in args if a.text == txt), None)
-            if self.is_named(dest.offset) and not self._reused_object_slot(
+            if self.is_named_here(dest.offset) and not self._reused_object_slot(
                     dest.offset, as_is or Atom("call", txt)):
                 self._emit_assign(dest.offset, Atom("call", txt))
             else:
@@ -5598,6 +5772,13 @@ class FuncDecompiler:
         slots: set[int] = set()
         #: filled as we go, so one call to this method answers both
         self.merge_dests: set[int] = set()
+        #: **Every instruction position that defines a merge's destination**,
+        #: which `_web_is_a_variable` has to exclude. A web is a variable
+        #: when more than one definition reaches one read -- and a
+        #: short-circuit destination has exactly two, the `SetV dest,0|1`
+        #: and the arm's store, so it would qualify and stop folding. The
+        #: structurer then loses every condition built that way.
+        self.sc_defs: set[int] = set()
         for k, ins in enumerate(self.instrs):
             if ins.name not in JUMP_OPS or k + 2 >= len(self.instrs):
                 continue
@@ -5618,6 +5799,7 @@ class FuncDecompiler:
             if not (loads_dest or stores_dest):
                 continue
             slots.add(dest)
+            self.sc_defs.add(setv.pos)
             #: **A destination may be a source variable the compiler
             #: REUSED**, since the merge's result is that variable's value.
             #: An arm-only slot cannot be: it holds a piece of the
@@ -5634,6 +5816,10 @@ class FuncDecompiler:
                     off = _s16(op.w_arg)
                     if off > 0:
                         slots.add(off)
+                    if off == dest:
+                        #: the arm's own store into the destination -- the
+                        #: merge's second definition
+                        self.sc_defs.add(op.pos)
                 elif op.name == "PSF":
                     # **An object slot is written by a behaviour, not by an
                     # opcode that names it.** A string is filled by pushing
@@ -5907,7 +6093,7 @@ class FuncDecompiler:
                       or load.name in CONV_OPS)
         if recognized:
             off = _s16(load.w_arg2 if load.name in CONV_OPS and load.bc_type != "asBCTYPE_rW_ARG" else load.w_arg)
-            if self.is_named(off):
+            if self.is_named_here(off):
                 return False
         elif load.name in BINARY or load.name in IMM_BINARY or load.name in (
                 "CMPi", "CMPi64", "CMPu", "CMPu64", "CMPf", "CMPd"):
@@ -5965,7 +6151,7 @@ class FuncDecompiler:
             if len(common) != 1:
                 return False
             off = common.pop()
-            if self.is_named(off):
+            if self.is_named_here(off):
                 return False
         condition = _negate_cond(self._taken_condition(ins))
         self.temps.update(no.temps)
