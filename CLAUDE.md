@@ -8478,20 +8478,55 @@ Baseline: Crazy Party 85, Field Wars and The Gate 10, Manamon 1 8, cs
 client 6, cs server 4, Egg Hunt 3, rage room 1, BTH and constant velocity
 0.
 
-#### Four attempts, and what each one broke
+#### Six attempts, and the cause the sixth one finally named
 
-Every one of these fixed Field Wars' nine and the server's nine. Every
-one was rejected, and the pattern is worth more than any of them: **a
-slot is reused for unrelated values in one body, so no exemption keyed on
-the slot NUMBER can be safe, and the two position-keyed attempts never
-fired at all.**
+Every one of these was measured and every one rejected.
 
 | attempt | Field Wars | what it broke |
 |---|---|---|
 | 1. `_stale_fold` exempts `merge_operands \| merge_chain_links`, a chain link being any destination some merge tests | 9 -> 0 | the server's nested ternary: `" (AFK)"` and `" (active)"` gone, `get_player_index_from` 32 -> 30 |
 | 2. ...with chain links derived by ADJACENCY -- a link's own merge-label load is the next merge's test | 9 -> 0 | the same ternary; adjacency alone does not undo it |
-| 3. ...and `_stale_fold` narrowed to the chain links only | 9 -> 0 | the ternary comes back, and `/godmode` breaks: see below |
-| 4. ...keyed on the bind position, then on the read position | **9 -> 9** | nothing, because neither position ever matches and the fix is simply undone |
+| 3. ...and `_stale_fold` narrowed to the chain links only | 9 -> 0 | the ternary comes back and `/godmode` breaks -- see below |
+| 4. ...keyed on the bind position, then on the read position | **9 -> 9** | nothing, because the promoting read is somewhere else entirely and the fix is simply undone |
+| 5. `_stale_fold` exempts the whole short-circuit set, mirroring `_diamond_bind`, minus the ternaries `_begin_bool_merge`'s own test finds | 9 -> 0 | `/godmode` again: that test finds **none** of this body's ternaries, because theirs is a shape it never looks at |
+| 6. ...with ternary destinations found by the FALL-THROUGH arm's shape instead | **9 -> 11** | `/godmode` is right at last, and the detection over-reaches -- 14 of netloop's 23 short-circuit slots -- so the chains collapse again and Field Wars gets worse |
+
+**The cause is structural, and attempt 4 is what proves it.** Promoting a
+slot gives it a NAME, and a name belongs to the slot for the whole body,
+while staleness is a property of one VALUE. Field Wars' `game` is 5,733
+instructions, and slots 14, 22 and 24 are each promoted by exactly one
+read -- 7485, 7860 and 3876, which are `inac` and `me.x` and one more,
+every one of them a global read going stale through a call, every one of
+them correct. Each promotion then collapses every chain in the function
+that shares the slot, 2,000 instructions away. No exemption keyed on a
+position can help, because by the time the chain is reached the slot is
+already named; only refusing to promote the slot at all does, which is
+what attempts 1, 2, 3 and 5 do.
+
+**And a ternary needs exactly the same thing for the opposite reason.**
+`_begin_value_merge` rejects a named destination just as
+`_begin_bool_merge` does, so a ternary also needs its slot foldable --
+and its two arms are the only thing carrying its two values, where a
+short-circuit that loses the fold merely reads a name instead of an
+expression. `cs`'s `netloop` uses slot 57 for both: a real short-circuit
+destination in one place and
+
+```
+players[index].godmode = (players[index].godmode == true ? false : true);
+```
+
+in another. One slot, one name, two incompatible requirements.
+
+**So the fix is not a fold rule.** It is to give a merged value its own
+identity instead of borrowing the slot's -- `_begin_bool_merge` already
+records the whole `(A op B)`, and what it reads for `A` is the slot's
+current atom rather than the atom the arm stored. Recording that atom per
+merge and reading it back there would make the chain independent of
+whether the slot ever gets a name. The one thing to get right is the
+assignment the promotion emits: a chain link has exactly one consumer,
+its own merge -- that is the adjacency property above -- so once the
+merge uses the recorded atom the assignment is dead and has to go, or the
+expression runs twice and a duplication is traded for a collapse.
 
 **Attempt 3 is the one that nearly shipped, and `/godmode` is why it did
 not.** The author wrote a toggle whose arms are the constants `false` and
@@ -8518,18 +8553,14 @@ both arms gone, in a shape the sweep could not see an hour earlier.
 
 #### What the next attempt should know
 
-- **The slot is the wrong key and the position is the right one**, but
-  neither position tried is where the decision is made. `temp_bound[off]`
-  is the bind and `_pos()` is the read, and in Field Wars' flight chain
-  `_stale_fold` is asked about slot 22 at read 2162 with the chain's own
-  merge loads at 2047 and 2060 -- so the value that collapses is bound and
-  read somewhere neither of those describes.
-- **The attribution probe disagrees with the behaviour**, and the
-  behaviour is the authority. Wrapping the three candidate rules named
-  `_stale_fold`, and a second probe over the same body shows it returning
-  False at every one of its 630 calls on those slots while the output is
-  still collapsed. One of the two probes is wrong and which is not
-  established; the line counts and the sweep are not in doubt.
+- **Neither the slot nor the position is the key; the VALUE is**, and the
+  decompiler has no handle on one. See the paragraph above: three correct
+  stale reads, each in a different part of the function, name three slots
+  and collapse nine conditions between them.
+- **`_stale_fold` is the promoter and the probe can say so**, as long as
+  it is asked for the calls that return True rather than for a window:
+  630 calls on those three slots in `game`, of which exactly three
+  promote, at 7485, 7860 and 3876.
 - **`is_named` after a walk says nothing.** Names accumulate during
   simulation, so every promoted slot is named by the end. Asked that way
   it answers True for all three slots, which reads as "they were declared
