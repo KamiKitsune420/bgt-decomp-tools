@@ -156,18 +156,82 @@ installers without running anything:
 
 | title | engine built | names | generator | module | overlay |
 |---|---|---|---|---|---|
+| Palace Punch-up | **2010-07-07** | 177 | add, **MD5 key** | 55,859 B, uncompressed | no pack field, no edition |
 | Ljudfarmen | 2011-02-18 | 283 | **add** | 61,591 B, uncompressed | no pack field |
 | Grodan Gun | 2011-09-19 | 295 | **add** | 63,364 B, uncompressed | no pack field |
+| Perilous Hearts | 2011-11-25 | 309 | multiply | 299,967 B, LZ77 | `"0 "` |
 | Antony | 2012-02-05 | 312 | multiply | 56,179 B, LZ77 | `"0 "` |
 
-All three open through `bgtlib.unpack` with the stock seed 0x11, and the
-module's declared length is its real length in every case. **All three are
-DEBUG builds** (`noDebugInfo = 0`), which is a separate windfall — see **A
-debug build keeps the names**.
+All five open through `bgtlib.unpack` with the stock seed 0x11, and the
+module's declared length is its real length in every case. **Four of the five
+are DEBUG builds** (`noDebugInfo = 0`) — all but Palace Punch-up — which is a
+separate windfall; see **A debug build keeps the names**.
 
-**A third generation is reported to exist** — the betas — which this does not
-cover. `keygen` refuses an unknown variant name rather than falling back, so
-adding a third is one entry and cannot silently mis-open anything.
+**Perilous Hearts narrows the break to nine weeks.** It multiplies, compresses
+and writes a pack field on **2011-11-25**, where Grodan Gun does none of those
+on **2011-09-19**. So those three changes, and the namespace in a type
+declaration, happened between 19 September and 25 November 2011 — not the
+five-month window this file first wrote down.
+
+### The betas are real, and the DIGEST is what they changed
+
+Issue #6 reports "two earlier encryption methods" and names the betas. **One
+of them is on this machine now.** Palace Punch-up's runtime is dated
+**2010-07-07** — five months before 1.0 — registers 177 names against 1.0's
+240, and is built on AngelScript **2.19**. It opens, and three things about it
+differ from everything else here:
+
+| | the beta | 1.0 and after |
+|---|---|---|
+| key material | `add 3`, same clamps, same 32 rounds | identical in 1.0 |
+| **AES key** | **MD5 of the material, doubled** | SHA-256 of it |
+| container header | `<32 hex> printf<len>\0` | `<32 hex>=<edition> printf<len>\0` |
+| module | stored as it stands | LZ77 from 2011-11 |
+
+So the generator did not change at the 1.0 release — the **derivation** did,
+and the edition field did not exist yet. `bgtlib.KEY_DERIVATIONS` is the new
+axis, searched after the verified one, and `Unpacked.key_derivation` says
+which opened a game.
+
+**How it was found is the part worth keeping.** The generator was read out of
+the game's own runtime first, by the same scan that found 1.0's and 1.3's — a
+window holding both clamp constants near a `0x7f` test, exactly one candidate
+in the file — and it came back **byte for byte identical to BGT 1.0's**:
+
+```
+6a 21                 push 0x21          33-byte buffer
+8b 4c 24 04           mov ecx,[esp+4]    the seed
+83 c1 03              add ecx, 3         <- the 2010 arithmetic
+83 f9 7f / 7e 07      cmp ecx,0x7f / jle
+b9 05 00 00 00        mov ecx, 5
+85 c9 / 75 05         test / jnz
+b9 0d 00 00 00        mov ecx, 0xd
+88 0c 02 / 42         mov [edx+eax],cl / inc edx
+83 fa 20 / 7c df      cmp edx,0x20 / jl  32 rounds
+c6 40 20 00           mov byte [eax+0x20],0
+```
+
+That ruled out the generator and left the key, so the search was over what a
+key could be rather than over what the arithmetic could be: the seed, eight
+plausible derivations, and three cipher modes, judged by the plaintext. It
+answered at `md5 doubled`, and the plaintext is its own proof — `printf55859`
+against a payload of exactly 55,859 bytes.
+
+**The hex-text derivation was in that list on purpose.** Issue #5 claims the
+key is built from the key material's hex *text*, which is refuted for every
+title this toolkit opens, and a build this old is where such a claim could
+plausibly have come from. It is not that either; the beta hashes the bytes,
+with a different digest.
+
+**A beta's header needs its space exactly at offset 32**, which is what keeps
+the wider search honest: `parse_container` accepts the missing `=` only in
+that one position, and `find_seed` requires `printf` straight after it rather
+than treating a space as a separator wherever one falls.
+
+**The second earlier method is still unaccounted for**, and so is the beta's
+module: it parses no further than the 2011 ones (see **The 2011 module is a
+third reader generation**), and it is a *release* build, so it carries no
+names to compensate.
 
 ### The 32 hex characters are a LICENCE MARK, not a checksum
 
@@ -302,15 +366,28 @@ what `unpack` opens, and `tests/test_installer.py` pins that case.
 | `antony_installer.exe` | 5.3.10 | one BGT game, 1,000,958 B, multiply |
 | `grodan_gun_installer.exe` | 5.3.10 | one BGT game, 1,703,372 B, **add** |
 | `ljudfarmen_installer.exe` | 5.3.10 | one BGT game, 1,450,716 B, **add** |
+| `perilous hearts concept demo.exe` | 5.3.10 | one BGT game, 1,146,412 B, multiply |
+| `palace punch-up setup.exe` | 5.3.3 | one BGT game, 1,068,652 B, **a beta** |
 | `q9_Swedish_installer.exe` | 5.3.3 | **nothing, and that is right** |
+| `kringle crash setup.exe` | 5.3.3 | nothing -- native code, 2009-12-20 |
+| `jungle_english_installer.exe` | 5.5.0 | nothing -- not BGT at all, 2016 |
+
+**Five games out of eight installers, and the three refusals are each
+correct.**
 
 Q9 is the refusal worth reading. Its payload decompresses to 12.2 MB holding
 `Software\BlastbayStudios\Q9ActionGame\1.0`, *"Unable to find the sound archive
 (sounds.dat)"* and **235 `SFPv` headers** — so it uses BGT's own pack format —
 and not one `xproc10`. It is native code by the same author, not a BGT script
 game, which is why issue #6 naming Q9 as a title that would settle the 2010
-case could never have worked. Kringle Crash, the other title named there, is
-from the same pre-BGT run of games.
+case could never have worked.
+
+**And Kringle Crash, the other title named there, is the same.** Its payload
+holds 142 `SFPv` headers, `sounds.dat` and `BlastbayStudios`, registers
+nothing, carries no `xproc10`, and its executable is dated **2009-12-20** --
+a year before BGT 1.0. So *neither* of the two titles that issue named could
+ever have settled the case, and what did settle it was two Swedish games
+nobody had mentioned.
 
 ## UPX-packed runtimes
 
@@ -3201,9 +3278,11 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 
 | engine | registered names | types | built |
 |---|---|---|---|
+| Palace Punch-up (a BGT **beta**) | 177 | 18 | 2010-07-07 21:26 |
 | BGT 1.0 | 240 | 21 | 2010-12-30 03:16 |
 | Ljudfarmen | 283 | 25 | 2011-02-18 18:26 |
 | Grodan Gun | 295 | 26 | 2011-09-19 11:10 |
+| Perilous Hearts | 309 | 28 | 2011-11-25 15:33 |
 | Antony | 312 | 27 | 2012-02-05 15:23 |
 | Screaming Strike | 394 | -- | 2012-07-24 |
 | a 2013 BGT, from a pack tool | 427 | -- | 2013-04-24 |
@@ -3230,8 +3309,11 @@ was taken before those refusals existed. Re-derived, not reinterpreted.)
 The three Swedish titles are stock BGT of three versions nobody here had a
 sample of, and they turn a two-point line into a seven-point one. **Every
 count rises monotonically with the build date**, which is what says these are
-successive versions of one engine rather than forks: 240, 283, 295, 312, 394,
-427, 432.
+successive versions of one engine rather than forks: 177, 240, 283, 295, 309,
+312, 394, 427, 432 -- nine points from a BGT beta to 1.3.
+
+(The *type* counts are not monotone: Perilous Hearts registers 28 and Antony,
+ten weeks later, 27. Names are the figure to date a build by.)
 
 The last two came free, from asking the question of every BGT executable on
 this machine rather than of the titles in this document: a stub carries its
@@ -12785,7 +12867,8 @@ different kinds.
 | #3 an empty LEN2 string must occupy a `savedStrings` index | **refuted by measurement** -- see below |
 | #2 the dialects were named after a game's author | **true, and worse than reported** -- see below |
 | #6 BGT 1.0 does not compress | **confirmed**: Grodan Gun's payload is 63,364 bytes against a container declaring 63,364 |
-| #6 two earlier encryption methods exist | **one was the early overlay's missing pack field**, which is not encryption and is fixed. A LZ77 decode that looked like a second was Inno's call-instruction filter, not an engine at all |
+| #6 two earlier encryption methods exist | **one is real and is open**: a BGT beta takes MD5 of the key material rather than SHA-256, and writes no edition field. Found on Palace Punch-up, whose runtime predates 1.0 by five months |
+| #5 the overlay key is built from the hex TEXT | **not that either**, and it was tested rather than argued: the beta's derivation search had the hex-text forms in it, and the answer was MD5 of the bytes |
 | #7 two NVGT games detected as neither engine | **not checked.** Neither file is here; the cause is assumed |
 | #5 the overlay key is the hex-ASCII text | **already answered in the code it is about**, and not dismissed -- see below |
 | #1, #4 a third serialization dialect | **not checkable.** Nobody here has the module |

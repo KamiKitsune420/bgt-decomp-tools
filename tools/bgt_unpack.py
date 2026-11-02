@@ -95,24 +95,33 @@ def report(path, outdir=None, seed=None):
     if u.embedded_pack:
         print("  embedded pack       %d bytes" % len(u.embedded_pack))
     print("  key seed            0x%02X%s" % (u.seed, "  (stock)" if u.seed == 0x11 else "  <-- NON-STOCK"))
+    uncompressed = (u.key_variant == bgtlib.ADD
+                    or u.key_derivation == bgtlib.MD5X2)
     print("  key generator       %s%s"
           % (u.key_variant,
-             "  (the 2010 engine: module stored uncompressed)"
+             "  (a 2010 or 2011 engine: module stored uncompressed)"
              if u.key_variant == bgtlib.ADD else ""))
+    if u.key_derivation != bgtlib.SHA256:
+        print("  key derivation      %s  (a BGT beta, older than 1.0)"
+              % u.key_derivation)
     print("  aes key             %s" % u.aes_key.hex())
-    print("  container           %s=%d" % (u.container_magic, u.container_flag))
+    print("  container           %s%s"
+          % (u.container_magic,
+             "=%d" % u.container_flag if u.container_flag is not None
+             else "   (no edition field -- a beta)"))
     # The 32 hex characters are a licence mark rather than a checksum, and the
     # flag beside them is which edition of BGT built the game.
-    print("  edition             %d  (%s)"
-          % (u.container_flag,
-             bgtlib.EDITIONS.get(u.container_flag, "not a known edition")))
+    if u.container_flag is not None:
+        print("  edition             %d  (%s)"
+              % (u.container_flag,
+                 bgtlib.EDITIONS.get(u.container_flag, "not a known edition")))
     mark = bgtlib.licence_mark(u.container_magic)
     if mark is not None:
         print("  licence             %s   via the %s key"
               % ("*  (names no game -- every unlimited build carries this "
                  "same mark)" if mark.code == "*" else repr(mark.code),
                  mark.key))
-    if u.key_variant == bgtlib.ADD:
+    if uncompressed:
         print("  stored             %d bytes, uncompressed" % len(u.compressed))
     else:
         print("  compressed          %d bytes" % len(u.compressed))

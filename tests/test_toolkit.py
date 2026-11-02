@@ -1239,6 +1239,67 @@ def test_a_pack_field_is_still_read_where_one_is_written():
     assert len(readings[0][2]) + 2 == len(readings[1][2])
 
 
+def _beta_overlay(module, stub_len=512):
+    """A BGT BETA's overlay: an MD5-doubled key and no edition field.
+
+    Palace Punch-up is one -- a runtime dated 2010-07-07, five months before
+    1.0, registering 177 names against 1.0's 240, on AngelScript 2.19. Its key
+    GENERATOR is byte-identical to 1.0's, so only the digest and the header's
+    shape differ: 32 hex characters and a space where every later build writes
+    `=<edition>`, and the module stored as it stands.
+    """
+    import hashlib
+    from Crypto.Cipher import AES
+
+    stub = bytes(range(256)) * (stub_len // 256)
+    head = b"271C66AA8E540FEE7B828E7D004907FD printf%d\x00" % len(module)
+    plain = head + module
+    plain += b"\x00" * (-len(plain) % 16)
+    key = hashlib.md5(bytes(bgtlib.keygen(0x11, bgtlib.ADD))).digest() * 2
+    ct = AES.new(key, AES.MODE_CBC, key[:16]).encrypt(plain)
+    return stub + ct + b"xproc10" + NUL + struct.pack("<I", len(stub))
+
+
+def test_a_beta_overlay_opens_and_says_which_digest_opened_it():
+    module = b"\x01na beta module, stored as it stands " * 40
+    info = bgtlib.unpack(_beta_overlay(module))
+    assert info.key_variant == bgtlib.ADD
+    assert info.key_derivation == bgtlib.MD5X2
+    assert info.container_flag is None          # no edition field at all
+    assert info.bytecode == module
+
+
+def test_the_beta_search_does_not_re_describe_a_later_overlay():
+    """The verified digest is tried first, so every title this library already
+    opens keeps the answer it had."""
+    module = b"\x01\x02module payload " * 300
+    for variant in (bgtlib.MULTIPLY, bgtlib.ADD):
+        info = bgtlib.unpack(_synthetic_exe(module, variant=variant))
+        assert info.key_derivation == bgtlib.SHA256, variant
+        assert info.bytecode == module
+
+
+def test_an_unknown_key_derivation_is_refused_rather_than_guessed():
+    try:
+        bgtlib.aes_key_for_seed(0x11, bgtlib.ADD, "sha512")
+    except bgtlib.BgtError as exc:
+        assert "derivation" in str(exc), exc
+        return
+    raise AssertionError("an unknown key derivation was accepted")
+
+
+def test_a_header_with_no_edition_needs_its_space_exactly_at_32():
+    """The beta shape is only accepted where a beta would write it. A
+    plaintext with neither an `=` nor a space at 32 is not a container, and
+    saying so is what keeps the wider search from accepting noise."""
+    try:
+        bgtlib.parse_container(b"x" * 40 + b" printf10\x00" + b"y" * 10)
+    except bgtlib.BgtError as exc:
+        assert "beta" in str(exc), exc
+        return
+    raise AssertionError("a plaintext with no separator was accepted")
+
+
 def test_a_2010_overlay_whose_payload_is_not_a_module_is_refused():
     """`noDebugInfo` is the module's first byte, so it is 0 or 1 and nothing
     else. If a 2010 build turns out to compress after all, this is what says

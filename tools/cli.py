@@ -135,13 +135,24 @@ def cmd_info(args: argparse.Namespace) -> int:
     # declares its own blob length, so parse_container -- which is the verified
     # one -- needs the whole ciphertext to check that declaration.
     try:
-        offset, embedded, ciphertext = bgtlib.split_overlay(data)
-        seed, key, variant = bgtlib.find_seed(ciphertext)
-        plaintext = bgtlib.decrypt(ciphertext, key)
-        flag, blob = bgtlib.parse_container(plaintext)
-        # A 2010 build stores the module uncompressed, so there is no trailing
-        # length to split off and the container's own figure is the answer.
-        declared = (len(blob) if variant == bgtlib.ADD
+        # Every reading of the overlay, because the early engines write no
+        # pack-size field -- and the container header is what decides.
+        last: Exception = bgtlib.BgtError("no overlay")
+        for offset, embedded, ciphertext in bgtlib.overlay_candidates(data):
+            try:
+                seed, key, variant, derivation = bgtlib.find_seed(ciphertext)
+                plaintext = bgtlib.decrypt(ciphertext, key)
+                flag, blob = bgtlib.parse_container(plaintext)
+                break
+            except bgtlib.BgtError as exc:
+                last = exc
+        else:
+            raise last
+        # An early build stores the module uncompressed, so there is no
+        # trailing length to split off and the container's own figure is the
+        # answer.
+        declared = (len(blob)
+                    if variant == bgtlib.ADD or derivation == bgtlib.MD5X2
                     else bgtlib.lz77_split(blob)[1])
     except bgtlib.BgtError as exc:
         hint = engine.redirect_hint(args.exe, engine.BGT)

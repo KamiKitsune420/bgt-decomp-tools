@@ -179,6 +179,21 @@ ADD = "add"
 #: The verified variant first, so a tie keeps the reading this library held.
 KEY_VARIANTS = (MULTIPLY, ADD)
 
+#: How a build turns its key material into an AES-256 key. Every title this
+#: toolkit opened before took SHA-256 of the material; **a BGT BETA takes MD5
+#: and repeats it** to reach 32 bytes. Palace Punch-up is one -- a runtime
+#: dated 2010-07-07, five months before 1.0, registering 177 names against
+#: 1.0's 240, and built on AngelScript 2.19 -- and its key GENERATOR is
+#: byte-identical to 1.0's, so the material is the same function of the seed
+#: and only the digest differs.
+#:
+#: This is one of the "two earlier encryption methods" issue #6 reports, found
+#: by crossing the seed, the derivation and the cipher mode and letting the
+#: container header say which combination was right.
+SHA256 = "sha256"
+MD5X2 = "md5x2"
+KEY_DERIVATIONS = (SHA256, MD5X2)
+
 
 def keygen(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
     """Reproduce FUN_00441D90 -- the key material, generated rather than stored.
@@ -204,7 +219,8 @@ def keygen(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
     return bytes(out)
 
 
-def aes_key_for_seed(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
+def aes_key_for_seed(seed: int = 0x11, variant: str = MULTIPLY,
+                     derivation: str = SHA256) -> bytes:
     """AES-256 key = SHA256(key material). IV is the first 16 bytes of the same digest.
 
     BGT uses the AES reference API (rijndael-api-fst.c), which takes key material as
@@ -216,7 +232,12 @@ def aes_key_for_seed(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
     of this digest. Hashing the hex text instead would be that conversion
     applied twice, and would open nothing.
     """
-    return hashlib.sha256(keygen(seed, variant)).digest()
+    material = keygen(seed, variant)
+    if derivation == SHA256:
+        return hashlib.sha256(material).digest()
+    if derivation == MD5X2:
+        return hashlib.md5(material).digest() * 2
+    raise BgtError("unknown key derivation %r" % derivation)
 
 
 def decrypt(ciphertext: bytes, key: bytes) -> bytes:
@@ -228,17 +249,25 @@ def decrypt(ciphertext: bytes, key: bytes) -> bytes:
 # layer 3 -- the BGT container header
 # --------------------------------------------------------------------------
 
-def parse_container(plaintext: bytes) -> Tuple[int, bytes]:
+def parse_container(plaintext: bytes) -> Tuple[Optional[int], bytes]:
     """Parse "<32 hex>=<flag> printf<length>\\0" and return (flag, blob).
 
     The header is fixed-shape but not fixed-length: the declared length is decimal,
     so a bigger module means a longer header. Psycho Strike's is 48 bytes,
     Manamon 2's is 49. Compute it, never hardcode it.
     """
+    # **A BETA writes no edition field at all**: its header is 32 hex
+    # characters, a space and then `printf<len>`, where every later build
+    # writes `=<edition> printf<len>`. So the `=` is looked for and its
+    # absence is a shape rather than an error, and the flag comes back None.
     eq = plaintext.find(b"=", 0, 48)
     if eq < 0:
-        raise BgtError("no '=' in container header")
-    sp = plaintext.find(b" ", eq, 64)
+        sp = plaintext.find(b" ", 0, 48)
+        if sp != 32:
+            raise BgtError("no '=' in container header, and no space at 32 "
+                           "where a beta would put one")
+    else:
+        sp = plaintext.find(b" ", eq, 64)
     if sp < 0:
         raise BgtError("no ' ' after the container flag")
     if plaintext[sp + 1:sp + 7] != b"printf":
@@ -251,7 +280,7 @@ def parse_container(plaintext: bytes) -> Tuple[int, bytes]:
     except ValueError:
         raise BgtError("bad declared length %r" % plaintext[sp + 7:nul])
 
-    flag = int(plaintext[eq + 1:sp])
+    flag = int(plaintext[eq + 1:sp]) if eq >= 0 else None
     header_len = nul + 1
     blob = plaintext[header_len:header_len + declared]
     if len(blob) != declared:
@@ -345,11 +374,16 @@ class KeyChoice(NamedTuple):
     seed: int
     key: bytes
     variant: str
+    #: Which digest turned the key material into the key -- `SHA256` for every
+    #: build from 1.0 onward, `MD5X2` for a beta. It decides the payload's
+    #: shape as much as the variant does, so it travels with them.
+    derivation: str = SHA256
 
 
 def find_seed(ciphertext: bytes,
               candidates: Optional[Sequence[int]] = None,
-              variants: Sequence[str] = KEY_VARIANTS) -> KeyChoice:
+              variants: Sequence[str] = KEY_VARIANTS,
+              derivations: Sequence[str] = KEY_DERIVATIONS) -> KeyChoice:
     """Recover the key by trial decryption of the first block.
 
     Only the first 32 bytes matter -- the container header starts with 32 hex
@@ -364,16 +398,24 @@ def find_seed(ciphertext: bytes,
     if candidates is None:
         candidates = [0x11] + [s for s in range(1, 256) if s != 0x11]
     probe = ciphertext[:64]
-    for variant in variants:
-        for seed in candidates:
-            key = aes_key_for_seed(seed, variant)
-            head = decrypt(probe, key)
-            if (all(c in b"0123456789ABCDEFabcdef" for c in head[:32])
-                    and b"=" in head[32:40]):
-                return KeyChoice(seed, key, variant)
+    for derivation in derivations:
+        for variant in variants:
+            for seed in candidates:
+                key = aes_key_for_seed(seed, variant, derivation)
+                head = decrypt(probe, key)
+                if not all(c in b"0123456789ABCDEFabcdef" for c in head[:32]):
+                    continue
+                # Every build from 1.0 on writes `=<edition>` here; a beta
+                # writes a space straight after the 32 characters, and
+                # `printf` is what separates that from a coincidence.
+                if b"=" in head[32:40]:
+                    return KeyChoice(seed, key, variant, derivation)
+                if head[32:33] == b" " and head[33:39] == b"printf":
+                    return KeyChoice(seed, key, variant, derivation)
     raise BgtError("no key in the search space decrypts to a BGT container "
-                   "header (tried %d seeds x %s)"
-                   % (len(candidates), "/".join(variants)))
+                   "header (tried %d seeds x %s x %s)"
+                   % (len(candidates), "/".join(variants),
+                      "/".join(derivations)))
 
 
 # --------------------------------------------------------------------------
@@ -468,6 +510,9 @@ class Unpacked:
     #: Which key generator opened it, and so whether `compressed` really is
     #: compressed: the 2010 engine stores the module as it stands.
     key_variant: str = MULTIPLY
+    #: Which digest turned the key material into the AES key -- `SHA256` for
+    #: every build from 1.0 onward, `MD5X2` for a beta.
+    key_derivation: str = SHA256
 
     def __repr__(self) -> str:
         return ("<Unpacked overlay=0x%X seed=0x%02X container_flag=%s "
@@ -496,24 +541,26 @@ def _unpack_overlay(reading: Tuple[int, bytes, bytes],
     overlay_offset, embedded, ciphertext = reading
 
     if seed is None:
-        seed, key, variant = find_seed(ciphertext)
+        seed, key, variant, derivation = find_seed(ciphertext)
     else:
-        variant = MULTIPLY
-        key = aes_key_for_seed(seed, variant)
+        variant, derivation = MULTIPLY, SHA256
+        key = aes_key_for_seed(seed, variant, derivation)
 
     plaintext = decrypt(ciphertext, key)
     flag, blob = parse_container(plaintext)
-    if variant == ADD:
-        # **The 2010 engine does not compress.** There is no LZ77 step and no
+    if variant == ADD or derivation == MD5X2:
+        # **The early engines do not compress.** There is no LZ77 step and no
         # trailing " <length>" to read one back from: the number after
         # `printf` is the bytecode's own length, so the container's payload is
-        # the module. Keyed on the generator because that is what the two
-        # binaries say, and checked below rather than assumed.
+        # the module. True of the 2010 and 2011 builds, which this keys on the
+        # generator, and of the beta, which keys on the derivation -- a beta
+        # whose payload is 55,859 bytes against a container declaring 55,859.
+        # Checked below rather than assumed.
         comp = blob
         bytecode = blob
         if bytecode[:1] not in (b"\x00", b"\x01"):
             raise BgtError(
-                "a 2010-key overlay whose payload does not begin with "
+                "an early-key overlay whose payload does not begin with "
                 "noDebugInfo (0x%02X) -- it may be compressed after all"
                 % (bytecode[0] if bytecode else 0))
     else:
@@ -531,6 +578,7 @@ def _unpack_overlay(reading: Tuple[int, bytes, bytes],
         compressed=comp,
         bytecode=bytecode,
         key_variant=variant,
+        key_derivation=derivation,
     )
 
 

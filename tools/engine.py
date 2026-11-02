@@ -100,8 +100,18 @@ class Identity:
 
 def _probe_bgt(data: bytes, ident: Identity) -> bool:
     try:
-        offset, embedded, ciphertext = bgtlib.split_overlay(data)
-        seed, _key, variant = bgtlib.find_seed(ciphertext)
+        # The early engines write no pack-size field ahead of the ciphertext,
+        # so both readings of the overlay are offered and the container header
+        # picks one -- the same trial `unpack` runs.
+        last: Exception = bgtlib.BgtError("no overlay")
+        for offset, embedded, ciphertext in bgtlib.overlay_candidates(data):
+            try:
+                seed, _key, variant, derivation = bgtlib.find_seed(ciphertext)
+                break
+            except bgtlib.BgtError as exc:
+                last = exc
+        else:
+            raise last
     except bgtlib.BgtError as exc:
         ident.rejected[BGT] = str(exc)
         return False
@@ -112,6 +122,7 @@ def _probe_bgt(data: bytes, ident: Identity) -> bool:
         stale_trailer=bgtlib.read_trailer(data)
         if bgtlib.trailer_is_stale(data, offset) else None)
     ident.facts.update(overlay_offset=offset, seed=seed, key_variant=variant,
+                       key_derivation=derivation,
                        embedded_pack_bytes=len(embedded),
                        ciphertext_bytes=len(ciphertext))
     return True
