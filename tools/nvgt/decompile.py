@@ -762,6 +762,39 @@ def _mask_strings(line: str) -> str:
     return "".join(out)
 
 
+def _written_arguments(code, call_at: int, count: int):
+    """The `count` arguments pushed before a call, in SOURCE order, when
+    every one of them is something source can be written as.
+
+    Arguments are pushed **last to first**, so walking backwards from the
+    call yields argument 0 first -- the call-frame rule this file derives
+    from the bytecode, where `random(95, 105)` is `PshC4 105 ; PshC4 95 ;
+    CALLSYS random`.
+
+    Only a literal or a **named global** qualifies, and the global matters:
+
+        PshC4 40 ; PshC4 500 ; PshG4 KEY_BACK ; CALL key_hold
+
+    is `key_hold back(KEY_BACK, 500, 40)`, and rendering that global as its
+    *value* would compile and read as a magic number -- the key constant is
+    what the author wrote. Anything else returns None rather than a guess,
+    which is the whole reason this is narrow enough to apply at all.
+    """
+    args = []
+    at = call_at - 1
+    for _ in range(count):
+        if at < 0:
+            return None
+        ins = code[at]
+        if ins.name == "PshC4":
+            args.append(str(_s32(ins.dw_arg)))
+        elif ins.name == "PshG4" and getattr(ins, "global_name", None):
+            args.append(ins.global_name)
+        else:
+            return None
+        at -= 1
+    return args
+
 def _member_array_sizes(c: TypeInfo) -> dict:
     """What a member's declaration has to carry because its store is dropped.
 
@@ -827,7 +860,8 @@ def _member_array_sizes(c: TypeInfo) -> dict:
         for k, ins in enumerate(code):
             if ins.name not in ("CALL", "CALLSYS") or ins.func_ref is None:
                 continue
-            if len(ins.func_ref.param_types or ()) != 1:
+            params = list(ins.func_ref.param_types or ())
+            if not params:
                 continue
             if [i.name for i in code[k + 1:k + 1 + len(shape)]] != shape:
                 continue
@@ -837,10 +871,17 @@ def _member_array_sizes(c: TypeInfo) -> dict:
                 continue
             if ins.func_ref.name != dt.obj_type.name:
                 continue              # not this member's own factory
-            previous = code[k - 1] if k else None
-            if previous is None or previous.name != "PshC4":
-                continue              # only a constant; never a guess
-            out[name] = str(_s32(previous.dw_arg))
+            # **Any** number of arguments, not just one. This rule was
+            # written for a single constant -- Manamon 1's
+            # `sound_pool piano_pool(500)` -- and a class whose member
+            # takes three was simply skipped, leaving `key_hold back;`
+            # standing alone: "No default constructor for object of type
+            # 'key_hold'", once per member, which is a class that cannot
+            # compile at all.
+            args = _written_arguments(code, k, len(params))
+            if args is None:
+                continue              # not all of them are writable
+            out[name] = ", ".join(args)
     return out
 
 

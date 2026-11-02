@@ -2811,6 +2811,41 @@ def test_the_chain_is_not_walked_without_the_recovered_SOURCE():
     assert counts == {"callsite": 0, "hashchain": 0}
 
 
+def test_a_member_CONSTRUCTOR_may_take_more_than_one_argument():
+    """`_written_arguments` reads the arguments pushed before a call.
+
+    The member rule took exactly one constant, because the only member in the
+    five-title corpus that needed it was `sound_pool piano_pool(500)`. Field
+    Wars has four members of a class whose constructor takes three, and
+    skipping them left `key_hold back;` standing alone -- which for a class
+    with no default constructor is one error per member and a class that
+    cannot compile.
+
+    Arguments are pushed **last to first**, so walking backwards from the call
+    yields argument 0 first. A literal and a named global qualify; anything
+    else must refuse rather than guess, because an argument that is almost
+    right still compiles.
+    """
+    def push(name, dw=0, global_name=None):
+        return type("I", (), {"name": name, "dw_arg": dw,
+                              "global_name": global_name})()
+
+    code = [push("PshC4", 40), push("PshC4", 500),
+            push("PshG4", 3, "KEY_BACK"), push("CALL")]
+    assert decompile._written_arguments(code, 3, 3) == ["KEY_BACK", "500", "40"]
+    # the one-argument form the rule was written for still works
+    assert decompile._written_arguments(code, 3, 1) == ["KEY_BACK"]
+
+    # a global with no recoverable name is not writable, so refuse
+    nameless = [push("PshC4", 1), push("PshG4", 9), push("CALL")]
+    assert decompile._written_arguments(nameless, 2, 2) is None
+    # ...and so is anything computed
+    computed = [push("PshC4", 1), push("ADDi"), push("CALL")]
+    assert decompile._written_arguments(computed, 2, 2) is None
+    # ...and running off the start of the body is not an answer
+    assert decompile._written_arguments(code, 1, 4) is None
+
+
 def test_the_pack_INSIDE_the_executable_is_written_out_and_included():
     """A game may carry its one asset pack inside the program itself.
 

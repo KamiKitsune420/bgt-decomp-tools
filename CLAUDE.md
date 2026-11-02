@@ -4206,6 +4206,39 @@ found by reading what it said rather than by inspection:
   is that member's own type, with a constant argument. The declaration
   comes out `sound_pool piano_pool(500);`.
 
+  **And "a constant argument" was too narrow, which a sixth title showed.**
+  The rule took exactly ONE parameter and exactly one `PshC4` before the
+  call, because the one member in the five-title corpus that needed it was
+  `sound_pool piano_pool(500)`. Field Wars' `text_input` has four members of
+  a class whose constructor takes **three**:
+
+  ```
+  PshC4 40 ; PshC4 500 ; PshG4 KEY_BACK ; CALL key_hold
+  STOREOBJ 6 ; PshVPtr 6 ; PshVPtr 0 ; ADDSi text_input::back ; REFCPY
+  ```
+
+  Skipped, the declaration stood alone as `key_hold back;` -- and a class
+  whose only constructor takes arguments has no default one, so that is
+  **"No default constructor for object of type 'key_hold'"** once per member
+  and a class that cannot compile at all. Reported from a user's own run.
+
+  `_written_arguments` reads **any** number of them, walking backwards from
+  the call because arguments are pushed last to first -- the call-frame rule
+  this file derives from the bytecode -- so `KEY_BACK, 500, 40` comes out in
+  source order. Two kinds qualify and nothing else: a literal, and a **named
+  global**. The global is the half worth having, because rendering
+  `PshG4 KEY_BACK` as its *value* would compile and read as a magic number,
+  and the constant is what the author wrote.
+
+  Put to the compiler before being emitted, as the one-argument form was: a
+  member declaration carrying three arguments, one a `const` and one an
+  engine key constant, `compiled cleanly`.
+
+  **The scope is one class in one title, measured across the corpus**: Super
+  Egg Hunt 0, The Gate 0, Manamon 1 one single-argument member and no
+  multi-argument one -- which is `piano_pool` still recovered exactly as
+  before. Field Wars recovers to 9,048 lines, 0 residual gotos, a verified
+  split, 3,001 calls read back, and `compiled cleanly`.
   Each of those three conditions is what keeps it to the one member that
   loses something, and the sweep is why: of the 38 constructor bodies in
   the corpus with a one-argument call feeding this shape, Paladin's two
