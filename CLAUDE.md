@@ -9143,6 +9143,132 @@ good case:
   `assigned_slots` block. `callee` was then unbound and every body raised,
   in all 52 shapes at once.
 
+#### What it exposed: four places that rendered a type from the wrong thing
+
+None of these is the webs analysis. Each is a place that needed a type and
+took the nearest one to hand, and each only showed once a slot could be a
+variable in one part of a body and scratch in another. **`bgt drive` found
+three of the four**, by compiling and running each recovery -- which is what
+it is for, and the first time a new instrument here has paid for itself the
+same night.
+
+##### A conversion's result type is known exactly, and was not recorded
+
+`dTOi 19 9` makes an `int`, and the handler built `Atom("call", "int(...)")`
+with **no `data_type` at all** -- so everything downstream that asks what the
+value is got nothing. `PRIMITIVE_TOKENS` is the inverse of the reader's own
+`PRIMITIVE_NAMES` rather than a second table, because two spellings of one
+fact is what the `$beh0`/`_beh_0_` lesson in this file cost. A negation
+carries its operand's type, for the same reason it carries the origin.
+
+##### ...so a hold was typed from the slot it was INVALIDATING
+
+That is a different variable by construction -- the whole reason a hold
+exists -- and `cs`'s server is what said so:
+
+```
+ALLOC string -> slot 14               ; parts[?]
+VAR 14 ; CALL stn ; CpyRtoV8 9 ; NEGd 9 ; dTOi 19 9
+PshV4 19                              ; push int(-stn(local_14))
+PSF 14 ; ... opIndex ; ALLOC string   ; slot 14 REBUILT
+VAR 14                                ; push the new string
+CALLINTF player::give
+```
+
+so the held value is an **int** that reads slot 14, and it came out
+
+```
+string __nvgt_held_14_24133 = int(-(stn(local_14)));
+players[local_32].give(local_14, __nvgt_held_14_24133);
+No matching signatures to 'player::give(string, string)'
+Candidates are: void player::give(string arg0, int arg1)
+```
+
+Eight of those on that server and three on its client, so **neither project
+compiled at all** -- which is worse than the stale read the hold was fixing.
+
+**Dropping the fallback alone is the wrong fix, and was measured as one.**
+With no type the hold is refused, which is what the docstring already
+promised -- and the refusal brings the stale read back:
+`give(local_14, int(-(stn(local_14))))` reads slot 14 at the call, by which
+time it holds the next string, and the client's `spawn_player` came out with
+one slot read three times. That is a visible failure traded for a silent
+wrong program, which is the one trade this file refuses. Typing the
+conversion is what makes the hold right rather than absent.
+
+##### A promotion writes its own statement, so it has to convert too
+
+`_promote_temp` already notices a bool going into a numeric slot -- it adds
+the offset to `mixed_boolean_slots`, whose contract this file states as *"the
+slot keeps the numeric type, the store writes 1/0, and reads convert back
+with `!= 0`"* -- and then emitted a store that writes the bool.
+`_emit_assign` is the half that honours the contract.
+
+The Gate's `load()` is the case, and the position is why it was easy to
+misplace: the statement lands at pos **103**, the `SetV1 4` bind, while the
+`?&out` local it names is created at pos 248. Adding the offset to the set at
+the call site -- the first attempt -- changes nothing, because nothing on
+that path reads it.
+
+##### A negative constant stored into an unsigned local needs the cast
+
+`Implicit conversion changed sign of value` is a warning, and a warning stops
+an unattended compile on BGT's modal dialog. The Gate's `find_attack_point`
+is the one site in the corpus:
+
+```
+uint local_9;
+local_9 = (0 - 1);          // the engine warns
+...
+if (local_18 >= local_9)    // CMPu -- the slot really IS unsigned
+```
+
+The declaration is right -- the comparison that reads it is `CMPu` -- so the
+bits are 0xFFFFFFFF either way and only the spelling draws the warning.
+`uint(0 - 1)` and `4294967295` were both put to the compiler, and both give
+4294967295. Keyed on a **compile-time negative constant**, because that is
+what the engine can see and warns about: an unsigned local assigned a
+non-negative int draws nothing. Swept across all eight titles, before and
+after: one site in one title, and none at all in the baseline, where the
+value folded into its use.
+
+##### What they cost
+
+| title | lines | calls | goto | split |
+|---|---|---|---|---|
+| Super Egg Hunt | 5,239 | 1,623 | 0 | verified |
+| The Gate | 33,995 | 8,680 -> **8,681** | 0 | verified |
+| Battle of the Hunter | 4,269 | 1,334 | 0 | verified |
+| Field Wars | 7,942 | 3,005 | 0 | verified |
+| rage room | 8,484 | 2,369 | 0 | verified |
+| cs server | 9,691 | 3,060 | 0 | verified |
+| cs client | 7,963 | 2,858 | 0 | verified |
+| constant velocity | 3,805 | 1,767 | 0 | verified |
+
+Six titles **byte-identical**; The Gate moves by the two lines these fix and
+one call, which is `bgt apicheck` reading `uint(` as the call it
+syntactically is; the `cs` server by two more of the same shape. Every
+ground-truth score, every signature and every audit is exactly as the
+section above records them, and `bgt oracle` is 52/52.
+
+**And the recoveries RUN.** `bgt drive` reaches its table on Super Egg Hunt,
+Battle of the Hunter, rage room, constant velocity, Field Wars and -- for the
+first time -- the `cs` **client**, which is 7,963 lines of a networked game
+compiling and starting from recovered source. Each of those is a stronger
+claim than a clean compile, because a global initialiser that throws stops
+the program and `-c` never runs one.
+
+Two things are left on that list and neither is this work's:
+
+- **The Gate needs `elias`**, which no stock BGT registers, so `elias theme;`
+  fails and every `theme.x()` after it is `Illegal operation on 'int&'` -- one
+  missing engine type and a cascade, the same shape as Manamon 2's
+  `protected`.
+- **The `cs` server has one error, and it is in the baseline too**:
+  `__nvgt_global_init_64` uses `local_1` and declares it nowhere, so the
+  declaration hoisting does not reach a generated global initialiser. Down
+  from the nine this work briefly added, and byte-identical in both trees.
+
 #### ...and `duplicated_call` was counting CONVERSIONS
 
 The same correction one shape over. This one is a correctness number --

@@ -343,5 +343,185 @@ class PromoteOnceTests(unittest.TestCase):
         self.assertEqual(len(fd.events), 1)
 
 
+    def test_a_bool_promoted_into_a_NUMERIC_slot_is_converted(self):
+        """`mixed_boolean_slots`' contract is that the store writes 1/0, and
+        a promotion writes its own statement -- so it has to honour it too.
+        The Gate's `load()` came out `local_4 = __nvgt_out_4_248;` with
+        `int local_4`, which the engine rejects."""
+        from decompile import FuncDecompiler, Atom, DataType, PRIMITIVE_TOKENS
+        fd = object.__new__(FuncDecompiler)
+        fd.temps = {4: Atom("var", "__nvgt_out_4_248",
+                            data_type=DataType(
+                                token_type=PRIMITIVE_TOKENS["bool"]))}
+        fd.temp_bound = {4: (103, 1)}
+        fd.var_names = {4: "local_4"}
+        fd.var_types = {4: DataType(token_type=PRIMITIVE_TOKENS["int"])}
+        fd.mixed_boolean_slots = set()
+        fd.forced_slots, fd.consumed_temps = set(), set()
+        fd.events, fd.stmt_count, fd.stmt_texts = [], 0, []
+        fd._promote_temp(4)
+        self.assertEqual(
+            [e.data for e in fd.events],
+            [("", "local_4 = (__nvgt_out_4_248 ? 1 : 0);")])
+        self.assertIn(4, fd.mixed_boolean_slots)
+
+class ConversionTypeTests(unittest.TestCase):
+    """A conversion's result type is known exactly, so the atom says so.
+
+    Left untyped, everything downstream that asks what the value is got
+    nothing -- and `_hold_pushed` then fell back to the type of the slot it
+    was invalidating, which is a different variable by construction. `cs`'s
+    server declared an `int` hold `string` and would not compile.
+    """
+
+    def test_the_token_table_is_the_READER_s_inverse(self):
+        """One source of truth. Two spellings of one fact is what the
+        `$beh0`/`_beh_0_` lesson in this project cost."""
+        from decompile import PRIMITIVE_TOKENS
+        from asreader import PRIMITIVE_NAMES
+        self.assertEqual(PRIMITIVE_TOKENS,
+                         {n: t for t, n in PRIMITIVE_NAMES.items()})
+
+    def test_every_conversion_target_the_handler_spells_has_a_token(self):
+        """The handler maps the opcode's suffix to a type name; a name with
+        no token would silently give the atom no type again."""
+        from decompile import PRIMITIVE_TOKENS
+        for name in ("int", "uint", "float", "double", "int64",
+                     "int8", "int16"):
+            self.assertIn(name, PRIMITIVE_TOKENS, name)
+
+
+
+    def test_the_HANDLER_really_attaches_it(self):
+        """Testing the table alone passes with the handler's lookup deleted:
+        the branch goes dead and nothing notices, which is the gap this
+        project records for a pattern that matches nothing. `step` takes too
+        many collaborators to drive honestly here, so what is pinned is that
+        the conversion branch builds its atom's type from the table -- the
+        same shape as the test that the compiler driver declares no
+        `$Switch`.
+        """
+        import inspect
+        from decompile import FuncDecompiler
+        src = inspect.getsource(FuncDecompiler.step)
+        branch = src[src.index("if name in CONV_OPS:"):]
+        branch = branch[:branch.index("if name in (\"NEGf\"")]
+        self.assertIn("PRIMITIVE_TOKENS.get(target)", branch)
+        self.assertIn("data_type=(DataType(token_type=token)", branch)
+
+    def test_a_NEGATION_carries_its_operand_s_type(self):
+        """It does not change the type, which is the same reason it carries
+        the origin."""
+        import inspect
+        from decompile import FuncDecompiler
+        src = inspect.getsource(FuncDecompiler.step)
+        branch = src[src.index("if name in (\"NEGf\""):]
+        self.assertIn("data_type=neg.data_type", branch[:600])
+
+
+class HoldTypeTests(unittest.TestCase):
+    """A hold is typed from the VALUE, never from the slot being written."""
+
+    def _fd(self, at, slot_type=None):
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.slot_values = {}
+        fd.var_types = {14: slot_type} if slot_type is not None else {}
+        fd.held_pushed = set()
+        fd.events = []
+        fd.stmt_count = 0
+        fd.stmt_texts = []
+        fd._pos = lambda: 24133
+        fd._append_stmt = lambda tn, text: fd.events.append((tn, text))
+        return fd
+
+    def test_it_takes_the_VALUE_s_type(self):
+        from decompile import Atom, DataType, PRIMITIVE_TOKENS
+        value = Atom("call", "int(-(stn(local_14)))",
+                     data_type=DataType(token_type=PRIMITIVE_TOKENS["int"]))
+        fd = self._fd(value)
+        back = fd._hold_pushed(14, value)
+        self.assertEqual(fd.events, [("int", "%s = int(-(stn(local_14)));"
+                                      % back.text)])
+        self.assertTrue(back.text.startswith("__nvgt_held_14_"))
+
+    def test_it_does_NOT_fall_back_to_the_invalidated_slot_s_type(self):
+        """That slot holds a different variable -- which is the whole reason
+        a hold exists. `cs`'s server came out
+        `string __nvgt_held_14_24133 = int(-(stn(local_14)));` and the engine
+        said *No matching signatures to `player::give(string, string)`*
+        against a candidate taking `(string, int)`."""
+        from decompile import Atom, DataType, PRIMITIVE_TOKENS
+        value = Atom("call", "int(-(stn(local_14)))")      # no type at all
+        fd = self._fd(value,
+                      slot_type=DataType(
+                          token_type=PRIMITIVE_TOKENS["int"]))
+        back = fd._hold_pushed(14, value)
+        #: refused rather than declared with the other variable's type
+        self.assertIs(back, value)
+        self.assertEqual(fd.events, [])
+
+
+class UnsignedStoreTests(unittest.TestCase):
+    """A negative constant stored into an unsigned local needs the cast.
+
+    `Implicit conversion changed sign of value` is a warning, and a warning
+    stops an unattended compile on BGT's modal dialog. `uint(0 - 1)` and
+    `4294967295` were both put to the compiler and both give 4294967295, so
+    this is the spelling and not the value.
+    """
+
+    def test_a_negative_constant_expression_is_recognised(self):
+        from decompile import _negative_constant
+        for text in ("-1", "(0 - 1)", "(2 - 5)", "((0 - 1))"):
+            self.assertTrue(_negative_constant(text), text)
+
+    def test_a_non_negative_one_is_not(self):
+        from decompile import _negative_constant
+        for text in ("1", "(3 - 1)", "0", "(2 * 3)"):
+            self.assertFalse(_negative_constant(text), text)
+
+    def test_anything_that_is_not_pure_ARITHMETIC_is_not(self):
+        """No name and no call can match, so evaluating one is bounded --
+        and a value that merely LOOKS negative is left alone."""
+        from decompile import _negative_constant
+        for text in ("local_4", "-local_4", "f(-1)", "x - 1", "", "()",
+                     "__import__('os')"):
+            self.assertFalse(_negative_constant(text), text)
+
+
+    def _assigner(self, slot_type):
+        """A decompiler just complete enough to run `_emit_assign`."""
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.temps, fd.consumed_temps = {}, set()
+        fd.var_types = {9: slot_type}
+        fd.var_names = {9: "local_9"}
+        fd.mixed_boolean_slots = set()
+        fd.declared = set()
+        fd.slot_values = {}
+        fd.held_pushed = set()
+        fd.stack = []
+        fd.events, fd.stmt_count, fd.stmt_texts = [], 0, []
+        fd._pos = lambda: 529
+        fd._append_stmt = lambda tn, text: fd.events.append((tn, text))
+        fd._normalize_arg = lambda a, dt: a
+        fd._snapshot_pushed = lambda off: None
+        return fd
+
+    def test_the_store_really_goes_through_the_cast(self):
+        """The function passing its own tests says nothing about the call
+        site: deleting it leaves every unit test green."""
+        from decompile import Atom, DataType, PRIMITIVE_TOKENS
+        fd = self._assigner(DataType(token_type=PRIMITIVE_TOKENS["uint"]))
+        fd._emit_assign(9, Atom("call", "(0 - 1)"))
+        self.assertEqual(fd.events, [("uint", "local_9 = uint((0 - 1));")])
+
+    def test_a_SIGNED_slot_is_left_exactly_as_it_was(self):
+        from decompile import Atom, DataType, PRIMITIVE_TOKENS
+        fd = self._assigner(DataType(token_type=PRIMITIVE_TOKENS["int"]))
+        fd._emit_assign(9, Atom("call", "(0 - 1)"))
+        self.assertEqual(fd.events, [("int", "local_9 = (0 - 1);")])
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,11 +36,11 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 try:                      # installed as a package
-    from .asreader import DataType, Function, Instr, Module, TypeInfo, read_module, unwrap_bytecode
+    from .asreader import DataType, Function, Instr, Module, PRIMITIVE_NAMES, TypeInfo, read_module, unwrap_bytecode
     from .signatures import function_signature, format_parameters, funcdef_declaration, class_header, namespace_block
     from .purity import Purity
 except ImportError:       # run directly from a checkout
-    from asreader import DataType, Function, Instr, Module, TypeInfo, read_module, unwrap_bytecode
+    from asreader import DataType, Function, Instr, Module, PRIMITIVE_NAMES, TypeInfo, read_module, unwrap_bytecode
     from signatures import function_signature, format_parameters, funcdef_declaration, class_header, namespace_block
     from purity import Purity
 
@@ -152,6 +152,31 @@ def _ref_register_writes(instrs: list[Instr]) -> dict[int, list[int]]:
         elif held is not None and op.name.startswith(_REF_WRITE_PREFIXES):
             out.setdefault(held, []).append(op.pos)
     return out
+
+
+#: Only digits, spaces, brackets and the four arithmetic operators -- no
+#: name and no call can match, so evaluating one is bounded.
+_CONST_ARITHMETIC = re.compile(r"^[-\d\s()+*/]+$")
+
+#: The unsigned integer tokens, by the spelling the IR carries. A store of a
+#: negative constant into one of these is what BGT warns about.
+_UNSIGNED_NAMES = ("uint", "uint8", "uint16", "uint32", "uint64")
+
+
+def _negative_constant(text: str) -> bool:
+    """Is this rendered value a compile-time constant below zero?
+
+    The engine warns `Implicit conversion changed sign of value` for exactly
+    that, and only for that -- an unsigned local assigned a non-negative int
+    draws nothing. So the rule is keyed on what the compiler can see, which
+    keeps it to the one site in the corpus that has it.
+    """
+    if not _CONST_ARITHMETIC.match(text) or not any(c.isdigit() for c in text):
+        return False
+    try:
+        return eval(text, {"__builtins__": {}}, {}) < 0      # noqa: S307
+    except Exception:
+        return False
 
 
 def _read_slots(instrs: list[Instr]) -> set[int]:
@@ -600,6 +625,11 @@ def _is_repeatable(a: Atom) -> bool:
 
 
 NUMERIC_TOKENS = (70, 71, 72, 73, 77, 78, 79, 80)   # int, int8/16/64, uint...
+
+#: name -> token, as the INVERSE of the reader's own table rather than a
+#: second copy of it. Two spellings of one fact is what the
+#: `$beh0`/`_beh_0_` lesson in this file cost.
+PRIMITIVE_TOKENS = {name: token for token, name in PRIMITIVE_NAMES.items()}
 
 
 #   <type> <name> ;|=|(      -- a declaration, with or without an initialiser.
@@ -2126,11 +2156,27 @@ class FuncDecompiler:
         A value whose type is not known is left alone rather than declared
         wrongly: an undeclared name does not compile at all, where a stale
         read does.
+
+        **And the type comes from the VALUE, never from the slot being
+        invalidated.** Those are different variables by construction -- that
+        is the whole reason a hold exists -- so falling back to the slot's
+        type declares one variable with another's. `cs`'s server is the
+        case: the held value is an `int` computed from a string slot,
+
+            VAR 14 ; CALL stn ; CpyRtoV8 9 ; NEGd 9 ; dTOi 19 9
+            PshV4 19                          ; push int(-stn(local_14))
+            PSF 14 ; ... ALLOC string         ; slot 14 REBUILT
+
+        and it came out `string __nvgt_held_14_24133`, which the engine
+        rejects: *No matching signatures to `player::give(string, string)`*,
+        against a candidate taking `(string, int)`. Eight on that server and
+        three on its client, so the project did not compile at all -- which
+        is worse than the stale read this is fixing.
         """
         held = self.slot_values.get(off)
         if at.kind == "var" and held is not None and _is_repeatable(held):
             return held
-        dt = at.data_type or self.var_types.get(off)
+        dt = at.data_type
         tn = (dt.format() if dt else "").replace("&", "").strip()
         if not tn:
             return at
@@ -2158,6 +2204,22 @@ class FuncDecompiler:
                 a = Atom("const", "1" if a.text == "true" else "0")
             elif a.data_type and a.data_type.token_type == 67:
                 a = Atom("call", f"({a.text} ? 1 : 0)")
+        #: **A negative constant into an unsigned local needs the cast.** The
+        #: engine warns `Implicit conversion changed sign of value`, and a
+        #: warning stops an unattended compile on its modal dialog. The bits
+        #: are the same either way -- `uint(0 - 1)` and `4294967295` were both
+        #: put to the compiler, and both give 4294967295 -- so this is the
+        #: spelling and not the value. One site in the corpus, The Gate's
+        #: `find_attack_point`, whose slot really is unsigned: the comparison
+        #: that reads it is `CMPu`.
+        declared_type = self.var_types.get(off)
+        if (declared_type is not None and declared_type.obj_type is None
+                and declared_type.format().replace("&", "").strip()
+                in _UNSIGNED_NAMES
+                and _negative_constant(a.text)):
+            a = Atom("call", "%s(%s)"
+                     % (declared_type.format().replace("&", "").strip(),
+                        a.text), data_type=declared_type)
         name = self.name_of(off)
         if off not in self.declared:
             self.declared.add(off)
@@ -2447,13 +2509,25 @@ class FuncDecompiler:
             #: Without it, `cs`'s `load_bases` shuffled four converted
             #: values back through one slot, so a base's three coordinates
             #: and its health were one number.
+            #: **And what it produced**, which is known exactly. Left
+            #: untyped, everything downstream that asks what the value is
+            #: got nothing -- `_hold_pushed` then fell back to the type of
+            #: the slot it was invalidating, a different variable by
+            #: construction, and `cs`'s server declared an `int` hold
+            #: `string` and would not compile.
+            token = PRIMITIVE_TOKENS.get(target)
             self._bind(d, Atom("call", f"{target}({src.text})",
-                               origin=src.origin))
+                               origin=src.origin,
+                               data_type=(DataType(token_type=token)
+                                          if token is not None else None)))
             return
         if name in ("NEGf", "NEGi", "NEGi64", "NEGd"):
             s = _s16(ins.w_arg)
             neg = self._slot_atom(s)
-            self._bind(s, Atom("call", f"-({neg.text})", origin=neg.origin))
+            #: a negation does not change the type, so it carries the
+            #: operand's -- the same reason it carries the origin
+            self._bind(s, Atom("call", f"-({neg.text})", origin=neg.origin,
+                               data_type=neg.data_type))
             return
         if name in ("CpyVtoR4", "CpyVtoR8"):
             # Any earlier call still in the value register was intentionally
@@ -3715,6 +3789,17 @@ class FuncDecompiler:
             # `!= 0`. Without the mark the store compiled and the *conditions*
             # did not -- `if (!local_3)`, `local_3 || ...`.
             self.mixed_boolean_slots.add(off)
+            #: ...and **honour that here**, because a promotion writes its
+            #: own statement. The set's contract is that the store writes
+            #: 1/0; `_emit_assign` is the half that already did, and this
+            #: half emitted the bool -- `Can't implicitly convert from
+            #: 'bool' to 'int'` on The Gate's `load()`, whose `?&out` local
+            #: is a bool copied into an `int` slot.
+            #:
+            #: The position is why this was easy to misplace: the statement
+            #: lands at the BIND, pos 103, while the out local it names is
+            #: created at pos 248.
+            value = Atom("call", f"({value.text} ? 1 : 0)", data_type=known)
         # Hoisted: the store may be inside a branch or a loop while a later
         # read is not, and a declaration inside that block is out of scope.
         self.forced_slots.add(off)
