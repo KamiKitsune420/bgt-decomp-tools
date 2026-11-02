@@ -5758,6 +5758,11 @@ class FuncDecompiler:
         #: a definition no use can see is a dead store, and belongs with
         #: nothing -- it is reported as its own web so a caller can tell.
         return webs
+    #: how many copies `_tested_as_bool` will follow. Field Wars' nested
+    #: `k_ctrl` needs two; this is bounded so a long copy chain cannot turn
+    #: into an open-ended search for a test that is not there.
+    _BOOL_COPY_HOPS = 3
+
     def _tested_as_bool(self, slot: int, start: int, window: int = 4) -> bool:
         """Is this slot loaded and then tested as a boolean, right here?
 
@@ -5784,13 +5789,44 @@ class FuncDecompiler:
         be talked to**.
         """
         seen_load = False
-        for idx in range(start, min(start + window, len(self.instrs))):
+        #: **A copy of the slot carries the question onward.** A NESTED
+        #: short-circuit stores the inner merge's result into the outer
+        #: chain's own slot, and it is that slot the jump tests:
+        #:
+        #:     59  CpyVtoV4 4, 1     <- the inner merge's result
+        #:     61  CpyVtoV4 2, 4     <- copied again
+        #:     63  CpyVtoR4 2
+        #:     64  JLowZ             <- the bool test, two slots along
+        #:
+        #: Looked for on slot 4 the test is not there, so Field Wars' `k_ctrl`
+        #: had all three of its inner `||` pairs declined -- each emitted as
+        #: an `if` with two empty arms, each losing its LEFT operand. The
+        #: function reads the control key, so `k_ctrl(1)` answered for the
+        #: right control alone and firing with the left one did nothing.
+        #:
+        #: The window is counted per slot rather than overall, because each
+        #: copy is a fresh short run to the test, and a chain of them is
+        #: still one question.
+        hops = 0
+        idx = start
+        limit = min(start + window, len(self.instrs))
+        while idx < limit:
             op = self.instrs[idx]
             if op.name in ("SUSPEND", "FREE"):
+                idx += 1
                 continue
             if not seen_load:
                 if op.name in ("CpyVtoR4", "CpyVtoR8") and _s16(op.w_arg) == slot:
                     seen_load = True
+                    idx += 1
+                    continue
+                #: a copy OF this slot into another: follow it
+                if (op.name in ("CpyVtoV4", "CpyVtoV8")
+                        and _s16(op.w_arg2) == slot and hops < self._BOOL_COPY_HOPS):
+                    slot = _s16(op.w_arg)
+                    hops += 1
+                    idx += 1
+                    limit = min(idx + window, len(self.instrs))
                     continue
                 return False
             return op.name in ("JLowZ", "JLowNZ", "JLowS", "JLowNS")

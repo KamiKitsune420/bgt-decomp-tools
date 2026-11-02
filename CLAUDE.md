@@ -8379,6 +8379,79 @@ argument for the trace: a fold rule's answer depends on four tables and
 a position, and the method that fires is not the one that looks
 likeliest.
 
+#### A NESTED short-circuit, and the copy that hid its bool test
+
+A different mechanism from the chain below, found from a second report on the
+same title -- *"when I press control to fire the weapon it is like it is
+stuck"* -- and **fixed**.
+
+`_begin_bool_merge` folds `(A op B)` only where it can tell the merged value
+is a bool, and on a compiler scratch slot the width inference is the weaker
+witness, so the bytecode is asked instead: a slot loaded and tested with
+`JLow*` is a bool, because those follow no compare and test the low byte,
+which is the bool protocol and nothing else. This file already records
+widening that test once, for a `FREE` sitting between the merge and the jump.
+
+**A nested short-circuit puts a COPY in the way.** Field Wars' `k_ctrl` is
+one condition built of four `&&` pairs joined by `||`, each pair holding its
+own inner `||`:
+
+```
+return (mode == 0 and (key_down(LCTRL)     or key_down(RCTRL)))
+    or (mode == 1 and (key_pressed(LCTRL)  or key_pressed(RCTRL)))
+    or (mode == 2 and (key_released(LCTRL) or key_released(RCTRL)))
+    or ...
+```
+
+The inner merge's result is stored into the outer chain's own slot, and it is
+*that* slot the jump tests:
+
+```
+59  CpyVtoV4 4, 1     <- the inner merge's result
+61  CpyVtoV4 2, 4     <- copied again
+63  CpyVtoR4 2
+64  JLowZ             <- the bool test, two slots along
+```
+
+Looked for on slot 4 the test is not there, so all three inner `||` pairs
+were declined -- each emitted as an `if` with two empty arms, each **losing
+its LEFT operand**:
+
+```
+if (key_pressed(KEY_LCONTROL)) { } else { }
+...
+|| ((arg0 == 1) && key_pressed(KEY_RCONTROL))
+```
+
+`k_ctrl` is how that game reads the control key, so `k_ctrl(1)` answered for
+the RIGHT control alone and firing the weapon with the left one did nothing
+at all. `k_shift` is the same function one key over, with the same three.
+
+So `_tested_as_bool` follows a copy whose source is the slot it is asking
+about, up to `_BOOL_COPY_HOPS` of them -- bounded, so a long copy chain
+cannot become an open-ended search for a test that is not there. Only a copy
+**of** the slot carries the question onward; a copy *into* it is a different
+value.
+
+#### What it cost: two titles, and nothing else moved
+
+| title | lines | goto | split | calls read back |
+|---|---|---|---|---|
+| Field Wars | 9,048 -> **9,021** | 0 | verified | 3,001 |
+| The Gate | 34,955 -> **34,943** | 0 | verified | 8,665 |
+| Super Egg Hunt, BTH, rage room, cs client, cs server, constant velocity | unchanged | 0 | verified | unchanged |
+
+Field Wars' `empty_arm` goes **10 -> 1** and its `bgt audit` is identical
+before and after -- 1 call row, 0 literals, 0 constants -- so nothing was
+lost to get there. The Gate's audit is identical too, at 144 / 2 / 3.
+
+`bgt oracle` is **52/52**, and all four games that came with their own source
+score exactly as they did: rage room 291/292 and the `cs` client **218/218**
+with 0 differing, constant velocity 94/95, the `cs` server 194/196.
+
+Six of eight titles unchanged and the two that move losing only the lines
+these empty arms occupied is what a correctly scoped fix looks like.
+
 #### A CHAIN of three or more terms, and why the obvious fix is REJECTED
 
 The two halves above are right and they are not the whole of it. A

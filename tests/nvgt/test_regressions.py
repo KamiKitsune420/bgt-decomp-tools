@@ -1584,6 +1584,90 @@ class DiamondBindTests(unittest.TestCase):
                          ._conditionally_bound(6, 11))
 
 
+class NestedShortCircuitTests(unittest.TestCase):
+    """A slot COPIED and then tested as a bool is still a bool.
+
+    `_begin_bool_merge` folds `(A op B)` only when it can tell the merged
+    value is a bool, and on a compiler scratch slot the width inference is
+    the weaker witness -- so the bytecode is asked instead: a slot loaded and
+    tested with `JLow*` is a bool, because those follow no compare and test
+    the low byte, which is the bool protocol and nothing else.
+
+    A NESTED short-circuit puts a copy in the way. The inner merge's result
+    is stored into the outer chain's own slot, and it is that slot the jump
+    tests:
+
+        59  CpyVtoV4 4, 1     <- the inner merge's result
+        61  CpyVtoV4 2, 4     <- copied again
+        63  CpyVtoR4 2
+        64  JLowZ             <- the bool test, two slots along
+
+    Looked for on slot 4 the test is not there, so Field Wars' `k_ctrl` had
+    all three of its inner `||` pairs declined -- each emitted as an `if`
+    with two empty arms, each losing its LEFT operand:
+
+        if (key_pressed(KEY_LCONTROL)) { } else { }
+        ...
+        || ((arg0 == 1) && key_pressed(KEY_RCONTROL))
+
+    That function reads the control key, so `k_ctrl(1)` answered for the
+    right control alone and firing the weapon with the left one did nothing.
+    Reported from the game as the key being "stuck".
+    """
+
+    @staticmethod
+    def _op(name, pos, w_arg=0, w_arg2=0):
+        return Instr(pos=pos, op=0, name=name, bc_type="", size=1,
+                     w_arg=w_arg, w_arg2=w_arg2)
+
+    def _sim(self, instrs):
+        from decompile import FuncDecompiler
+        sim = object.__new__(FuncDecompiler)
+        sim.instrs = instrs
+        return sim
+
+    def test_the_test_is_found_through_one_copy(self):
+        instrs = [self._op("CpyVtoV4", 0, w_arg=2, w_arg2=4),
+                  self._op("CpyVtoR4", 1, w_arg=2),
+                  self._op("JLowZ", 2)]
+        self.assertTrue(self._sim(instrs)._tested_as_bool(4, 0))
+
+    def test_and_through_two(self):
+        """Which is what `k_ctrl` needs: the merge stores into 4, that is
+        copied into 2, and 2 is what the jump tests."""
+        instrs = [self._op("CpyVtoV4", 0, w_arg=4, w_arg2=1),
+                  self._op("CpyVtoV4", 1, w_arg=2, w_arg2=4),
+                  self._op("CpyVtoR4", 2, w_arg=2),
+                  self._op("JLowZ", 3)]
+        self.assertTrue(self._sim(instrs)._tested_as_bool(1, 0))
+
+    def test_the_direct_shape_still_works(self):
+        instrs = [self._op("CpyVtoR4", 0, w_arg=4),
+                  self._op("JLowZ", 1)]
+        self.assertTrue(self._sim(instrs)._tested_as_bool(4, 0))
+
+    def test_a_copy_of_something_ELSE_is_not_followed(self):
+        """Only a copy whose SOURCE is this slot carries the question on; a
+        copy into it is a different value."""
+        instrs = [self._op("CpyVtoV4", 0, w_arg=2, w_arg2=9),
+                  self._op("CpyVtoR4", 1, w_arg=2),
+                  self._op("JLowZ", 2)]
+        self.assertFalse(self._sim(instrs)._tested_as_bool(4, 0))
+
+    def test_a_slot_never_tested_as_a_bool_answers_no(self):
+        instrs = [self._op("CpyVtoV4", 0, w_arg=2, w_arg2=4),
+                  self._op("CpyVtoR4", 1, w_arg=2),
+                  self._op("CMPi", 2, w_arg=2, w_arg2=3)]
+        self.assertFalse(self._sim(instrs)._tested_as_bool(4, 0))
+
+    def test_the_hops_are_bounded(self):
+        """A long copy chain must not become an open-ended search for a test
+        that is not there."""
+        from decompile import FuncDecompiler
+        self.assertGreaterEqual(FuncDecompiler._BOOL_COPY_HOPS, 2)
+        self.assertLessEqual(FuncDecompiler._BOOL_COPY_HOPS, 6)
+
+
 class VirtualVersusBaseCallTests(unittest.TestCase):
     """`CALL` names one implementation; `CALLINTF` goes through the vftable.
 
