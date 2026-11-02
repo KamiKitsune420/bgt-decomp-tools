@@ -76,6 +76,90 @@ Note the container header is **fixed-shape but not fixed-length**: the declared
 length is decimal, so a larger module means a longer header. Compute it, never
 hardcode it.
 
+### The GENERATOR varies too, and the 2010 engine adds where later ones multiply
+
+`v *= 3` above is the 2011 and 2014 engines'. **BGT 1.0 does `v += 3`**, and
+that one instruction is the whole reason this toolkit could not open a 2010
+title — reported as issue #6 by somebody who had written a script that could.
+
+Both generators were read out of the two installs, and the comparison is
+controlled rather than suggestive: they are otherwise identical instruction
+for instruction — the same `cmp 0x7f / jle`, the same `mov 5` and `mov 0xd`,
+the same 32 iterations, the same 33-byte buffer with a trailing NUL, and the
+same `push 0x21` allocation ahead of the loop.
+
+| engine | the arithmetic |
+|---|---|
+| BGT 1.3, `0x084E68` | `lea ebx,[ebx+ebx*2]` — `v = v * 3` |
+| BGT 1.0, `0x076BE8` | `add ecx, 3` — `v = v + 3` |
+
+Everything a wrong reading could have coincided on matches, and one
+instruction does not. That is the shape of evidence this file trusts, and it
+was found by scanning both binaries for a window holding both clamp constants
+near a `0x7f` test — exactly one candidate in each file.
+
+**For the stock seed the 2010 generator never clamps at all**: 17 plus three
+per round is 20, 23, … 113, a plain arithmetic sequence, where the multiply
+variant collapses into `33 05 0f 2d` and then a three-byte cycle. The two
+share not one byte, which is why a 2010 title looks like "not a BGT
+executable" rather than like a corrupt one.
+
+**And the 2010 engine does not compress.** There is no LZ77 step and no
+trailing `" <length>"` to read one back from: the number after `printf` is the
+module's own length, so the container's payload *is* the module. That half is
+the reporter's, not read from the binary, so it carries a guard — the payload
+must begin with `noDebugInfo`, which is 0 or 1 and nothing else — and a 2010
+build that turns out to compress after all will say so loudly instead of
+handing back a blob that parses as nothing.
+
+Both the seed and the variant are searched, with the verified variant first so
+a tie cannot re-describe a module that already parsed. Checked: all six titles
+with an executable here report exactly what they did before.
+
+**What is not proven is the end-to-end case**, and it is worth stating because
+the obvious test is unavailable. No 2010 title is on this machine, and one
+cannot be built here either: the installed BGT 1.0 is the **demonstration**
+build, which says so itself — *"the compiler is not available in the
+demonstration version of BGT. If you wish to compile your game into a
+standalone executable, please consider purchasing the product"*. So the new
+path is covered by a fixture the toolkit builds itself, which exercises the
+chain rather than a real 2010 game. Q9 and Kringle Crash are the titles named
+in that issue, and either would settle it.
+
+**A third generation is reported to exist** — the betas, and the 2010-to-1.1
+transition — which this does not cover. `keygen` refuses an unknown variant
+name rather than falling back, so adding a third is one entry and cannot
+silently mis-open anything.
+
+### The 32 hex characters are a LICENCE MARK, not a checksum
+
+They have been used here only as the validity test above, which is all they
+need to be for finding the key. They are more than that: one AES block under
+a **second** built-in key — the same generator at seed `0x3F` — holding
+`printf<n>\0` and then an n-character licence code. The number beside them is
+which edition of BGT built the game, and the engine names its own three:
+*"BGT lite|pro unlimited|pro single version 1.0 was registered successfully"*,
+read out of BGT 1.0.
+
+BGT's 2014 build puts that key string through a further derivation before use;
+since its input is fixed the result is a constant, and `bgtlib.LICENCE_KEY_2014`
+carries it (reported in issue #6, found by emulating `0x4903D0` in the
+`bgt.exe` of 2014-06-01 — which is the 1.3 this toolkit is developed against).
+
+**It needs no separate verification because the plaintext verifies it**: a
+wrong key cannot produce the literal `printf`, ASCII digits and a NUL. It
+decodes Super Egg Hunt, Manamon 1 and The Gate — three developers, 2014 to
+2017 — and all three read `*` against edition 3.
+
+**All three carry that field byte for byte identically**, which is the other
+half of why it cannot be a checksum: nothing in it is derived from the module.
+So `*` against "pro unlimited" reads as a wildcard standing for "no particular
+game" rather than for an absent licence, and a "pro single" build is where a
+real code would be expected. None is on this machine to confirm that, so it is
+written down as the reading it is. It also explains a loose end: `build_overlay`
+hardcoded that exact constant as its default "container magic" and it worked,
+because it is the standard unlimited-build mark rather than anything per-title.
+
 ## UPX-packed runtimes
 
 Some titles ship the runtime compressed with UPX. The overlay is untouched --
@@ -10835,11 +10919,12 @@ been a line that cannot compile; here the loop's own test went with it,
 so `inv.get_keys().length()` was absent from the body entirely. That is
 the first time one of these has been shown to cost a CALL.
 
-### Found beside it: a call returning a VALUE TYPE is invisible to the
-### lost-call census
+### Found beside it, and now FIXED: a call returning a VALUE TYPE was
+### invisible to the lost-call census
 
-Diagnosed exactly and **not fixed**, because one change at a time is what
-made this section's own regression visible.
+Diagnosed here exactly and left for later, because one change at a time is
+what made this section's own regression visible. Taken since, and it is one
+line: `_record_call` in the branch that renders the call's own text.
 
 rage room's `mainmenu` loses an `input_box` and its three literals, which
 the bytecode audit reports and `bgt libcheck` confirms against the real
@@ -10878,13 +10963,65 @@ commonest such type in these games, so this is not a corner: every
 `input_box`, `string_replace` or `get_item_name` whose result the
 original discards is a call the census cannot report.
 
-That makes **three** known blind spots with one shape between them, and
-this file already names the other two: `coin::act`'s `update_sound_2d`,
-whose result a `Cast` overwrites in the value register without flushing,
+That made **three** known blind spots with one shape between them, and
+this file already named the other two: `coin::act`'s `update_sound_2d`,
+whose result a `Cast` overwrote in the value register without flushing,
 and `pause_menu`'s seventh `menu_add_item`, masked by six identical
-siblings. The wider signal -- call SITES against text occurrences, per
-body -- covers all three, and carries the hazard it always did: a call
-the renderer spells as syntax would never match its own text.
+siblings. The first is fixed, the second has no instance left in the
+corpus, and this one is fixed now -- so all three enumerated instances are
+closed, while the *masking* weakness is structural and remains: where two
+calls share a text and only one reached a statement, the other is not
+reported, which under-reports and is the safe way round.
+
+#### What it took, and why the oracle is the evidence rather than a title
+
+The record is gated on purity (`_record_call` returns early for a pure
+call) and `call_binds` is gated on the record, so the fix is to record in
+the `has_out` branch and let every existing rule follow. The **operator**
+branch beside it is deliberately left alone: `opAdd` and friends render as
+syntax, so recording them would have the census look for text that is
+never emitted, report it lost, and emit it a second time -- a false
+positive here writes a spurious statement, which is worse than the
+silence it replaces.
+
+**The shape had to fail before it could count.** `bgt oracle` gained
+`call_returning_a_value_type_into_a_dead_local`, which is rage room's
+`mainmenu` with an impure script function in place of `input_box` -- a
+script function rather than an engine one, because an engine call's purity
+comes from a checked list while a script function's is computed from its
+body, and this one writes a global:
+
+| | engine | recovery |
+|---|---|---|
+| before the fix | 1 | **0 -- WRONG** |
+| after it | 1 | 1 |
+
+52/53 shapes before, 53/53 after. This file records writing three inert
+shapes in the past -- ones that passed at the commit holding the defect --
+so a shape is now run both ways before it is believed.
+
+**And the corpus does not move at all**, which is the other half of the
+measurement. Every title with an executable on this machine recovers to
+the figures in the standings, to the line:
+
+| title | lines | calls | goto |
+|---|---|---|---|
+| Super Egg Hunt | 5,239 | 1,623 | 0 |
+| Battle of the Hunter | 4,269 | 1,334 | 0 |
+| The Gate | 34,031 | 8,681 | 0 |
+| Field Wars | 7,942 | 3,005 | 0 |
+| Manamon 1 | 82,156 | 26,510 | 0 |
+| Crazy Party | 174,166 | 90,194 | **0** |
+
+Crazy Party is the row that matters, for the reason it always is: 14 -> 30
+rejected a call-text threshold, -> 44 dropping the declaration-order rule,
+-> 90 forcing on the copy idiom. It does not move.
+
+**What is NOT measured**: rage room is source-only on this machine, so the
+one real game known to carry this defect could not be rebuilt and
+re-scored. Its `libcheck` row -- 291 of 292, the one difference being this
+very `input_box` -- is the number to re-take when that title can be built,
+and the expectation is 292.
 
 And `reset_rebels` has a second defect that the goto was hiding, worth
 recording because it is this file's own signature: its condition reads
@@ -12181,6 +12318,136 @@ bool destination so a uint ternary still goes to the value-merge).
 packaging parameters per build, so executables from releases without a verified
 profile are reported as unsupported (see `docs/nvgt.md`). That is deliberate. A
 profile is added only after it has been verified against real samples.
+
+**What was wrong was the WORDING, and that is fixed.** "Not recognised" reads
+as "not an audio game at all", so a deliberate refusal looked like a broken
+tool -- reported as issue #7, about two NVGT games detected as neither engine.
+`bgt identify` now records how many bytes are appended past the last PE
+section and says, when there are any, that this is probably a build whose
+packaging is unverified rather than a game of neither engine. It adds no
+detection: a profile still has to be verified against samples, and neither of
+those two games is on this machine, so **why they fail is assumed and not
+measured.**
+
+# Claims from outside, and what each one was worth
+
+Seven issues arrived on the repository, which is a new kind of input for this
+file: claims about the format from people who are not holding the same files.
+The method that applies is the one this document opens with -- read the
+authority, and check the instrument -- and applying it to a report rather than
+to a binary is worth recording, because the answers came out in three
+different kinds.
+
+| claim | how it was settled |
+|---|---|
+| #7 Recover fails on a game Identify calls NVGT | **true, from the code.** `recover` never called `identify`; it ran the BGT chain whatever it was handed, and `bgtlib` raises that exact string. No sample needed |
+| #6 BGT 1.0 adds 3 where later versions multiply | **true, from both binaries** -- the controlled comparison above |
+| #6 the 32 hex characters are a licence mark | **true**, on three titles, by a plaintext that verifies itself |
+| #3 an empty LEN2 string must occupy a `savedStrings` index | **refuted by measurement** -- see below |
+| #2 the dialects were named after a game's author | **true, and worse than reported** -- see below |
+| #6 BGT 1.0 does not compress | **taken on the reporter's word**, with a guard that fails loudly |
+| #7 two NVGT games detected as neither engine | **not checked.** Neither file is here; the cause is assumed |
+| #5 the overlay key is the hex-ASCII text | **already answered in the code it is about**, and not dismissed -- see below |
+| #1, #4 a third serialization dialect | **not checkable.** Nobody here has the module |
+
+**Three were fixed, one was refuted, one was corrected, and four could not be
+checked at all** -- and keeping those apart is the whole value of the table. A
+report is not a measurement, and neither is a rebuttal.
+
+## The empty-string claim, refuted by a module that is full of them
+
+`_string`'s LEN2 branch appends a new string to `savedStrings` only when it is
+non-empty, and the issue says an empty one must occupy an index too -- which
+would shift every later string index, silently, giving plausible wrong names.
+It points at a real line, and the asymmetry it describes is real: the `tagged`
+branch beside it has a separate empty tag, and this looked like that rule
+imported into a dialect that has no such case.
+
+The decisive question is not what the code looks like but whether such a
+string occurs. Manamon 1's module holds **31,834** of them, the first at its
+**fourth field**, with **76,718** back-references after it -- and the tail
+lands exactly on EOF at 0x24DC6F of 0x24DC6F with 0 parse errors, 784 of 784
+class blocks, and a byte-exact rewrite. Were they indexed, every one of those
+references would be off by a growing amount and nothing would land.
+
+So it is refuted for every build this can test, which is the honest scope: the
+reporter's module is claimed to be a *third* dialect, which nobody here has,
+and a 6,606-byte module with 29 string entries is small enough that an
+off-by-one might not show in it.
+
+## The author-named dialects, which were worse than the report said
+
+`as_module`'s own docstring opened *"Two serialization dialects turn up across
+Aaron Baker's BGT titles"*, and the issue is right that the dialect is a fact
+about the BGT **version**, never about who wrote the game: one developer with
+two versions of the toolkit produces two dialects, and two developers on one
+version produce the same one. That matters exactly when a new title does not
+parse, which is this file's own advice -- suspect a different BGT version
+before suspecting a modified engine.
+
+And the same docstring said the dialects *"differ only in how a string is
+written. Everything else ... is shared"*, which this document refutes at
+length under **The dialects differ in record layout, not only in strings** and
+calls the single biggest trap in the format. So the stale sentence was the
+more expensive half, and the reporter found it by its other symptom.
+
+Three files also pointed at a `STRIKE-DECOMP.md` that is not in this
+repository and should not be, since per-title findings do not belong here.
+All four are corrected.
+
+**The lesson is about this file's own kind of rot.** A number goes stale and
+gets re-derived; a *docstring* goes stale and nothing re-derives it. Both of
+these were refuted by findings recorded in this very document, which is to say
+the project knew better and one of its own files did not.
+
+## The key claim, which is answered where it is made
+
+Issue #5 says the engine builds its AES key from the **hex-ASCII text** of the
+seed material rather than from the digest bytes, and proposes changing
+`aes_key_for_seed` to match. Taking that would open nothing: ten titles
+currently decrypt to a valid container header, which a wrong key cannot
+produce.
+
+But the claim is not nonsense, and the answer was already in the docstring of
+the function it is about: BGT uses the AES reference API, whose `makeKey` takes
+key material **as 64 hex characters** and parses them straight back into these
+32 bytes. So the hex is how the key material goes *in*, not what the key is,
+and hashing the hex text would be that conversion applied twice.
+
+Two things keep this from being a dismissal. The report describes a decryption
+that *"almost works -- the header reads, the bodies do not"*, which no wrong
+key can produce under AES-CBC, where a wrong key makes the first block garbage
+and the header is the first block. And **issue #6 independently reports two
+earlier encryption methods** this toolkit does not handle, which is a real gap
+of exactly this kind -- so #5 may be a garbled account of something true about
+a 2010-era build rather than about the current one.
+
+What would settle any of #1, #3, #4 and #5 is the module itself. All five of
+those issues describe one 6,606-byte artefact with one sha256, and all five
+report **overlay 0xDDC00 with seed 0x11** -- which is BGT 1.3's stub length,
+the same as Super Egg Hunt's. A module at that offset came from the engine
+whose generator and dialect are verified here, so "a third dialect" and "a
+different key derivation" are hard to hold together with the reporter's own
+numbers. That is a reason to ask for the file, not a reason to close the issue.
+
+## Recovering a game now picks the engine's half for you
+
+`engine.py` exists to decide which half an executable needs, and claims an
+engine only when that engine's own verifying layer agrees. `bgt recover` never
+asked it: it ran the BGT chain on everything, so an NVGT game failed with `no
+xproc10 trailer -- not a BGT executable` **after `bgt identify` had just named
+the engine correctly** -- which reads as a broken tool rather than as the wrong
+command, and is how it was reported.
+
+`bgt_project.recover_any` is the dispatcher, and it is one function because the
+CLI and the GUI are two callers of one question -- the GUI calls
+`bgt_project.recover` directly, so a fix in the CLI alone would have left the
+window that the reporter actually used still broken.
+
+Where the two halves take different options, the ones that do not apply are
+**named** rather than dropped: a recovery that silently ignored "bring the
+game's data" would come out unplayable with nothing said about it, which is
+this file's own worst failure shape.
 
 # Conventions
 
