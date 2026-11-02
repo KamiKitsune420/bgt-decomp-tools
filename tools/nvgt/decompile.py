@@ -179,6 +179,55 @@ def _negative_constant(text: str) -> bool:
         return False
 
 
+def _initialiser_declarations(fd, stmts: list[str], skip: str) -> list[str]:
+    """The locals a generated global initialiser refers to and never declares.
+
+    `Structurer.render()` emits statements; the declaration hoisting that
+    gives an ordinary function its locals lives in `_body`, and a global's
+    initialiser never goes through it. `cs`'s server is the cost:
+
+        string __nvgt_global_init_64() {
+            string changes;
+            local_1 = (("\r\nnew in " + version) + "...");
+            changes = local_1;
+            return changes;
+        }
+
+    -- `Error: 'local_1' is not declared`, which is the one error that server
+    had both before and after the type fixes beside this.
+
+    A name already declared by one of the statements is skipped, because a
+    second declaration is an error of its own. That is what the generated
+    `__nvgt_out_*` and `__nvgt_held_*` locals are: they carry their type on
+    the statement, which is the shape the pattern below looks for -- a type
+    token immediately before the name.
+    """
+    body = "\n".join(stmts)
+    out = []
+    for off, dt in sorted(fd.var_types.items()):
+        if off <= 0 or not fd.is_named(off):
+            continue
+        name = fd.name_of(off)
+        if name == skip or dt is None:
+            continue
+        #: the same scalar test `_body` applies, for the same reason: an
+        #: object local is constructed where the bytecode constructs it
+        if not (dt.obj_type is None or dt.obj_type.kind == "enum"
+                or dt.is_object_handle or dt.obj_type.name == "string"):
+            continue
+        quoted = re.escape(name)
+        if not re.search(r"(?<![A-Za-z_0-9])%s\b" % quoted, body):
+            continue
+        #: `<type> <name> =` or `<type> <name>;` is already a declaration
+        if re.search(r"(?<![A-Za-z_0-9:])[A-Za-z_][\w:<>@\[\]]*\s+%s\s*[;=]"
+                     % quoted, body):
+            continue
+        typename = dt.format().replace("&", "").strip()
+        if typename:
+            out.append("%s %s;" % (typename, name))
+    return out
+
+
 def _read_slots(instrs: list[Instr]) -> set[int]:
     """Every frame slot some instruction in this body READS.
 
@@ -7341,6 +7390,7 @@ class ModuleDecompiler:
         if not m.globals:
             return
         init_stmts: dict[str, list[str]] = {}
+        init_decls: dict[str, list[str]] = {}
         for g in m.globals:
             if g.init_func is not None and g.init_func.bytecode:
                 try:
@@ -7348,8 +7398,11 @@ class ModuleDecompiler:
                     ev = fd.run()
                     st = Structurer(ev, g.init_func)
                     init_stmts[g.name] = st.render()
+                    init_decls[g.name] = _initialiser_declarations(
+                        fd, init_stmts[g.name], g.name)
                 except Exception:
                     init_stmts[g.name] = []
+                    init_decls[g.name] = []
         helpers = []
         for index, g in enumerate(m.globals, start_index):
             list_expr = self._global_list_expr(g)
@@ -7395,13 +7448,16 @@ class ModuleDecompiler:
                 self.emit(f"{g.type.format()} {g.name} = {helper}();")
                 local_type = copy.copy(g.type)
                 local_type.is_readonly = False
-                helpers.append((helper, local_type.format(), g.name, stmts))
+                helpers.append((helper, local_type.format(), g.name, stmts,
+                                init_decls.get(g.name) or []))
             else:
                 self.emit(decl)
         self.emit()
-        for helper, typename, name, stmts in helpers:
+        for helper, typename, name, stmts, decls in helpers:
             self.emit(f"{typename} {helper}() {{")
             self.emit(f"    {typename} {name};")
+            for decl in decls:
+                self.emit("    " + decl)
             for stmt in stmts:
                 self.emit("    " + stmt)
             self.emit(f"    return {name};")

@@ -9258,16 +9258,44 @@ compiling and starting from recovered source. Each of those is a stronger
 claim than a clean compile, because a global initialiser that throws stops
 the program and `-c` never runs one.
 
-Two things are left on that list and neither is this work's:
+##### ...and a generated global initialiser declares nothing
 
-- **The Gate needs `elias`**, which no stock BGT registers, so `elias theme;`
-  fails and every `theme.x()` after it is `Illegal operation on 'int&'` -- one
-  missing engine type and a cascade, the same shape as Manamon 2's
-  `protected`.
-- **The `cs` server has one error, and it is in the baseline too**:
-  `__nvgt_global_init_64` uses `local_1` and declares it nowhere, so the
-  declaration hoisting does not reach a generated global initialiser. Down
-  from the nine this work briefly added, and byte-identical in both trees.
+The one error left on the `cs` server after all of that, and it was in the
+baseline too. `Structurer.render()` emits statements; the declaration
+hoisting that gives an ordinary function its locals lives in `_body`, and a
+global's initialiser never goes through it -- so the helper declared the
+global and nothing else:
+
+```
+string __nvgt_global_init_64() {
+    string changes;
+    local_1 = (("\r\nnew in " + version) + "...");   // never declared
+    changes = string();
+    changes = local_1;
+    return changes;
+}
+```
+
+`_initialiser_declarations` supplies them, with the same scalar test `_body`
+applies and for the same reason: an object local is constructed where the
+bytecode constructs it. Two things it will not do. A name one of the
+statements already declares is skipped, because a second declaration is an
+error of its own -- and that is exactly what the generated `__nvgt_out_*` and
+`__nvgt_held_*` locals are, since they carry their type on the statement. And
+a name that occurs only inside a string literal is still declared,
+deliberately: an unused declaration compiles and a missing one does not, so
+where the two cannot be told apart this takes the harmless side.
+
+**With it, the `cs` server compiles and runs.** `bgt drive` reaches its table
+on seven of the eight titles that can be built here -- Super Egg Hunt, Battle
+of the Hunter, rage room, constant velocity, Field Wars, the `cs` client and
+the `cs` server -- which for a 9,700-line networked game recovered from a
+stripped module is the strongest end-to-end result in this file.
+
+The eighth is The Gate, and it is not this work's: it **needs `elias`**, which
+no stock BGT registers, so `elias theme;` fails and every `theme.x()` after it
+is `Illegal operation on 'int&'`. One missing engine type and a cascade, the
+same shape as Manamon 2's `protected`.
 
 #### ...and `duplicated_call` was counting CONVERSIONS
 

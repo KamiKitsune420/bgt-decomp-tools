@@ -523,5 +523,94 @@ class UnsignedStoreTests(unittest.TestCase):
         fd._emit_assign(9, Atom("call", "(0 - 1)"))
         self.assertEqual(fd.events, [("int", "local_9 = (0 - 1);")])
 
+class InitialiserDeclarationTests(unittest.TestCase):
+    """A generated global initialiser needs its locals declared.
+
+    `Structurer.render()` emits statements; the declaration hoisting that
+    gives an ordinary function its locals lives in `_body`, and a global's
+    initialiser never goes through it. `cs`'s server came out
+
+        string __nvgt_global_init_64() {
+            string changes;
+            local_1 = (("\r\nnew in " + version) + "...");
+            changes = local_1;
+            return changes;
+        }
+
+    -- `Error: 'local_1' is not declared`, the one error that server had both
+    before and after the type fixes beside it.
+    """
+
+    def _fd(self, types, names=None):
+        from decompile import FuncDecompiler
+        fd = object.__new__(FuncDecompiler)
+        fd.var_types = dict(types)
+        fd.var_names = dict(names or {off: "local_%d" % off for off in types})
+        return fd
+
+    def _string(self):
+        from decompile import DataType, TypeInfo
+        return DataType(obj_type=TypeInfo(name="string"))
+
+    def _int(self):
+        from decompile import DataType, PRIMITIVE_TOKENS
+        return DataType(token_type=PRIMITIVE_TOKENS["int"])
+
+    def test_a_local_the_statements_USE_is_declared(self):
+        from decompile import _initialiser_declarations
+        fd = self._fd({1: self._string()})
+        got = _initialiser_declarations(
+            fd, ['local_1 = ("a" + version);', "changes = local_1;"],
+            "changes")
+        self.assertEqual(got, ["string local_1;"])
+
+    def test_a_local_nothing_mentions_is_NOT_declared(self):
+        """A declaration nothing reads is noise, and this file counts an
+        unused declaration as something to avoid rather than add."""
+        from decompile import _initialiser_declarations
+        fd = self._fd({1: self._string(), 2: self._int()})
+        got = _initialiser_declarations(
+            fd, ["changes = local_1;"], "changes")
+        self.assertEqual(got, ["string local_1;"])
+
+    def test_one_the_statements_ALREADY_declare_is_skipped(self):
+        """A second declaration is an error of its own, and that is exactly
+        what the generated `__nvgt_out_*` and `__nvgt_held_*` locals are:
+        they carry their type on the statement."""
+        from decompile import _initialiser_declarations
+        fd = self._fd({4: self._int()}, {4: "__nvgt_held_4_12"})
+        got = _initialiser_declarations(
+            fd, ["int __nvgt_held_4_12 = 7;",
+                 "changes = __nvgt_held_4_12;"], "changes")
+        self.assertEqual(got, [])
+
+    def test_the_GLOBAL_s_own_name_is_skipped(self):
+        """The helper declares it already, so a second one would not
+        compile."""
+        from decompile import _initialiser_declarations
+        fd = self._fd({1: self._string()}, {1: "changes"})
+        self.assertEqual(
+            _initialiser_declarations(fd, ["changes = \"a\";"], "changes"),
+            [])
+
+    def test_a_substring_of_another_name_is_not_a_match(self):
+        from decompile import _initialiser_declarations
+        fd = self._fd({1: self._string()})
+        self.assertEqual(
+            _initialiser_declarations(fd, ["changes = local_10;"], "changes"),
+            [])
+
+    def test_a_name_only_inside_a_STRING_still_counts(self):
+        """Deliberately: a declaration nothing reads compiles, and refusing
+        one that is read does not. The other way round is an error, so where
+        the two cannot be told apart this takes the harmless side."""
+        from decompile import _initialiser_declarations
+        fd = self._fd({1: self._string()})
+        self.assertEqual(
+            _initialiser_declarations(fd, ['changes = "local_1";'],
+                                      "changes"),
+            ["string local_1;"])
+
+
 if __name__ == "__main__":
     unittest.main()
