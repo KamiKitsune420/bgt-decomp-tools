@@ -144,6 +144,9 @@ def test_the_window_disables_its_controls_while_working(frame):
     twice; disabling is how that is prevented, so it has to really disable."""
     frame.busy(True)
     assert not frame.recover_button.IsEnabled()
+    # Every button, not just the one the test happens to name: a window that
+    # leaves one enabled invites a second job on top of the first.
+    assert not frame.drive_button.IsEnabled()
     assert not frame.exe.IsEnabled()
     frame.busy(False)
     assert frame.recover_button.IsEnabled()

@@ -228,6 +228,27 @@ def _initialiser_declarations(fd, stmts: list[str], skip: str) -> list[str]:
     return out
 
 
+def _handle_comparison(pair, flagged: bool) -> bool:
+    """Does this comparison want `is` rather than `==`?
+
+    `CmpPtr` says so outright, and it is the only opcode that sets the flag.
+    **A `null` operand says so too**, whatever opcode produced it: `==` on a
+    handle asks the type for an `opEquals` and `null` has none, which is what
+    the engine warns about --
+
+        if (!((local_6 is local_5) || (null == local_5)))
+
+    -- one site in the corpus, Crazy Party's `Combattant`, and one of that
+    title's two remaining warnings. A warning matters here because BGT shows
+    one in a modal dialog and waits on it, so an unattended compile stops.
+    """
+    if flagged:
+        return True
+    return pair is not None and any(
+        getattr(a, "kind", None) == "null" or getattr(a, "text", None) == "null"
+        for a in pair)
+
+
 def _read_slots(instrs: list[Instr]) -> set[int]:
     """Every frame slot some instruction in this body READS.
 
@@ -2768,7 +2789,8 @@ class FuncDecompiler:
             return
         if name in TEST_OPS:
             op = TEST_OPS[name]
-            if self.cmp_pair is not None and self.cmp_is_handle and op in ("==", "!="):
+            if op in ("==", "!=") and _handle_comparison(
+                    self.cmp_pair, self.cmp_is_handle):
                 op = "is" if op == "==" else "!is"       # handle identity
             self.cmp_is_handle = False
             if self.cmp_pair is not None:
@@ -5632,7 +5654,8 @@ class FuncDecompiler:
     def _taken_condition(self, ins: Instr) -> str:
         """Condition under which a jump instruction transfers control."""
         op = JUMP_OPS[ins.name]
-        if self.cmp_pair is not None and self.cmp_is_handle and op in ("==", "!="):
+        if op in ("==", "!=") and _handle_comparison(self.cmp_pair,
+                                                     self.cmp_is_handle):
             op = "is" if op == "==" else "!is"
         self.cmp_is_handle = False
         if self.cmp_pair is not None:

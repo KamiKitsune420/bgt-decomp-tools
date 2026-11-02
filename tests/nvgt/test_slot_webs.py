@@ -612,5 +612,55 @@ class InitialiserDeclarationTests(unittest.TestCase):
             ["string local_1;"])
 
 
+class HandleComparisonTests(unittest.TestCase):
+    """`null` compared with `==` is a handle comparison, whatever made it.
+
+    AngelScript's `==` on a handle asks the type for an `opEquals`, and `null`
+    has none -- which is what the engine warns about. `cmp_is_handle` is set
+    by `CmpPtr` and by nothing else, so a comparison that reached `null`
+    through any other opcode kept `==`:
+
+        if (!((local_6 is local_5) || (null == local_5)))
+
+    One site in the corpus, Crazy Party's `Combattant`, and one of that
+    title's two remaining warnings -- which matter because BGT shows a warning
+    in a modal dialog and waits on it.
+    """
+
+    def _pair(self, left, right):
+        from decompile import Atom
+        return (Atom(*left), Atom(*right))
+
+    def test_CmpPtr_still_says_so_outright(self):
+        from decompile import _handle_comparison
+        self.assertTrue(_handle_comparison(
+            self._pair(("var", "a"), ("var", "b")), True))
+
+    def test_a_null_operand_says_so_too(self):
+        from decompile import _handle_comparison
+        self.assertTrue(_handle_comparison(
+            self._pair(("null", "null"), ("var", "local_5")), False))
+        self.assertTrue(_handle_comparison(
+            self._pair(("var", "local_5"), ("null", "null")), False))
+
+    def test_a_null_reached_as_a_CONSTANT_says_so(self):
+        """`ClrVPtr` binds `Atom("const", "null", 2)`, so the kind is not the
+        only spelling the text arrives under."""
+        from decompile import _handle_comparison
+        self.assertTrue(_handle_comparison(
+            self._pair(("const", "null"), ("var", "local_5")), False))
+
+    def test_an_ordinary_comparison_is_left_alone(self):
+        from decompile import _handle_comparison
+        self.assertFalse(_handle_comparison(
+            self._pair(("var", "local_1"), ("const", "0")), False))
+        self.assertFalse(_handle_comparison(
+            self._pair(("var", "x"), ("const", "null_count")), False))
+
+    def test_no_pair_is_not_a_handle_comparison(self):
+        from decompile import _handle_comparison
+        self.assertFalse(_handle_comparison(None, False))
+
+
 if __name__ == "__main__":
     unittest.main()

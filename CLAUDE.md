@@ -2270,9 +2270,26 @@ residual goto count was re-derived from 0 to 14 -- and **AngelScript has no
 to 0, and the standings now show **0 gotos at 173,813 lines with 90,194 calls
 read back**.
 
-What is left there is the two warnings, which are a different pattern:
+##### ...and the two warnings were `null` compared with `==`
+
 `if (!((local_6 is local_5) || (null == local_5)))` compares a handle against
-`null` with `==` where the language wants `is`. Worth a look, and not a goto.
+`null` with `==` where the language wants `is`. **`null` is a handle
+comparison by construction** -- `==` asks the type for an `opEquals` and
+`null` has none, which is exactly what the engine warns about -- so the
+operator does not need an opcode to vouch for it.
+
+`cmp_is_handle` is set by `CmpPtr` and by nothing else, so a comparison that
+reached `null` through any other opcode kept `==`. `_handle_comparison` is
+the one answer now, consulted by **both** places that choose the operator:
+`_taken_condition`, which renders a jump's condition, and the `TEST_OPS`
+branch, which renders a comparison used as a value inside a larger `&&`/`||`.
+Two places answering one question with one of them weaker is the failure this
+file keeps recording, and the site in the corpus is the second one.
+
+It is **one site in one title**: the other seven titles that can be built
+here render byte-identical, and `bgt oracle` is 52/52. A warning matters
+because BGT shows one in a modal dialog and waits on it, so an unattended
+compile stops there.
 
 The lesson is the one this file keeps paying for from a new direction: the
 goto count had been corrected and **the sentences that depended on it had
@@ -3665,6 +3682,12 @@ These are audio games, and that decides the design rather than decorating it:
   button that cannot stop what it claims to invites you to believe a
   half-written output folder is consistent. The controls disable instead,
   and closing mid-job asks first.
+- **A "Check it runs" button**, because that is the question the other three
+  do not answer. It drives the recovered project through `bgt drive` -- no
+  sound, no window -- and reports whether the engine answered the key it was
+  given, which means every global initialised and the module loaded. A
+  recovery that compiles can still fail to start, and this file records
+  several that did.
 
 ## The stock library files come from BGT, not from the module
 
@@ -6738,8 +6761,9 @@ only rules that reach it are the "any call invalidates" kind. So the
 state of this is: the code is broader than its justification, the breadth
 is measured across five titles and costs nothing, and the question it
 raises -- whether a member read snapshotted across a call should go stale
-unconditionally, the way a global's does -- is the next fold rule to
-settle and is **not** settled here.
+unconditionally, the way a global's does -- is measured on eight titles
+now and **not adopted**: see **Measured on eight titles, and not
+adopted**, which carries the one-clause change and its numbers.
 
 #### What it cost, measured on all five
 
@@ -8190,6 +8214,55 @@ last literal assigned.
 
 #### The two that are left are one line, and they are the open question
 
+#### Measured on eight titles, and not adopted -- the seventh rejection
+
+This asked, for a long time, whether a member read snapshotted across a call
+should go stale unconditionally the way a global's does, and said *"two sites
+now say yes and no measurement says what it would cost."* The measurement
+exists now.
+
+The change is **one clause**: in the `value.kind == "prop"` branch of
+`_stale_fold`, after the `_mutates` test, also
+
+```python
+for text in self.stmt_texts[ran[1]:]:
+    if _ANY_CALL.search(_mask_strings(text)):
+        return declarable
+```
+
+which is exactly what `_stale_global` already does, for the same reason one
+scope out: what moves the object may be a method on something ELSE holding a
+handle to it, which no receiver test can see.
+
+| | |
+|---|---|
+| byte-identical | Super Egg Hunt, Battle of the Hunter, Field Wars, rage room, cs client, constant velocity |
+| moved | The Gate +35 lines, cs server +16 |
+| residual gotos, dangling, unbalanced, splits, call counts | **unchanged everywhere** |
+| ground truth | cs server **194 of 196**, cs client **216 of 218** -- exactly as before |
+
+So it is **safe and buys nothing here**, and the 51 lines are the shape the
+sixth rejection already records: a string concatenation decomposed into one
+statement per link, because every literal is constructed into a named scratch
+slot and a call sits between the snapshot and its read.
+
+```
+string local_9;
+local_9 = ("destroymsound " + local_6);
+local_6 = (local_9 + local_10);
+```
+
+**The two sites that motivated it are in the two titles this could not be
+measured against**: Crazy Party's `DeRetournable::bouge` and Manamon 1's
+healing items. Both are 80,000+ line recoveries, and this file's rule is to
+adopt on a measurement rather than on an argument -- so it is written down
+here with its eight-title result, and the next attempt starts from that
+instead of from the question.
+
+What would settle it: run those two titles with the clause above and compare
+the residual goto count, which is the number every over-broad fold change in
+this file has been caught by, against 0 and 0.
+
 `DeRetournable::bouge` snapshots both coordinates into declared locals
 and compares them after the move:
 
@@ -8206,9 +8279,10 @@ holds a handle to it. So no receiver-based test can see it, and neither
 can this rule -- which makes it the second piece of evidence for the
 question the ninth rule left open, after the Manamon 1 healing items:
 **should a member read snapshotted across a call go stale
-unconditionally, the way a global's does?** Two sites now say yes and no
-measurement says what it would cost. That is the next fold rule to
-settle, and it is still not settled here.
+unconditionally, the way a global's does?** Measured on eight titles and
+**not adopted** -- safe, and it buys nothing there, while the two sites
+that motivated it are in the two titles it could not be measured
+against. The section above carries the clause and the figures.
 
 ### The signatures, swept
 

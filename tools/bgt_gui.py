@@ -44,10 +44,11 @@ import threading
 import traceback
 
 try:                      # installed as a package
-    from . import bgt_compile, bgt_project, engine
+    from . import bgt_compile, bgt_drive, bgt_project, engine
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import bgt_compile
+    import bgt_drive
     import bgt_project
     import engine
 
@@ -154,8 +155,15 @@ class Frame(wx.Frame):
         self.identify_button = wx.Button(panel, label="&Identify engine")
         self.recover_button = wx.Button(panel, label="&Recover project")
         self.compile_button = wx.Button(panel, label="&Compile a script...")
+        #: The question the other three buttons do not answer. A recovery
+        #: that compiles can still fail to start -- a global initialiser that
+        #: throws stops the program, and `-c` never runs one -- and this
+        #: project has a record of exactly that. It makes no sound and opens
+        #: no window, so it is safe to press while somebody is listening to
+        #: something else.
+        self.drive_button = wx.Button(panel, label="Check it r&uns")
         for button in (self.identify_button, self.recover_button,
-                       self.compile_button):
+                       self.compile_button, self.drive_button):
             buttons.Add(button, 0, wx.RIGHT, 6)
         body.Add(buttons, 0, wx.TOP, 10)
 
@@ -172,6 +180,7 @@ class Frame(wx.Frame):
         self.identify_button.Bind(wx.EVT_BUTTON, self.on_identify)
         self.recover_button.Bind(wx.EVT_BUTTON, self.on_recover)
         self.compile_button.Bind(wx.EVT_BUTTON, self.on_compile)
+        self.drive_button.Bind(wx.EVT_BUTTON, self.on_drive)
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
         self.worker: threading.Thread | None = None
@@ -203,7 +212,8 @@ class Frame(wx.Frame):
 
     def busy(self, running: bool) -> None:
         for control in (self.identify_button, self.recover_button,
-                        self.compile_button, self.exe, self.out,
+                        self.compile_button, self.drive_button,
+                        self.exe, self.out,
                         self.compile_check, self.with_data,
                         self.extract_data, self.game_files, self.make_zip):
             control.Enable(not running)
@@ -342,6 +352,59 @@ class Frame(wx.Frame):
             return report.summary()
 
         self.run("Compile a script", job)
+
+    def on_drive(self, _event) -> None:
+        """Start the recovered game and read an answer back out of it.
+
+        The output folder is the project, so this follows Recover without
+        asking for anything else. What it reports is whether the engine
+        answered at all -- which means every global initialised and the
+        module loaded -- and that is a stronger claim than a clean compile.
+        """
+        if bgt_compile.find_compiler() is None:
+            wx.MessageBox("BGT was not found, so nothing can be run.",
+                          "No compiler", wx.OK | wx.ICON_WARNING, self)
+            return
+        project = self._need(self.out, "Output folder")
+        if not project:
+            return
+        if not os.path.isdir(project):
+            wx.MessageBox("There is no folder at %s yet. Recover a project "
+                          "first." % project,
+                          "Nothing to run", wx.OK | wx.ICON_WARNING, self)
+            return
+
+        def job():
+            self.say("Starting %s with no sound and no window." % project)
+            self.say("Holding the down arrow and asking the game what it "
+                     "sees.")
+            canned = bgt_drive.SCENARIOS["keys"]
+            out = bgt_drive.drive(project, canned["watch"],
+                                  hold=canned["hold"],
+                                  duration=canned["duration"],
+                                  every=canned["every"])
+            if not out["rows"]:
+                self.say("  the game did not report: %s" % out["outcome"])
+                for line in out["errors"][:12]:
+                    self.say("    %s" % line)
+                return ("it did not start -- %s. The lines above are what "
+                        "the engine said." % out["outcome"])
+            for row in out["rows"]:
+                self.say("  %s ms   %s" % (row.get("ms", "?"),
+                                           "   ".join(
+                                               "%s = %s" % (col, row.get(col, ""))
+                                               for col in out["watch"])))
+            want = canned["expect"]
+            missed = [col for col, value in want.items()
+                      if value not in [r.get(col, "") for r in out["rows"]]]
+            if missed:
+                return ("it started, but %s never answered as expected -- "
+                        "so the recovery reads input differently from the "
+                        "original." % ", ".join(missed))
+            return ("it RUNS: every global initialised, the module loaded, "
+                    "and the game answered the key it was given.")
+
+        self.run("Check it runs", job)
 
 
 def main(argv=None) -> int:
