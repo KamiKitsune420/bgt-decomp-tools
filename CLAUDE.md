@@ -2112,10 +2112,10 @@ checks say:
 | Field Wars | 7,942 | 0 | 0 | yes | 3,005 | **yes** |
 | cs client | 7,963 | 0 | 0 | yes | 2,858 | **yes** |
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
-| cs server | 9,692 | 0 | 0 | yes | 3,060 | **yes** |
-| The Gate | 33,995 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
-| Manamon 1 | 82,099 | 0 | 0 | yes | 26,507 | not asked -- **wrong engine**, see below |
-| Crazy Party | 173,813 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
+| cs server | 9,712 | 0 | 0 | yes | 3,060 | **yes** |
+| The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
+| Manamon 1 | 82,156 | 0 | 0 | yes | 26,510 | not asked -- **wrong engine**, see below |
+| Crazy Party | 174,166 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
 | Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
 | Psycho Strike | -- | -- | -- | -- | -- | **not on this machine any more** |
 | Manamon 2 | -- | -- | -- | -- | -- | **not on this machine any more** |
@@ -2144,6 +2144,13 @@ every over-broad fold or structurer change in this file was caught by --
 14 -> 30 for a call-text threshold, -> 44 for dropping the declaration order
 rule, -> 90 for forcing on the copy idiom -- and it is **0** here, with 46
 more calls read back than the figure this table used to carry.
+
+Its sweeps, for the record, since this is the first time they have been
+taken on this title at the current code: `self_identical` 3, `tautology` 2,
+`same_argument` 30, `collapsed_chain` 3, `empty_arm` 70, `duplicated_call`
+21 -- and Manamon 1's are 1, **0**, 0, 0, 9, 0. Every one is at or below the
+figure this file records for it, and Manamon 1's tautologies are 0 where it
+records 4.
 
 **What the compiler says is now a note rather than a column**, because
 the two are different questions and the column kept conflating them. A
