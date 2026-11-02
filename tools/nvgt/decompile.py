@@ -3533,6 +3533,13 @@ class FuncDecompiler:
                 if any(_mutates(text, owner) or _mutates(text, value.text)
                        for text in self.stmt_texts[ran[1]:]):
                     return declarable
+                #: EXPERIMENT: ...and through ANY call, the way a global's
+                #: does. What moves the object may be a method on something
+                #: ELSE that holds a handle to it, which no receiver test can
+                #: see.
+                for text in self.stmt_texts[ran[1]:]:
+                    if _ANY_CALL.search(_mask_strings(text)):
+                        return declarable
             # **...and so does a GLOBAL, which has no receiver at all.**
             # `pause_menu` keeps `current_bgm` across the menu music and
             # restores it on the way out; folded, the restore read the
@@ -4267,6 +4274,14 @@ class FuncDecompiler:
         if numeric_type:
             a = self._normalize_arg(a, numeric_type)
             b = self._normalize_arg(b, numeric_type)
+        #: **The third place that builds a comparison**, and the one Crazy
+        #: Party's `null == local_5` came through: here the result goes into
+        #: a SLOT rather than being tested by a jump, so neither
+        #: `_taken_condition` nor the `TEST_OPS` branch sees it. `==` on a
+        #: handle asks the type for an `opEquals` and `null` has none, which
+        #: is what the engine warns about.
+        if op in ("==", "!=") and _handle_comparison((a, b), False):
+            op = "is" if op == "==" else "!is"
         self._bind(d, Atom("call", f"({a.text} {op} {b.text})"))
 
     def _emit_global_write(self, g: str, a: Atom) -> None:
@@ -4658,6 +4673,25 @@ class FuncDecompiler:
                     self.temps[off] = Atom("var", local, data_type=output_type)
                 else:
                     arg = self.var_atom(off)
+                    #: **A named slot needs ordering too.** It passes
+                    #: straight through with no synthesised local, so
+                    #: nothing recorded that the call writes it -- and
+                    #: `_order_out_arguments` could not know to run the call
+                    #: before the first statement that reads it.
+                    #: `input_recorder::rand` is the shape:
+                    #:
+                    #:     211  CALLSYS dictionary::get   ; fills slot 5
+                    #:     215  i64TOi 3 5                ; int(local_5)
+                    #:
+                    #: which emitted `local_1 = int(local_5);` ahead of the
+                    #: call, converting whatever slot 5 held before.
+                    #: `rec_timer::real_elapsed` is the same shape and was
+                    #: fixed by accident of scope -- its receiver is a
+                    #: global, so the global staleness rule reached it.
+                    #:
+                    #: `out_locals` exists for that deferral alone, so the
+                    #: name goes in it rather than in a second list.
+                    out_locals.append(self.name_of(off))
             args.append(arg)
         # popping yields parameter order directly (verified CALL + CALLSYS)
         args = [self._deref(a) for a in args]

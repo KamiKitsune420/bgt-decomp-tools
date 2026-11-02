@@ -2280,16 +2280,31 @@ operator does not need an opcode to vouch for it.
 
 `cmp_is_handle` is set by `CmpPtr` and by nothing else, so a comparison that
 reached `null` through any other opcode kept `==`. `_handle_comparison` is
-the one answer now, consulted by **both** places that choose the operator:
-`_taken_condition`, which renders a jump's condition, and the `TEST_OPS`
-branch, which renders a comparison used as a value inside a larger `&&`/`||`.
-Two places answering one question with one of them weaker is the failure this
-file keeps recording, and the site in the corpus is the second one.
+the one answer now, and **there are THREE places that choose the operator,
+not two**: `_taken_condition`, which renders a jump's condition; the
+`TEST_OPS` branch, which renders a comparison used as a value inside a larger
+`&&`/`||`; and `_binop_vars`, which builds the three-operand form whose
+result goes into a SLOT rather than being tested by a jump.
 
-It is **one site in one title**: the other seven titles that can be built
-here render byte-identical, and `bgt oracle` is 52/52. A warning matters
-because BGT shows one in a modal dialog and waits on it, so an unattended
-compile stops there.
+All three ask now, and a test pins each of them plus the count: if a
+fourth place to build a comparison appears, that test says so.
+
+**And Crazy Party's one site is STILL `null == local_5`**, which is worth
+recording rather than smoothing over. Five other null comparisons in the
+same file render `!is null` correctly, so the mechanism works; that one does
+not reach any of the three. It is inside a `||`, so the operand's text is
+built before the merge folds it, and where is not yet established -- a trace
+of it was running when this was written.
+
+So the state is: three places that build a comparison now give a `null`
+operand the operator the language wants, every title that can be built here
+renders byte-identical, `bgt oracle` is 52/52, and **one comparison in the
+whole corpus is still wrong**. It is kept for the reason the
+`FREE`-must-exist condition is: `_binop_vars` building `==` for a handle is
+a wrong claim whatever the corpus currently contains.
+
+A warning matters here because BGT shows one in a modal dialog and waits on
+it, so an unattended compile stops there.
 
 The lesson is the one this file keeps paying for from a new direction: the
 goto count had been corrected and **the sentences that depended on it had
@@ -6761,9 +6776,9 @@ only rules that reach it are the "any call invalidates" kind. So the
 state of this is: the code is broader than its justification, the breadth
 is measured across five titles and costs nothing, and the question it
 raises -- whether a member read snapshotted across a call should go stale
-unconditionally, the way a global's does -- is measured on eight titles
-now and **not adopted**: see **Measured on eight titles, and not
-adopted**, which carries the one-clause change and its numbers.
+unconditionally, the way a global's does -- is **adopted**: see
+**Measured, misread once, and ADOPTED**, which carries the clause, its
+numbers, and the twelve-tautology defect in The Gate that settled it.
 
 #### What it cost, measured on all five
 
@@ -6880,9 +6895,29 @@ and nothing can order it.
 `rec_timer::real_elapsed` is the same shape and is fixed, by accident of
 scope: its receiver is the global `recorder`, so the ninth rule above
 promotes the value and the call lands at its own position. `rand`'s
-receiver is `system_data`, a member, so nothing reaches it. Fixing it
-properly means registering a named slot's out-call too, which is a
-change to what gets deferred and wants its own measurement.
+receiver is `system_data`, a member, so nothing reaches it.
+
+**Fixed, by registering the named slot's own name.** That is what this
+entry prescribed -- *"a change to what gets deferred and wants its own
+measurement"* -- and `out_locals` is the list to put it in, because the
+deferral is the only thing that reads it. `_order_out_arguments` then
+sees a statement mentioning that name, writes the call out first, and
+every pending expression reads the result from a local of its own.
+
+Measured on the eight titles that can be built here: **six are
+byte-identical**, The Gate gains one line and the `cs` server four, and
+every one of those five is a `bool __nvgt_ret_N` capturing a
+`dictionary::get` whose result the recovery now takes at the call rather
+than folding later. Not one residual goto, dangling goto, split check,
+call count or audit figure moves on any title; rage room holds at 291 of
+292 and the `cs` server at 194 of 196; `bgt oracle` is 52/52.
+
+**No title in the corpus has the defect itself**, because the body that
+names it is Paladin's and that executable is no longer here. It is in
+anyway, for the reason the `FREE`-must-exist condition is: a call that
+writes a named slot really is unordered, and leaving it so is a wrong
+claim waiting for the next title with the shape. The cost of being wrong
+in this direction is five lines.
 
 ### A call whose result NOTHING READS is dropped, call and all
 
@@ -8214,7 +8249,7 @@ last literal assigned.
 
 #### The two that are left are one line, and they are the open question
 
-#### Measured on eight titles, and not adopted -- the seventh rejection
+#### Measured, misread once, and ADOPTED
 
 This asked, for a long time, whether a member read snapshotted across a call
 should go stale unconditionally the way a global's does, and said *"two sites
@@ -8239,29 +8274,52 @@ handle to it, which no receiver test can see.
 | byte-identical | Super Egg Hunt, Battle of the Hunter, Field Wars, rage room, cs client, constant velocity |
 | moved | The Gate +35 lines, cs server +16 |
 | residual gotos, dangling, unbalanced, splits, call counts | **unchanged everywhere** |
-| ground truth | cs server **194 of 196**, cs client **216 of 218** -- exactly as before |
+| ground truth | rage room **291 of 292**, cs server **194 of 196**, cs client **216 of 218**, constant velocity **94 of 95** -- exactly as before |
+| **tautologies** | The Gate **12 -> 0**; every other title 0 before and after |
 
-So it is **safe and buys nothing here**, and the 51 lines are the shape the
-sixth rejection already records: a string concatenation decomposed into one
-statement per link, because every literal is constructed into a named scratch
-slot and a call sits between the snapshot and its read.
+#### The first reading of that table was WRONG, and the instrument is why
+
+I read it as *"safe and buys nothing here"* and wrote it up as a seventh
+rejection. The ground-truth scores do not move, and ground truth is the
+strongest oracle in this file -- so the conclusion followed, and it was
+wrong. **The title it fixes has no author source.** The Gate is not one of
+the four games that came with their code, so `libcheck` cannot see anything
+it does, and the instrument that can is `bgt signatures`.
+
+Asked of that, The Gate goes from **12 tautologies to 0**, and all twelve are
+one defect in six of its attack classes:
 
 ```
-string local_9;
-local_9 = ("destroymsound " + local_6);
-local_6 = (local_9 + local_10);
+int oldx = x;                           // the snapshot
+if (player.x > x + 50) reset();
+object::run_state_moving_left();        // the BASE method moves it
+if (x != oldx) all_try_to_get();        // ...did it move?
 ```
 
-**The two sites that motivated it are in the two titles this could not be
-measured against**: Crazy Party's `DeRetournable::bouge` and Manamon 1's
-healing items. Both are 80,000+ line recoveries, and this file's rule is to
-adopt on a measurement rather than on an argument -- so it is written down
-here with its eight-title result, and the next attempt starts from that
-instead of from the question.
+Folded, that guard is `if (this.x != this.x)` -- always false -- so **a
+projectile never tried to hit anything after moving**, in `fireball`,
+`firewave`, `poison_blast`, `powervolt`, `slime_wave` and
+`elemental_attack`, twice each. With the rule it reads
 
-What would settle it: run those two titles with the clause above and compare
-the residual goto count, which is the number every over-broad fold change in
-this file has been caught by, against 0 and 0.
+```
+local_4 = this.x;
+object::run_state_moving_left();
+if (local_4 != this.x) { this.all_try_to_get(); }
+```
+
+which is the source. And it is exactly the shape the rule was written for:
+what moves the object is `object::run_state_moving_left()`, a method on the
+BASE, so the receiver test cannot see it -- no statement there mentions
+`this.x` or assigns it.
+
+**So it is adopted**, and the 51 lines are the price: the `cs` server's
+sixteen are the string-concatenation decomposition the sixth rejection
+records, which is readability spent rather than a defect introduced.
+
+The lesson is cheap and worth keeping: **"it buys nothing" is a claim about
+the instrument, not about the change.** Ground truth answers for four
+titles; the sweeps answer for all of them. Ask both before writing a
+rejection down.
 
 `DeRetournable::bouge` snapshots both coordinates into declared locals
 and compares them after the move:
@@ -8279,10 +8337,11 @@ holds a handle to it. So no receiver-based test can see it, and neither
 can this rule -- which makes it the second piece of evidence for the
 question the ninth rule left open, after the Manamon 1 healing items:
 **should a member read snapshotted across a call go stale
-unconditionally, the way a global's does?** Measured on eight titles and
-**not adopted** -- safe, and it buys nothing there, while the two sites
-that motivated it are in the two titles it could not be measured
-against. The section above carries the clause and the figures.
+unconditionally, the way a global's does?** **Yes** -- see **Measured,
+misread once, and ADOPTED**. It took a third site to settle it: six of
+The Gate's attack classes guard `if (x != oldx)` across a base-class
+method that moves the object, which folded to `this.x != this.x` and
+never fired.
 
 ### The signatures, swept
 

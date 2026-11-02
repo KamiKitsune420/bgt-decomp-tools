@@ -662,5 +662,32 @@ class HandleComparisonTests(unittest.TestCase):
         self.assertFalse(_handle_comparison(None, False))
 
 
+    def test_ALL_THREE_places_that_build_a_comparison_ask(self):
+        """The fix reached two of three and the one named instance was in the
+        third. `_taken_condition` renders a jump's condition, the `TEST_OPS`
+        branch renders a comparison used as a value, and `_binop_vars` builds
+        the three-operand form whose result goes into a SLOT -- which is
+        where Crazy Party's `null == local_5` came from.
+
+        Pinned by source, because driving all three needs most of a
+        simulation: what matters is that none of them is left out again.
+        """
+        import inspect
+        from decompile import FuncDecompiler
+        for method in (FuncDecompiler._taken_condition,
+                       FuncDecompiler.step,
+                       FuncDecompiler._binop_vars):
+            src = inspect.getsource(method)
+            self.assertIn("_handle_comparison", src, method.__name__)
+
+    def test_nothing_else_builds_one(self):
+        """If a fourth place appears, this is the test that says so."""
+        import inspect
+        import decompile
+        src = inspect.getsource(decompile)
+        builders = src.count('{op} {b.text})')
+        self.assertEqual(builders, 3, "a comparison is built in %d places; "
+                                      "each one has to ask" % builders)
+
 if __name__ == "__main__":
     unittest.main()
