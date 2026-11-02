@@ -254,7 +254,22 @@ itself.
 | `bgt opcodes game.exe` | dump the engine's opcode table |
 | `bgt validate a.exe b.exe` | run the whole pipeline over several games |
 | `bgt libcheck module.bin game.exe` | score lifted code against BGT's own library source |
+| `bgt files module.bin game.exe` | which source files a stripped module was built from |
+| `bgt api NAME` | what the engine has: documented, and registered |
 | `bgt ghidra status \| install \| decompile` | set up and drive Ghidra |
+| **BGT: a project, and the checks on it** | |
+| `bgt recover game.exe -o out/` | a browsable, compilable project plus the game's data |
+| `bgt compile out/game.bgt` | run BGT's own compiler and read every diagnostic |
+| `... --build release` / `--run` | build an executable, or build and start it |
+| `bgt drive out/ --scenario ctrl` | **run** the recovered game's own functions -- no sound, no window |
+| `bgt audit out/ game.exe` | every callee, literal and number the bytecode holds, against the text |
+| `bgt apicheck out/ game.exe` | every call, against the arities that build itself declares |
+| `bgt signatures out/` | shapes in the text that no author would write |
+| `bgt roundtrip game.exe out/game.exe` | the original bytecode against the recompiled bytecode |
+| `bgt oracle` | source whose answer is known, round-tripped through the engine |
+| `bgt tonvgt out/ -o ported/` | port the project to NVGT, which compiles it on every run |
+| `bgt verbs --repoint` | make double-clicking a `.bgt` use the BGT that can parse it |
+| `bgt gui` | a window over identify, recover and compile |
 | **NVGT** | |
 | `bgt nvgt recover game.exe -o out.zip` | full source project |
 | `bgt nvgt decompile \| disasm game.exe` | single file / instruction listing |

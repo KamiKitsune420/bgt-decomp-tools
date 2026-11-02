@@ -2104,73 +2104,70 @@ Every title that parses recovers with **0 unmodelled opcodes and 0 bodies
 that failed to decompile**. What the compiler says, and what the project's own
 checks say:
 
-| title | lines | goto | unbalanced | split | calls read back | compiler says |
+| title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
-| Super Egg Hunt | 5,302 | 0 | 0 | yes | 1,608 | **compiled cleanly, re-run** |
-| Paladin of the Sky | 23,396 | 0 | 0 | yes | 6,952 | **compiled cleanly, re-run** |
-| Psycho Strike | 24,419 | **0** | 0 | yes | 6,407 | 34 at 2 gotos; **32 of those were the engine's and the 2 are gone** |
-| Crazy Party | 174,780 | **0** | 0 | yes | 90,148 | **0 now -- the owed row, and it is paid** |
-| Manamon 1 | 83,371 | 0 | 0 | yes | 26,484 | **not measured -- wrong engine** |
-| The Gate | 34,955 | 0 | 0 | yes | 8,666 | **not measured -- the elias plugin** |
-| Manamon 2 | -- | -- | -- | -- | -- | **cannot be measured here** |
+| constant velocity | 3,805 | 0 | 0 | yes | 1,767 | **yes** |
+| Battle of the Hunter | 4,269 | 0 | 0 | yes | 1,334 | **yes** |
+| Super Egg Hunt | 5,239 | 0 | 0 | yes | 1,623 | **yes** |
+| Field Wars | 7,942 | 0 | 0 | yes | 3,005 | **yes** |
+| cs client | 7,963 | 0 | 0 | yes | 2,858 | **yes** |
+| rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
+| cs server | 9,692 | 0 | 0 | yes | 3,060 | **yes** |
+| The Gate | 33,995 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
+| Manamon 1 | 82,099 | 0 | 0 | yes | 26,507 | not asked -- **wrong engine**, see below |
+| Crazy Party | 173,813 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
+| Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
+| Psycho Strike | -- | -- | -- | -- | -- | **not on this machine any more** |
+| Manamon 2 | -- | -- | -- | -- | -- | **not on this machine any more** |
 
-**Psycho Strike's goto column is 0 now**, which takes its two
-non-engine diagnostics with it -- see **Fixed: the shape, and the
-attempt that was worse than the goto**. The compiler column still says
-34 because that is the last number a compiler actually gave; 32 of the
-34 are the `elias` plugin and `tts_voice::speak_to_sound`, and the other
-2 were the gotos, so the engine-absence figure is unchanged and the
-recovery's own contribution is now **zero**. Re-deriving the 32 costs a
-modal dialog on somebody's screen and has not been spent.
+**The last column is new and it is the stronger claim.** "Compiled cleanly"
+was what this table used to carry, and a compile-only check never runs a
+global initialiser -- this file records `Failed to initialize global variable
+'recorder'` as a defect that compiled perfectly. `bgt drive` starts the
+recovery, holds a key down and reads an answer back, so a **yes** there means
+every global initialised, the module loaded, and the engine answered.
 
-**Crazy Party's row is PAID, and the fix did take them to 0.** Its 14
-were the residual gotos, every one of them this shape, and the run
-that would say so was stopped by the host for system memory twice. Run
-since: **0 residual gotos and 0 dangling gotos**, with the split
-verified, 90,148 calls read back and 0 unmodelled opcodes. So that
-title's recovery contributes no compiler error of its own either --
-every one of the 14 this file recorded was a `goto`, and AngelScript
-has none. Re-deriving the compiler's own verdict still costs a modal
-dialog on somebody's screen and has not been spent.
+**Seven of the ten titles that can be built here run**, and the biggest of
+those is a 9,692-line networked game server.
 
-**Five of the six rows are from one run of the code as it stands**, and
-the four collapsed-guard rows and the signed-comparison row were
-measured into it rather than left to go stale -- which is what this
-table has rarely been able to say. It carried a mixture of rows from
-different commits for most of this project's life, and the two largest
-titles were a lower bound rather than a measurement, because the run that
-would have given them was stopped by the host for system memory. Both have
-been re-derived since -- see **What these cost, measured on all five** --
-and the way to keep saying this is the cheap one: freeze a copy of
-`tools/`, point `BGT_TOOLS` at it, and the verdict on a commit can be
-taken after the working tree has moved on.
+**Every number is from one run of the committed tree.** That is what this
+table has rarely been able to say: it carried a mixture of rows from
+different commits for most of this project's life. Three titles now say
+`--` rather than a figure, because their executables are no longer in the
+folders this file names -- Paladin, Psycho Strike and Manamon 2 -- and a
+number nobody can reproduce reads as a baseline. Everything above them in
+this document that quotes a Paladin or Psycho Strike figure is a measurement
+from the commit it was written at, and should be read that way.
 
-**Two of the compiler column's rows ARE re-run now**, which this section
-has said all along cannot be done cheaply. It still cannot be done
-cheaply -- asking costs a modal dialog on whoever is at the machine, so
-it is a thing to do deliberately and not while someone is using the
-computer -- but the two titles that compile cleanly are also the two
-where the dialog is the *success* one the driver dismisses, so the cost
-is small and the answer is worth having. Super Egg Hunt and Paladin were
-both built with `bgt compile --build release` at the current code and
-both report `compiled cleanly`, and the executables are what
-`bgt roundtrip` then compares against the originals.
+**Crazy Party's goto column is the one that matters most.** It is the title
+every over-broad fold or structurer change in this file was caught by --
+14 -> 30 for a call-text threshold, -> 44 for dropping the declaration order
+rule, -> 90 for forcing on the copy idiom -- and it is **0** here, with 46
+more calls read back than the figure this table used to carry.
 
-The other three rows stand as measured at their commit: Psycho Strike's
-34 are the installed engine's absences, Crazy Party's 14 are its
-residual gotos, and Manamon 1 cannot be asked at all because the only
-engine here is BGT 1.3 and that title was built by VGStorm's own fork of
-BGT. The residual goto
-count is the proxy for those, and `bgt audit`, `bgt signatures` and
-`bgt apicheck` are the checks that cost nothing.
+**What the compiler says is now a note rather than a column**, because
+the two are different questions and the column kept conflating them. A
+diagnostic count is a statement about *this* engine: Psycho Strike's last
+measured 34 were 32 uses of the `elias` plugin and one
+`tts_voice::speak_to_sound`, none of them the recovery's; The Gate's are the
+same plugin; Manamon 2's 33 all start on `protected` or `weakref`, which its
+own newer BGT has and this one does not. Where the engine is the right one
+and the recovery is clean, the stronger claim is in the table: it **runs**.
 
-**Every number above was re-measured, and several of them moved a long
-way.** The table used to claim 0 residual gotos for Psycho Strike and for
-Crazy Party; they are 2 and 14. The line counts were each a few hundred to
-seven thousand high. Nothing regressed to cause that -- the figures had
-simply outlived their run, across the borrowed-handle fix and six others,
-and a stale number in this file is worse than no number because it reads as
-a baseline. Re-derive before quoting.
+**Asking still costs a modal dialog** on whoever is at the machine, which is
+why it is spent deliberately and not per commit. `bgt drive` is the cheap
+version of the same question -- it compiles and starts the project, so a
+**yes** in that column is a compile *and* a run -- and `bgt audit`,
+`bgt signatures`, `bgt apicheck` and `bgt oracle` cost nothing at all.
+
+**And a window title is not the check that matters** -- Paladin is the title
+that taught it twice. It used to report `command`, because run as a *script*
+`get_SCRIPT_COMPILED()` is false and the game takes its own uncompiled-build
+path. Then it reported `Paladin of the sky` -- the real one -- while the game
+was unusable: no audio, and the menu looping back into `tts_selector`. So the
+title moves for reasons that have nothing to do with whether the recovery is
+right, in both directions. It is a liveness check and nothing more, which is
+exactly why `bgt drive` reads a **value** back instead.
 
 **Manamon 1 joins the table**, and two of its figures are the benchmark
 this project was started against: 784 classes and 332 globals, reached here
@@ -2193,12 +2190,15 @@ compiling and is the half that was broken: 2,007 of its 2,007 pack entries
 come out decrypted under a key the module computes rather than stores (see
 **A key that is a DIGEST**), and 5 of the game's own data files come with
 them, `data/tamerdata.dat` among them -- the one no string constant names.
-Measured at the current code: 83,371 lines, 0 residual gotos, a verified
-split and 26,484 calls read back.
+Measured at the current code: **82,099 lines, 0 residual gotos, a verified
+split and 26,507 calls read back**.
 
-Its compiler column is empty on purpose: the only engine installed here is
-BGT 1.3, which is not the fork that built it. See **The string factory has
-a third spelling** for what asking anyway cost.
+The standings say `not asked` for it on purpose: the only engine installed
+here is BGT 1.3, which is not the fork that built it. See **The string
+factory has a third spelling** for what asking anyway cost. Its NVGT port,
+which NVGT's own console compiler judges for free, is **1 error** -- a
+`Name conflict` on `sleep`, a class the game declares and NVGT has as a
+function.
 
 **The Gate is the eighth title, and the second picked up cold with nothing
 changed to receive it.** A 2015 VGStorm game (`VGStorm.com\The Gate\gate.exe`,
@@ -2220,10 +2220,12 @@ recovered from the module, `sounds.dat` is copied, and **1,153 of 1,153**
 entries extract -- 1,148 Ogg Vorbis and the 5 `.epro` themes, nothing refused
 and nothing unaccounted for.
 
-Its compiler column is empty for the reason Psycho Strike's 34 are mostly
-unavoidable: the game needs `elias`, which no stock BGT registers, so the
-installed 1.3 cannot compile it however good the recovery is. `bgt recover`
-reports the plugin and copies `elias.dll` into the project.
+The standings say it does not run, for the reason Psycho Strike's 34 were
+mostly unavoidable: the game needs `elias`, which no stock BGT registers, so
+`elias theme;` fails and every `theme.x()` after it is `Illegal operation on
+'int&'` -- one missing engine type and a cascade. `bgt recover` reports the
+plugin and copies `elias.dll` into the project, and no amount of recovery
+quality can supply a type the engine does not have.
 
 **Two of its registration counts are Psycho Strike's exactly** -- 453 names
 and 40 types -- six months later to the day, so VGStorm's fork did not move
@@ -2256,18 +2258,21 @@ Paladin compiles cleanly and runs as a built executable. That is the
 end-to-end check: executable in, source out, source back into the engine,
 game on screen.
 
-**Crazy Party's compiler column has now been measured, and it is 14 errors.**
-This said `compiled with 2 warning(s)` at 195,364 lines, and a later section
-said the base-method fix had taken those two warnings away so "all three
-titles now report `compiled cleanly`". Both were written before the residual
-goto count for this title was re-derived from 0 to 14, and **AngelScript has
-no `goto`, so each of those lines is an error**: 14 of them, in
-`CarteCombat` (4), `part_6` (6), `Jeu` (2) and `CombattantSauvage` (2).
-Nothing else is an error. The two warnings are also still there, and they are
-a different pattern from the one that fix addressed —
+**Crazy Party's 14 errors WERE its 14 residual gotos, and both are 0.**
+That row went through three readings before it settled, and the sequence is
+the lesson. It said `compiled with 2 warning(s)` at 195,364 lines, and a
+later section said a fix had taken those warnings away so "all three titles
+now report `compiled cleanly`". Both were written before this title's
+residual goto count was re-derived from 0 to 14 -- and **AngelScript has no
+`goto`, so each of those lines was an error**: `CarteCombat` (4), `part_6`
+(6), `Jeu` (2) and `CombattantSauvage` (2). The loop fix recorded under
+**Fixed: the shape, and the attempt that was worse than the goto** took them
+to 0, and the standings now show **0 gotos at 173,813 lines with 90,194 calls
+read back**.
+
+What is left there is the two warnings, which are a different pattern:
 `if (!((local_6 is local_5) || (null == local_5)))` compares a handle against
-`null` with `==` where the language wants `is`, which is worth a look and is
-not a goto.
+`null` with `==` where the language wants `is`. Worth a look, and not a goto.
 
 The lesson is the one this file keeps paying for from a new direction: the
 goto count had been corrected and **the sentences that depended on it had
@@ -11360,16 +11365,21 @@ is what the compiler said rather than what it hoped.
 
 Measured on every title that can be measured here:
 
-| title | renames | reported | conflicts | `nvgt -c` |
-|---|---|---|---|---|
-| Battle of the Hunter | 1 | 0 | 0 | **compiled cleanly** |
-| constant velocity | 0 | 0 | 0 | **compiled cleanly** |
-| Super Egg Hunt | 1 | 2 | 0 | 1 error |
-| Manamon 1 | 124 | 6 | 1 | **1 error**, in 83,371 lines |
-| The Gate | 35 | 0 | 1 | 3 errors |
-| cs server | 11 | 1 | 0 | 14 errors |
-| cs client | 10 | 8 | 0 | 17 errors |
-| rage room | 3 | 212 | 0 | 212 errors |
+| title | `nvgt -c` | and what it is |
+|---|---|---|
+| Battle of the Hunter | **compiled cleanly** | |
+| constant velocity | **compiled cleanly** | |
+| Super Egg Hunt | 1 error | `Illegal operation on this datatype` |
+| Manamon 1 | **1 error**, in 82,099 lines | `Name conflict. 'sleep' is a global function` -- the game declares a class NVGT has as a function |
+| The Gate | 3 errors | the `log` name conflict, and `elias` again -- NVGT has no such type either |
+| cs server | 14 -> **5 errors** | the `const network_event@` the converter reports rather than rewrites, and `get_length` on a receiver whose type is not written down |
+| cs client | 17 -> **14 errors** | `get_MOUSE_X` and friends: BGT constants NVGT spells differently |
+| rage room | 212 errors | `library::call` returning `var@`, in a title that is a BASS wrapper |
+
+**Two of those moved because the decompiler did**, not the converter: the
+`cs` server went 14 errors to 5 and its client 17 to 14 across the fold and
+type work above. Every error left is an engine difference the converter
+reports rather than guesses at, which is what it is for.
 
 Four mechanical steps and three reports. The steps: every `.bgt` becomes a
 `.nvgt`, every `#include` is repointed, the entry script gains
