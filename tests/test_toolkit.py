@@ -703,6 +703,50 @@ def test_different_seed_gives_different_key():
     assert bgtlib.aes_key_for_seed(0x11) != bgtlib.aes_key_for_seed(0x12)
 
 
+def test_keygen_2010_variant_adds_three_instead_of_multiplying():
+    """The 2010 engine's generator, read out of BGT 1.0 at 0x076BE8.
+
+    The expected bytes are derived from the loop rather than from this
+    implementation: seed 17, plus three per round, and for this seed the two
+    clamps never fire, so it is the arithmetic sequence 20, 23, ... 113.
+    That is also why the variant matters -- the stock generator's output
+    collapses into a three-byte cycle and shares not one byte with it.
+    """
+    k = bgtlib.keygen(0x11, bgtlib.ADD)
+    assert len(k) == 32
+    assert k == bytes(range(20, 20 + 3 * 32, 3))
+    assert k != bgtlib.keygen(0x11, bgtlib.MULTIPLY)
+
+
+def test_the_container_magic_is_a_licence_mark_not_a_checksum():
+    """The 32 hex characters decode, under a second built-in key, to
+    `printf<n>\\0` and an n-character code. The shape is the verifier: a wrong
+    key cannot produce that literal, those digits and that NUL. The mark used
+    here is the one three shipped titles carry, byte for byte."""
+    mark = bgtlib.licence_mark("6188CAE85A13D82754756DC38920FA09")
+    assert mark is not None
+    assert mark.code == "*"
+    assert mark.key == "derived-2014"
+
+
+def test_a_licence_mark_no_known_key_reads_is_declined():
+    """Not every build's derivation is one of the three here, and a field this
+    cannot read has to come back as unread rather than as empty."""
+    assert bgtlib.licence_mark("00" * 16) is None
+    assert bgtlib.licence_mark("not hex at all") is None
+
+
+def test_keygen_refuses_a_variant_it_does_not_know():
+    """A third encryption generation is reported to exist, in the betas and in
+    the 2010-2011 titles this one does not cover. An unknown name has to fail
+    rather than quietly fall back on a reading that cannot open the file."""
+    try:
+        bgtlib.keygen(0x11, "whatever-comes-next")
+    except bgtlib.BgtError:
+        return
+    raise AssertionError("an unknown key variant was accepted")
+
+
 # --------------------------------------------------------------------------
 # the password -> key derivation
 # --------------------------------------------------------------------------
@@ -1080,7 +1124,7 @@ def test_worker_chunk_check_matches_the_serial_path():
 # repacking -- verified by round-trip, never by inspection
 # --------------------------------------------------------------------------
 
-def _synthetic_exe(module, stub_len=512):
+def _synthetic_exe(module, stub_len=512, variant=bgtlib.MULTIPLY):
     """A fake 'executable': an arbitrary stub plus a real overlay and trailer.
 
     The container parameters are passed explicitly because the skeleton's overlay
@@ -1091,7 +1135,8 @@ def _synthetic_exe(module, stub_len=512):
     skeleton = (stub + b"0 " + NUL * 32 + b"xproc10" + NUL
                 + struct.pack("<I", len(stub)))
     return bgt_repack.repack(skeleton, module, seed=0x11, flag=3,
-                             magic=b"6188CAE85A13D82754756DC38920FA09")
+                             magic=b"6188CAE85A13D82754756DC38920FA09",
+                             variant=variant)
 
 
 def test_lz77_compress_roundtrips():
@@ -1116,6 +1161,51 @@ def test_repack_roundtrip_recovers_module_exactly():
     exe = _synthetic_exe(module)
     assert bgt_repack.verify_roundtrip(exe, module)
     assert bgtlib.unpack(exe).bytecode == module
+
+
+def test_a_2010_overlay_unpacks_and_says_which_key_opened_it():
+    """The 2010 shape end to end: an uncompressed module under the ADD key.
+
+    This is the path a 2010 title needs, and no 2010 title is on this machine
+    to try it on -- the installed BGT 1.0 is the demonstration build, whose
+    compiler is disabled, so one cannot be made here either. What the fixture
+    does prove is the chain: the search finds a key nothing else would find,
+    the payload is taken as the module rather than as an LZ77 blob, and the
+    bytes come back exactly.
+    """
+    module = b"\x01\x02module payload " * 300
+    exe = _synthetic_exe(module, variant=bgtlib.ADD)
+    info = bgtlib.unpack(exe)
+    assert info.bytecode == module
+    assert info.key_variant == bgtlib.ADD
+    assert info.compressed == module          # stored as it stands
+    assert info.seed == 0x11
+
+
+def test_the_2010_search_does_not_re_describe_a_later_overlay():
+    """The tie-break that keeps the wider search from costing anything.
+
+    Both variants are tried, so the verified one has to be tried first and
+    win: every title this library already opens is a multiply build, and a
+    search that answered otherwise would re-describe all of them.
+    """
+    module = b"\x01\x02module payload " * 300
+    info = bgtlib.unpack(_synthetic_exe(module, variant=bgtlib.MULTIPLY))
+    assert info.key_variant == bgtlib.MULTIPLY
+    assert info.bytecode == module
+
+
+def test_a_2010_overlay_whose_payload_is_not_a_module_is_refused():
+    """`noDebugInfo` is the module's first byte, so it is 0 or 1 and nothing
+    else. If a 2010 build turns out to compress after all, this is what says
+    so -- rather than handing back a blob that parses as nothing."""
+    exe = _synthetic_exe(b"\xffnot a module at all" * 20, variant=bgtlib.ADD)
+    try:
+        bgtlib.unpack(exe)
+    except bgtlib.BgtError as exc:
+        assert "noDebugInfo" in str(exc), exc
+        return
+    raise AssertionError("a 2010 payload that is not a module was accepted")
 
 
 def test_repack_preserves_stub_and_recomputes_trailer():

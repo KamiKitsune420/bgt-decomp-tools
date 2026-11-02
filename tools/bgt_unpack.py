@@ -91,9 +91,27 @@ def report(path, outdir=None, seed=None):
     if u.embedded_pack:
         print("  embedded pack       %d bytes" % len(u.embedded_pack))
     print("  key seed            0x%02X%s" % (u.seed, "  (stock)" if u.seed == 0x11 else "  <-- NON-STOCK"))
+    print("  key generator       %s%s"
+          % (u.key_variant,
+             "  (the 2010 engine: module stored uncompressed)"
+             if u.key_variant == bgtlib.ADD else ""))
     print("  aes key             %s" % u.aes_key.hex())
     print("  container           %s=%d" % (u.container_magic, u.container_flag))
-    print("  compressed          %d bytes" % len(u.compressed))
+    # The 32 hex characters are a licence mark rather than a checksum, and the
+    # flag beside them is which edition of BGT built the game.
+    print("  edition             %d  (%s)"
+          % (u.container_flag,
+             bgtlib.EDITIONS.get(u.container_flag, "not a known edition")))
+    mark = bgtlib.licence_mark(u.container_magic)
+    if mark is not None:
+        print("  licence             %s   via the %s key"
+              % ("*  (names no game -- every unlimited build carries this "
+                 "same mark)" if mark.code == "*" else repr(mark.code),
+                 mark.key))
+    if u.key_variant == bgtlib.ADD:
+        print("  stored             %d bytes, uncompressed" % len(u.compressed))
+    else:
+        print("  compressed          %d bytes" % len(u.compressed))
     print("  bytecode            %d bytes   entropy %.4f"
           % (len(u.bytecode), entropy(u.bytecode)))
     print("  angelscript         %s" % angelscript_probe(u.bytecode))

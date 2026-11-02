@@ -113,15 +113,24 @@ def lz77_compress(data: bytes, escape: Optional[int] = None) -> bytes:
 
 
 def build_overlay(bytecode: bytes, seed: int = 0x11, flag: int = 3,
-                  magic: Optional[bytes] = None, embedded: bytes = b"") -> bytes:
-    """Compress, wrap and encrypt -- everything between the stub and the trailer."""
+                  magic: Optional[bytes] = None, embedded: bytes = b"",
+                  variant: str = bgtlib.MULTIPLY) -> bytes:
+    """Compress, wrap and encrypt -- everything between the stub and the trailer.
+
+    `variant` is the key generator, and it decides the payload as well: the
+    2010 engine stores the module uncompressed, with the container's declared
+    length being the module's own.
+    """
     if magic is None:
         magic = b"6188CAE85A13D82754756DC38920FA09"
     if len(magic) != 32:
         raise bgtlib.BgtError("container magic must be 32 characters")
 
-    comp = lz77_compress(bytecode)
-    blob = comp + b" " + str(len(bytecode)).encode()
+    if variant == bgtlib.ADD:
+        blob = bytecode
+    else:
+        comp = lz77_compress(bytecode)
+        blob = comp + b" " + str(len(bytecode)).encode()
     header = (magic + b"=" + str(flag).encode() + b" printf"
               + str(len(blob)).encode() + b"\x00")
     plaintext = header + blob
@@ -129,7 +138,7 @@ def build_overlay(bytecode: bytes, seed: int = 0x11, flag: int = 3,
     pad = (-len(plaintext)) % 16          # CBC needs whole blocks; the container
     plaintext += b"\x00" * pad            # declares its length, so slack is ignored
 
-    key = bgtlib.aes_key_for_seed(seed)
+    key = bgtlib.aes_key_for_seed(seed, variant)
     ciphertext = bgtlib.AES.new(key, bgtlib.AES.MODE_CBC,
                                 key[:16]).encrypt(plaintext)
 
@@ -138,19 +147,33 @@ def build_overlay(bytecode: bytes, seed: int = 0x11, flag: int = 3,
 
 def repack(original: bytes, bytecode: bytes, seed: Optional[int] = None,
            flag: Optional[int] = None, magic: Optional[bytes] = None,
-           keep_embedded: bool = True) -> bytes:
-    """Return a new executable: the original's stub with a rebuilt overlay."""
+           keep_embedded: bool = True,
+           variant: Optional[str] = None) -> bytes:
+    """Return a new executable: the original's stub with a rebuilt overlay.
+
+    The key generator is taken from the original unless given, so rebuilding a
+    2010 game writes a 2010 overlay -- its own runtime could not read any
+    other kind.
+    """
     offset, embedded, _ = bgtlib.split_overlay(original)
     stub = original[:offset]
 
+    # Unpacking the original is how the container parameters are inherited,
+    # and it only works when the original is a real game -- a caller that
+    # supplies them is often holding a skeleton whose overlay is a
+    # placeholder, so asking for one more of them must not start reading it.
     if seed is None or flag is None or magic is None:
         info = bgtlib.unpack(original)
         seed = info.seed if seed is None else seed
         flag = info.container_flag if flag is None else flag
         magic = info.container_magic.encode() if magic is None else magic
+        variant = info.key_variant if variant is None else variant
+    if variant is None:
+        variant = bgtlib.MULTIPLY
 
     overlay = build_overlay(bytecode, seed=seed, flag=flag, magic=magic,
-                            embedded=embedded if keep_embedded else b"")
+                            embedded=embedded if keep_embedded else b"",
+                            variant=variant)
     trailer = b"xproc10\x00" + struct.pack("<I", len(stub))
     return stub + overlay + trailer
 

@@ -131,10 +131,13 @@ def cmd_info(args: argparse.Namespace) -> int:
     # one -- needs the whole ciphertext to check that declaration.
     try:
         offset, embedded, ciphertext = bgtlib.split_overlay(data)
-        seed, key = bgtlib.find_seed(ciphertext)
+        seed, key, variant = bgtlib.find_seed(ciphertext)
         plaintext = bgtlib.decrypt(ciphertext, key)
         flag, blob = bgtlib.parse_container(plaintext)
-        _comp, declared = bgtlib.lz77_split(blob)
+        # A 2010 build stores the module uncompressed, so there is no trailing
+        # length to split off and the container's own figure is the answer.
+        declared = (len(blob) if variant == bgtlib.ADD
+                    else bgtlib.lz77_split(blob)[1])
     except bgtlib.BgtError as exc:
         hint = engine.redirect_hint(args.exe, engine.BGT)
         return _fail("%s: %s%s" % (os.path.basename(args.exe), exc,

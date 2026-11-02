@@ -69,6 +69,11 @@ class Identity:
                 notes += (", trailer still points at 0x%X -- this copy was "
                           "rewritten and BGT itself will not load it"
                           % self.facts["stale_trailer"])
+            # The key variant dates the build, so it is worth saying when it
+            # is not the common one: a 2010 engine adds where later ones
+            # multiply, and it stores the module uncompressed.
+            if self.facts.get("key_variant") == bgtlib.ADD:
+                notes += ", 2010 key (uncompressed module)"
             return ("%s: BGT (overlay 0x%X, key seed 0x%02X%s%s)"
                     % (name, self.facts["overlay_offset"], self.facts["seed"],
                        "" if self.facts["seed"] == 0x11 else ", NON-STOCK", notes))
@@ -86,7 +91,7 @@ class Identity:
 def _probe_bgt(data: bytes, ident: Identity) -> bool:
     try:
         offset, embedded, ciphertext = bgtlib.split_overlay(data)
-        seed, _key = bgtlib.find_seed(ciphertext)
+        seed, _key, variant = bgtlib.find_seed(ciphertext)
     except bgtlib.BgtError as exc:
         ident.rejected[BGT] = str(exc)
         return False
@@ -96,7 +101,7 @@ def _probe_bgt(data: bytes, ident: Identity) -> bool:
         upx=packed.describe() if packed is not None else None,
         stale_trailer=bgtlib.read_trailer(data)
         if bgtlib.trailer_is_stale(data, offset) else None)
-    ident.facts.update(overlay_offset=offset, seed=seed,
+    ident.facts.update(overlay_offset=offset, seed=seed, key_variant=variant,
                        embedded_pack_bytes=len(embedded),
                        ciphertext_bytes=len(ciphertext))
     return True

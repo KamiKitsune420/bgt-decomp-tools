@@ -23,7 +23,7 @@ The seed is brute-forced rather than assumed, so builds that changed it still wo
 import hashlib
 import struct
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import NamedTuple, Optional, Sequence, Tuple
 
 try:
     from Crypto.Cipher import AES
@@ -130,16 +130,39 @@ def split_overlay(data: bytes) -> Tuple[int, bytes, bytes]:
 # layer 2 -- the key, and AES
 # --------------------------------------------------------------------------
 
-def keygen(seed: int = 0x11) -> bytes:
+#: How a BGT build advances its key material: the 2014 and 2011 engines
+#: multiply by three, and the 2010 engine adds three. The two generators were
+#: read out of the two installs and are otherwise identical instruction for
+#: instruction -- same clamps, same 32 iterations, same 33-byte buffer with a
+#: trailing NUL -- so the arithmetic is the whole difference:
+#:
+#:     BGT 1.3, 0x084E68    lea ebx,[ebx+ebx*2]    v = v * 3
+#:     BGT 1.0, 0x076BE8    add ecx, 3             v = v + 3
+#:
+#: That controlled comparison is the evidence: everything a wrong reading
+#: could have coincided on matches, and one instruction does not.
+MULTIPLY = "multiply"
+ADD = "add"
+#: The verified variant first, so a tie keeps the reading this library held.
+KEY_VARIANTS = (MULTIPLY, ADD)
+
+
+def keygen(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
     """Reproduce FUN_00441D90 -- the key material, generated rather than stored.
 
     This is why no string search ever finds a key in a BGT executable.
     For the stock seed 0x11 it produces 33 05 0f 2d then (05 0f 2d) repeating.
+
+    `variant` selects the arithmetic; see `KEY_VARIANTS`. A 2010 title opens
+    under `ADD` and under nothing else, which is why a toolchain that knew
+    only `MULTIPLY` reported those games as not BGT at all.
     """
+    if variant not in KEY_VARIANTS:
+        raise BgtError("unknown key variant %r" % variant)
     out = bytearray()
     v = seed
     for _ in range(32):
-        v *= 3
+        v = v * 3 if variant == MULTIPLY else v + 3
         if v >= 0x80:
             v = 5
         elif v == 0:
@@ -148,14 +171,19 @@ def keygen(seed: int = 0x11) -> bytes:
     return bytes(out)
 
 
-def aes_key_for_seed(seed: int = 0x11) -> bytes:
+def aes_key_for_seed(seed: int = 0x11, variant: str = MULTIPLY) -> bytes:
     """AES-256 key = SHA256(key material). IV is the first 16 bytes of the same digest.
 
     BGT uses the AES reference API (rijndael-api-fst.c), which takes key material as
     a hex ASCII string -- makeKey() is handed the 64-char hex of this digest, and
     cipherInit() reads 32 hex chars of it back as the IV.
+
+    So the hex is where the key material goes IN, not what the key is: the
+    reference API parses those 64 characters straight back into the 32 bytes
+    of this digest. Hashing the hex text instead would be that conversion
+    applied twice, and would open nothing.
     """
-    return hashlib.sha256(keygen(seed)).digest()
+    return hashlib.sha256(keygen(seed, variant)).digest()
 
 
 def decrypt(ciphertext: bytes, key: bytes) -> bytes:
@@ -199,6 +227,68 @@ def parse_container(plaintext: bytes) -> Tuple[int, bytes]:
     return flag, blob
 
 
+#: BGT's editions, as the engine itself names them -- BGT 1.0 prints "BGT
+#: lite|pro unlimited|pro single version 1.0 was registered successfully".
+#: The container flag is which one built the game. Only 3 occurs in the
+#: titles here, so the other two numbers are as reported rather than seen.
+EDITIONS = {2: "BGT lite", 3: "BGT pro unlimited", 4: "BGT pro single"}
+
+#: The second built-in key, for the licence mark: the same generator at seed
+#: 0x3F. BGT's 2014 build puts its output through a further derivation before
+#: use, and since that derivation's input is fixed, its result is a constant --
+#: reported in issue #6, found by emulating the function at 0x4903D0 in the
+#: `bgt.exe` of 2014-06-01, which is the 1.3 this toolkit is developed against.
+#:
+#: It needs no separate verification because the plaintext verifies it: a wrong
+#: key cannot produce the literal `printf`, ASCII digits and a NUL. It decodes
+#: Super Egg Hunt, Manamon 1 and The Gate -- three developers, 2014 to 2017.
+LICENCE_KEY_2014 = bytes.fromhex(
+    "465b2c2743b1855f5a8e0fa520860626a8708808899f8763e6b8233221cb028c"
+    "70bfc75445d26867d6c02214fc2fd6ee4813293755e3874881c0bf824a16207d")
+
+
+class Licence(NamedTuple):
+    """The licence a BGT game was built under, out of its container header."""
+    code: str
+    #: Which of the three keys read it, which dates the build.
+    key: str
+
+
+def licence_mark(magic: str) -> Optional[Licence]:
+    """Read the container's 32 hex characters as the licence mark they are.
+
+    This field has been used here as a validity check -- 32 hex characters
+    followed by `=` is a strong enough constraint to identify the right
+    overlay key. It is not a checksum: it is one AES block under a second
+    built-in key, holding `printf<n>\\0` and then an n-character licence code,
+    and `*` means the game was built with no licence code at all.
+
+    Returns None when no known key reads it, which is the honest answer for a
+    build whose derivation is not one of these three.
+
+    **It is the edition's mark, not the module's.** Super Egg Hunt, Manamon 1
+    and The Gate carry byte-identical fields -- three developers across three
+    years -- so nothing here is derived from the game, which is the other half
+    of why it cannot be a checksum. All three read `*` against edition 3, "pro
+    unlimited", so the code looks like a wildcard standing for "no particular
+    game" rather than for an absent licence; a "pro single" build is where a
+    real code would be expected, and none is on this machine to confirm it.
+    """
+    try:
+        block = bytes.fromhex(magic)
+    except ValueError:
+        return None
+    for name, material in (("derived-2014", LICENCE_KEY_2014),
+                           ("2011", keygen(0x3F, MULTIPLY)),
+                           ("2010", keygen(0x3F, ADD))):
+        key = hashlib.sha256(material).digest()
+        plain = AES.new(key, AES.MODE_CBC, key[:16]).decrypt(block)
+        tag, _, rest = plain.partition(b"\x00")
+        if tag.startswith(b"printf") and tag[6:].isdigit():
+            return Licence(rest[:int(tag[6:])].decode("latin1"), name)
+    return None
+
+
 def looks_like_container(plaintext: bytes) -> bool:
     """Cheap validity test, used to identify the right key by trial decryption."""
     try:
@@ -212,23 +302,45 @@ def looks_like_container(plaintext: bytes) -> bool:
     return all(c in b"0123456789ABCDEFabcdef" for c in head)
 
 
+class KeyChoice(NamedTuple):
+    """Which key opened an overlay: the seed, the key itself, and the variant.
+
+    A named tuple rather than a pair, because the variant decides whether the
+    payload is compressed as well -- so code that unpacks this into two names
+    fails loudly instead of silently dropping the half that was added.
+    """
+    seed: int
+    key: bytes
+    variant: str
+
+
 def find_seed(ciphertext: bytes,
-              candidates: Optional[Sequence[int]] = None) -> Tuple[int, bytes]:
-    """Recover the key seed by trial decryption of the first block.
+              candidates: Optional[Sequence[int]] = None,
+              variants: Sequence[str] = KEY_VARIANTS) -> KeyChoice:
+    """Recover the key by trial decryption of the first block.
 
     Only the first 32 bytes matter -- the container header starts with 32 hex
-    characters, which is a strong enough constraint that a wrong seed is never
+    characters, which is a strong enough constraint that a wrong key is never
     mistaken for a right one. Costs one AES block per candidate.
+
+    Both the seed and the generator's arithmetic are searched, because both
+    vary between builds and neither is stored. The stock seed and the verified
+    variant are tried first, so a build this library already opened cannot be
+    re-described by the wider search.
     """
     if candidates is None:
         candidates = [0x11] + [s for s in range(1, 256) if s != 0x11]
     probe = ciphertext[:64]
-    for seed in candidates:
-        key = aes_key_for_seed(seed)
-        head = decrypt(probe, key)
-        if all(c in b"0123456789ABCDEFabcdef" for c in head[:32]) and b"=" in head[32:40]:
-            return seed, key
-    raise BgtError("no seed in the search space decrypts to a BGT container header")
+    for variant in variants:
+        for seed in candidates:
+            key = aes_key_for_seed(seed, variant)
+            head = decrypt(probe, key)
+            if (all(c in b"0123456789ABCDEFabcdef" for c in head[:32])
+                    and b"=" in head[32:40]):
+                return KeyChoice(seed, key, variant)
+    raise BgtError("no key in the search space decrypts to a BGT container "
+                   "header (tried %d seeds x %s)"
+                   % (len(candidates), "/".join(variants)))
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +432,9 @@ class Unpacked:
     container_magic: str
     compressed: bytes
     bytecode: bytes
+    #: Which key generator opened it, and so whether `compressed` really is
+    #: compressed: the 2010 engine stores the module as it stands.
+    key_variant: str = MULTIPLY
 
     def __repr__(self) -> str:
         return ("<Unpacked overlay=0x%X seed=0x%02X container_flag=%s "
@@ -332,14 +447,29 @@ def unpack(data: bytes, seed: Optional[int] = None) -> Unpacked:
     overlay_offset, embedded, ciphertext = split_overlay(data)
 
     if seed is None:
-        seed, key = find_seed(ciphertext)
+        seed, key, variant = find_seed(ciphertext)
     else:
-        key = aes_key_for_seed(seed)
+        variant = MULTIPLY
+        key = aes_key_for_seed(seed, variant)
 
     plaintext = decrypt(ciphertext, key)
     flag, blob = parse_container(plaintext)
-    comp, declared = lz77_split(blob)
-    bytecode = lz77_decompress(comp, declared)
+    if variant == ADD:
+        # **The 2010 engine does not compress.** There is no LZ77 step and no
+        # trailing " <length>" to read one back from: the number after
+        # `printf` is the bytecode's own length, so the container's payload is
+        # the module. Keyed on the generator because that is what the two
+        # binaries say, and checked below rather than assumed.
+        comp = blob
+        bytecode = blob
+        if bytecode[:1] not in (b"\x00", b"\x01"):
+            raise BgtError(
+                "a 2010-key overlay whose payload does not begin with "
+                "noDebugInfo (0x%02X) -- it may be compressed after all"
+                % (bytecode[0] if bytecode else 0))
+    else:
+        comp, declared = lz77_split(blob)
+        bytecode = lz77_decompress(comp, declared)
 
     return Unpacked(
         overlay_offset=overlay_offset,
@@ -351,6 +481,7 @@ def unpack(data: bytes, seed: Optional[int] = None) -> Unpacked:
         container_magic=plaintext[:32].decode("ascii", "replace"),
         compressed=comp,
         bytecode=bytecode,
+        key_variant=variant,
     )
 
 
