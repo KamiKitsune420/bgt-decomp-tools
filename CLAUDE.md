@@ -2289,19 +2289,46 @@ result goes into a SLOT rather than being tested by a jump.
 All three ask now, and a test pins each of them plus the count: if a
 fourth place to build a comparison appears, that test says so.
 
-**And Crazy Party's one site is STILL `null == local_5`**, which is worth
-recording rather than smoothing over. Five other null comparisons in the
-same file render `!is null` correctly, so the mechanism works; that one does
-not reach any of the three. It is inside a `||`, so the operand's text is
-built before the merge folds it, and where is not yet established -- a trace
-of it was running when this was written.
+##### Crazy Party's one site is NOT this, and the bytecode says what it is
+
+It still reads `null == local_5` after all three were fixed, and reading
+`Combattant::switchType` is what explains it -- the `==` is correct and the
+operand is the defect:
+
+```
+L8: ClrVPtr 5 ; CmpPtr 6 5 ; TZ            ; (local_6 is local_5)
+L5: CALLINTF getTypeElementaire ; STOREOBJ 5
+    VAR 5 ; PshVPtr 6 ; CALLINTF TypeElementaire::opEquals
+    ...
+    RefCpyV 6                              ; @local_6 = local_5, at the BOTTOM
+```
+
+`TypeElementaire::opEquals` is a method **the game itself declares**, so
+rendering that call as `==` is right -- it is not a handle identity test at
+all. What is wrong is the receiver: `local_6` is a **loop-carried** handle
+assigned at the bottom of the loop and read at the top, so the first
+iteration reads whatever was there and the simulation folded a `ClrVPtr`'d
+`null` into it. On every later iteration the real value is the previous
+round's.
+
+**A trace of every `Atom` built with that text confirms it independently**:
+the comparison comes from `_call`, the operator-method rendering, and not
+from any of the three comparison builders. So the operator was never the
+question.
+
+That is rule three's shape -- *"the value was computed before a loop and read
+inside it"* -- not reaching a handle slot whose only write is the back edge.
+It is pre-existing: the line is identical in a recovery from before any of
+tonight's work. Fixing it is a fold-safety change and wants its own
+five-title measurement, so it is written down here rather than guessed at.
 
 So the state is: three places that build a comparison now give a `null`
-operand the operator the language wants, every title that can be built here
-renders byte-identical, `bgt oracle` is 52/52, and **one comparison in the
-whole corpus is still wrong**. It is kept for the reason the
-`FREE`-must-exist condition is: `_binop_vars` building `==` for a handle is
-a wrong claim whatever the corpus currently contains.
+operand the operator the language wants; every title that can be built here
+renders byte-identical; `bgt oracle` is 52/52; and the one `null ==` left in
+the corpus is a different defect with a precise diagnosis above. The change
+is kept for the reason the `FREE`-must-exist condition is: `_binop_vars`
+building `==` for a handle identity is a wrong claim whatever the corpus
+currently contains.
 
 A warning matters here because BGT shows one in a modal dialog and waits on
 it, so an unattended compile stops there.
