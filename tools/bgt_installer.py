@@ -224,8 +224,95 @@ def bgt_games(blob: bytes) -> Iterator[Tuple[int, int, bytes]]:
             break
 
 
-def games_in(path: str) -> Iterator[Tuple[bytes, str]]:
-    """Every BGT executable an installer holds, with a note on how it was read."""
+def sfpv_packs(blob: bytes) -> Iterator[Tuple[int, int, int]]:
+    """Every SFPv asset pack in a payload, as (start, end, entry count).
+
+    The games need these. A recovered BGT project that compiles and runs and
+    has no pack beside it does not play a sound -- `could not load pack
+    data/bgm.dat.` -- so pulling the executable out on its own is half a job.
+
+    A pack can be carved for the same reason an executable can: it declares its
+    entry count, every entry repeats the `SFPv` magic, and a walk that does not
+    land exactly where the last entry ends was never looking at a pack. No
+    guess is involved beyond where to start the walk.
+    """
+    at = 0
+    for m in re.finditer(re.escape(b"SFPv"), blob):
+        if m.start() < at:
+            continue                     # inside a pack already accounted for
+        try:
+            version, count, _reserved = struct.unpack_from("<III", blob,
+                                                           m.start() + 4)
+        except struct.error:
+            continue
+        if version != 1 or not 0 < count < 1 << 20:
+            continue
+        p, ok = m.start() + 16, True
+        for _ in range(count):
+            if blob[p:p + 4] != b"SFPv":
+                ok = False
+                break
+            try:
+                name_len, _flags, size = struct.unpack_from("<III", blob, p + 4)
+            except struct.error:
+                ok = False
+                break
+            if name_len > 1024 or p + 16 + name_len + size > len(blob):
+                ok = False
+                break
+            p += 16 + name_len + size
+        if ok:
+            at = p
+            yield m.start(), p, count
+
+
+def pack_names(module: bytes) -> List[str]:
+    """The `.dat` names a module holds, as candidates for a carved pack's name.
+
+    A pack's name matters: the script opens it by name, so the file has to be
+    called what `set_sound_storage` was passed. The module holds every string
+    constant, and which of them reaches that call is not knowable without a
+    parse -- and the 2010-to-2012 modules do not parse yet. So these are
+    candidates, and the caller uses one only when there is exactly one bare
+    filename among them.
+
+    Read as RECORDS rather than scanned as text, which matters: a scan has no
+    idea where a string begins, so `junk` immediately before `sounds.dat`
+    arrives glued to it. A `tagged` string is `0x6E`, an encoded length and
+    then the bytes, so the length says where the name starts -- and a length
+    that does not agree with a printable name ending in `.dat` is not a match
+    at all. These modules are all `tagged`; a `len2` build would need its own
+    reading, and `bgt recover` has the parse for that case anyway.
+    """
+    seen, out = set(), []
+    for pos in range(len(module) - 2):
+        if module[pos] != 0x6E:
+            continue
+        length = module[pos + 1]
+        at = pos + 2
+        if length >= 0x80:               # the two-byte encoded form
+            length = ((length & 0x3F) << 8) | module[pos + 2]
+            at = pos + 3
+        if not 4 < length <= 60 or at + length > len(module):
+            continue
+        name = module[at:at + length]
+        if not name.endswith(b".dat"):
+            continue
+        if not all(0x20 <= b < 0x7F for b in name):
+            continue
+        text = name.decode("latin1")
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def games_in(path: str) -> Iterator[Tuple[bytes, str, List[Tuple[str, bytes]]]]:
+    """Every BGT game an installer holds: its executable, a note, and its packs.
+
+    The packs come from the same payload as the game, so a caller can write a
+    folder that RUNS rather than one executable that starts and is silent.
+    """
     with open(path, "rb") as fh:
         data = fh.read()
 
@@ -241,17 +328,63 @@ def games_in(path: str) -> Iterator[Tuple[bytes, str]]:
     for blob in payloads(data):
         for flip in flips:
             unfiltered = unfilter(blob, flip)
-            for _begin, _end, exe in bgt_games(unfiltered):
+            games = list(bgt_games(unfiltered))
+            if not games:
+                continue
+            packs = list(sfpv_packs(unfiltered))
+            for _begin, _end, exe in games:
                 found += 1
-                yield exe, "%s, filter flip=%s" % (note, flip)
-            if found:
-                break
+                named = _name_packs(exe, unfiltered, packs,
+                                    one_game=len(games) == 1)
+                yield exe, "%s, filter flip=%s" % (note, flip), named
+            break
     if not found:
         raise InstallerError(
             "no BGT executable in %s -- it may hold a game built with another "
             "engine (Q9, for one, is native code that merely uses BGT's pack "
             "format), or an Inno version this does not read"
             % os.path.basename(path))
+
+
+def _name_packs(exe: bytes, blob: bytes,
+                packs: List[Tuple[int, int, int]],
+                one_game: bool) -> List[Tuple[str, bytes]]:
+    """Give each carved pack a name, and say so honestly when it is a guess.
+
+    The one case that can be named outright is the common one: a single game, a
+    single pack, and a single bare `.dat` filename in the module. Anything else
+    gets a numbered name, because writing a pack under the wrong name is worse
+    than writing it under an obvious placeholder -- the script would open the
+    placeholder and find nothing, which reads as a missing pack rather than as
+    a mystery.
+    """
+    if not packs:
+        return []
+    try:
+        module = bgtlib.unpack(exe).bytecode
+    except Exception:
+        module = b""
+    bare = [n for n in pack_names(module) if "/" not in n and "\\" not in n]
+    if one_game and len(packs) == 1 and len(bare) == 1:
+        return [(bare[0], blob[packs[0][0]:packs[0][1]])]
+    return [("pack_%08x.dat" % start, blob[start:end])
+            for start, end, _count in packs]
+
+
+def naming_candidates(exe: bytes) -> List[str]:
+    """The `.dat` names a game's own module holds, for a person to choose from.
+
+    Printed when a pack could not be named: Perilous Hearts holds
+    `level_1.dat`, `level_2.dat` and `sounds.dat`, only one of which is the
+    pack, and which one is not decidable from the string constants alone --
+    that needs the call site, which needs a parse, which these modules do not
+    yet have. Naming it wrongly would be worse than numbering it: the script
+    would open the name it was given, find nothing, and report a missing pack.
+    """
+    try:
+        return pack_names(bgtlib.unpack(exe).bytecode)
+    except Exception:
+        return []
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -261,7 +394,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "without running it")
     ap.add_argument("installer", nargs="+")
     ap.add_argument("-o", "--out", required=True,
-                    help="directory to write each game into")
+                    help="directory to write each game's folder into")
+    ap.add_argument("--no-packs", action="store_true",
+                    help="the executable only, without the asset packs beside it")
     args = ap.parse_args(argv)
 
     os.makedirs(args.out, exist_ok=True)
@@ -271,16 +406,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                       os.path.splitext(os.path.basename(path))[0])[:40]
         print("== %s" % os.path.basename(path))
         try:
-            for n, (exe, note) in enumerate(games_in(path)):
-                name = "%s.exe" % stem if n == 0 else "%s_%d.exe" % (stem, n)
-                dest = os.path.join(args.out, name)
+            for n, (exe, note, packs) in enumerate(games_in(path)):
+                # A folder per game, because the script opens its packs by a
+                # relative name: the pack has to sit beside the executable.
+                folder = os.path.join(args.out, stem if n == 0
+                                      else "%s_%d" % (stem, n))
+                os.makedirs(folder, exist_ok=True)
+                dest = os.path.join(folder, "%s.exe" % stem)
                 with open(dest, "wb") as fh:
                     fh.write(exe)
                 up = bgtlib.unpack(exe)
                 print("   %-40s %9d bytes  seed 0x%02X  %-8s  module %d bytes"
-                      % (name, len(exe), up.seed, up.key_variant,
-                         len(up.bytecode)))
+                      % (os.path.basename(dest), len(exe), up.seed,
+                         up.key_variant, len(up.bytecode)))
                 print("   %s" % note)
+                if args.no_packs:
+                    if packs:
+                        print("   %d asset pack(s) left behind, so this will "
+                              "not play a sound" % len(packs))
+                else:
+                    for pname, pdata in packs:
+                        with open(os.path.join(folder, pname), "wb") as fh:
+                            fh.write(pdata)
+                        print("   %-40s %9d bytes" % (pname, len(pdata)))
+                        if pname.startswith("pack_"):
+                            names = naming_candidates(exe)
+                            print("   %sthe module does not say which name "
+                                  "this pack is opened by; rename it to one "
+                                  "of: %s"
+                                  % (" " * 4,
+                                     ", ".join(names) if names
+                                     else "(no .dat name in the module)"))
+                    if not packs:
+                        print("   no asset pack in the installer")
                 total += 1
         except InstallerError as exc:
             print("   %s" % exc)

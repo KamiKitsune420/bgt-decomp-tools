@@ -375,6 +375,45 @@ what `unpack` opens, and `tests/test_installer.py` pins that case.
 **Five games out of eight installers, and the three refusals are each
 correct.**
 
+### The packs come out too, or the game is silent
+
+An executable on its own is half a job, and this file records which half: a
+project with no pack beside it reports `could not load pack data/bgm.dat.` and
+plays nothing. So `bgt installer` writes **a folder per game** with the asset
+packs beside the executable, and it can do that for the same reason it can
+carve the executable — a pack is self-verifying. It declares its entry count,
+every entry repeats the `SFPv` magic, and a walk that does not end exactly
+where the last entry ends was never looking at a pack.
+
+| game | pack | entries |
+|---|---|---|
+| Palace Punch-up | `sounds.dat`, 4.6 MB | 40 |
+| Antony | `sounds.dat`, 5.5 MB | 92 |
+| Grodan Gun | `sounds.dat`, 4.6 MB | 104 |
+| Ljudfarmen | `sounds.dat`, 29.8 MB | 270 |
+| Perilous Hearts | not named — see below | 283 |
+
+All five parse under `bgt pack list`, which is the check rather than the
+file's size: `bgt_pack.parse` raises unless the walk lands exactly on EOF.
+Every entry of every one is `SWCR`-encrypted under a single key per pack.
+
+**The NAME is the part that cannot always be recovered**, and it matters,
+because the script opens its pack by name. The name is a string constant in
+the module, but *which* constant reaches `set_sound_storage` needs the call
+site, and these modules do not parse yet. So the rule is narrow: one game, one
+pack, and exactly one bare `.dat` filename in the module gets that name;
+anything else is numbered, with the candidates printed. Perilous Hearts is
+the anything-else — `level_1.dat`, `level_2.dat` and `sounds.dat`, only one of
+which is the pack. Naming it wrongly would be worse than numbering it: the
+script would open the name it was given, find nothing, and report a missing
+pack, which reads as a broken extraction rather than as a rename away.
+
+**And the names are read as RECORDS, not scanned as text.** A `tagged` string
+is `0x6E`, an encoded length and then the bytes, so the length is what says
+where a name starts — a scan has no idea, and `junk` written immediately
+before `sounds.dat` comes back glued to it. The first version of this did
+scan, and its own test is what showed the glue.
+
 Q9 is the refusal worth reading. Its payload decompresses to 12.2 MB holding
 `Software\BlastbayStudios\Q9ActionGame\1.0`, *"Unable to find the sound archive
 (sounds.dat)"* and **235 `SFPv` headers** — so it uses BGT's own pack format —
@@ -431,7 +470,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `cli.py` | `bgt` — one entry point dispatching every subcommand below |
 | `bgtlib.py` | the chain as a library — `unpack_file(path)` returns every intermediate |
 | `bgt_unpack.py` | CLI: unpack one or more executables, report each layer, write bytecode |
-| `bgt_installer.py` | `bgt installer`: the game inside an Inno Setup installer, read rather than run |
+| `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
@@ -480,7 +519,7 @@ pip install -e .        # then: bgt unpack game.exe -o out
 The whole workflow through the unified CLI:
 
 ```bash
-bgt installer game_setup.exe -o games/    # ...if that is all you were given
+bgt installer game_setup.exe -o games/    # a folder that runs: game + packs
 bgt unpack game.exe -o work/
 bgt disasm work/game_bytecode.bin game.exe -o work/game.asm
 bgt lift   work/game_bytecode.bin game.exe -o work/game.as

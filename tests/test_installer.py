@@ -154,7 +154,7 @@ def test_a_synthetic_installer_yields_the_game_it_holds():
         path = os.path.join(tmp, "setup.exe")
         with open(path, "wb") as fh:
             fh.write(installer)
-        games = [g for g, _note in bgt_installer.games_in(path)]
+        games = [g for g, _note, _packs in bgt_installer.games_in(path)]
     assert games == [exe]
     del io, begin, end
 
@@ -200,3 +200,91 @@ def test_the_payload_is_found_without_the_setup_header():
     installer = _installer_around(exe, version=b"5.3.3")
     blobs = list(bgt_installer.payloads(installer))
     assert len(blobs) == 1 and blobs[0] == exe
+
+
+# --------------------------------------------------------------------------
+# the asset packs, which are what make an extracted game playable
+# --------------------------------------------------------------------------
+
+def _pack(entries):
+    import bgt_pack
+    return bgt_pack.build(entries)
+
+
+def test_a_pack_is_carved_at_its_exact_extent():
+    """A pack declares its entry count and repeats its magic per entry, so the
+    walk either ends where the last entry ends or this was never a pack."""
+    pack = _pack([("a.ogg", b"A" * 100), ("b.ogg", b"B" * 250)])
+    blob = b"before" * 10 + pack + b"after" * 10
+    found = list(bgt_installer.sfpv_packs(blob))
+    assert len(found) == 1
+    start, end, count = found[0]
+    assert blob[start:end] == pack
+    assert count == 2
+
+
+def test_a_truncated_pack_is_refused_rather_than_cut_short():
+    pack = _pack([("a.ogg", b"A" * 100), ("b.ogg", b"B" * 250)])
+    assert list(bgt_installer.sfpv_packs(pack[:-40])) == []
+
+
+def test_a_pack_inside_a_pack_is_not_counted_twice():
+    """Entry data can hold the magic -- a pack of packs is the obvious case --
+    and the walk past the outer pack is what keeps it to one."""
+    inner = _pack([("x.ogg", b"X" * 32)])
+    outer = _pack([("inner.dat", inner), ("y.ogg", b"Y" * 16)])
+    found = list(bgt_installer.sfpv_packs(outer))
+    assert [blob_end - blob_start for blob_start, blob_end, _n in found] \
+        == [len(outer)]
+
+
+def test_the_pack_names_a_module_holds_are_read_as_records():
+    """A `tagged` string is `0x6E`, a length and the bytes, so the length says
+    where a name begins. A text scan cannot know that: `junk` written straight
+    before `sounds.dat` comes back glued to it, and the two are
+    indistinguishable without the record."""
+    def rec(name):
+        return bytes([0x6E, len(name)]) + name
+
+    module = (b"junk" + rec(b"sounds.dat") + b"\x05"
+              + rec(b"level_1.dat") + rec(b"not a .dat name")
+              + rec(b"a" * 70 + b".dat"))
+    assert bgt_installer.pack_names(module) == ["sounds.dat", "level_1.dat"]
+
+
+def test_a_name_whose_length_byte_disagrees_is_not_a_name():
+    """The length is the check. A `0x6E` that happens to sit before text
+    ending in `.dat` is a string record only if the length matches it."""
+    module = bytes([0x6E, 0x63]) + b"sounds.dat" + b"\x00" * 4
+    assert bgt_installer.pack_names(module) == []
+
+
+def test_one_pack_and_one_bare_name_is_named_and_otherwise_numbered():
+    exe, _module = _filter_clean_game()
+    pack = _pack([("a.ogg", b"A" * 64)])
+
+    # The module of a synthetic game holds no `.dat` name at all, so the
+    # numbered fallback is what must come out -- and it has to be a name a
+    # person can act on rather than a silent omission.
+    named = bgt_installer._name_packs(exe, pack, [(0, len(pack), 1)],
+                                      one_game=True)
+    assert len(named) == 1
+    assert named[0][0].startswith("pack_")
+    assert named[0][1] == pack
+
+
+def test_a_game_comes_out_with_its_pack_beside_it():
+    exe, _module = _filter_clean_game()
+    pack = _pack([("a.ogg", b"A" * 64), ("b.ogg", b"B" * 64)])
+    installer = _installer_around(exe + pack)
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "setup.exe")
+        with open(path, "wb") as fh:
+            fh.write(installer)
+        games = list(bgt_installer.games_in(path))
+    assert len(games) == 1
+    got_exe, _note, packs = games[0]
+    assert got_exe == exe
+    assert [data for _name, data in packs] == [pack]
