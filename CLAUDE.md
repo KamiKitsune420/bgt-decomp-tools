@@ -473,7 +473,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
-| `as_early.py` | `bgt early`: the 2010 and 2011 module format, which is a different format rather than a third dialect -- two debug titles read end to end and name their own source files |
+| `as_early.py` | `bgt early`: the 2010 to 2012 module format, which is a different format rather than a third dialect -- five engine releases, all five titles read end to end, and the debug ones name their own source files |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
 | `as_disasm.py` | readable disassembly — resolves calls, literals, globals and members to names, and labels jumps |
 | `as_lift.py` | lifts disassembly to pseudo-source — a symbolic stack machine plus control flow |
@@ -12123,6 +12123,9 @@ the landing validates every field width above it.
 | Grodan Gun (2011-09) | 63,364 B | **0xF784 of 0xF784** | **11 of 11** |
 | Perilous Hearts (2011-11) | 299,967 B | **0x493BF of 0x493BF** | **16** |
 | Antony (2012-02) | 56,179 B | **0xDB73 of 0xDB73** | **6 of 6** |
+| Palace Punch-up (2010-07) | 55,859 B | **0xDA33 of 0xDA33** | none -- a release build |
+
+**All five read end to end**, and each one is a different engine release.
 
 and every section parses: 5 and 9 class declarations, one funcdef each, the
 class property lists, 60 and 25 global properties, 54 and 46 module
@@ -12415,32 +12418,64 @@ several entries later:
 That is the same shape as every other localiser in this file: a record
 whose own content validates it, walked until one fails.
 
-##### Palace Punch-up, the 2010 beta
+##### Palace Punch-up, the 2010 beta -- and FOUR WRONG GUESSES first
 
-| title | reaches | stops on |
+The last of the five, and the one with the least to go on: it is the only
+**release** build, so it names no source files and the EOF landing is the
+only measure available for it.
+
+**Four per-build flags were added for it by trial and the binary refuses
+all four.** Its own `WriteTypeDeclaration` at 0x00453380 writes the base
+type, the interface list, three behaviours, the constructor/factory pairs,
+the methods and the virtual table -- exactly as BGT 1.0 does. The trials
+were that phase 2 has no base type, no interface list, no pair list, and
+that the script section is stored as an index rather than a string. Each
+one got the walk a few hundred bytes further and none reached EOF, which is
+this file's own definition of no evidence at all. They are out.
+
+**Reading the writer settled it in one pass**, which is this document's
+first rule arriving yet again. What that build really does:
+
+| what | the beta | 2011 and after |
 |---|---|---|
-| Palace Punch-up (2010-07) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
+| a declaration | name, **eu(size)**, four bytes of flags | name, flags, size |
+| an object variable | `{TypeInfo, eu}` -- two fields | three, with a heap byte |
+| `objVariableInfo` | **absent** | a list of three-value entries |
+| the script section | **absent** -- the record ends with the line numbers | a string per record |
+| a virtual declaration | funcType **4**, and its funcdef is **5** | 3 and 4: the numbering is one older |
+| the tail | usedTypes, usedTypeIds, usedFunctions, usedGlobalProps, usedStringConstants | ...plus the value types' sizes and `usedObjectProps` |
 
-**It is the last one, and the one with the least to go on.** It is the only
-**release** build of the five, so it names no source files, and the EOF
-landing is the only measure available for it. Its runtime predates BGT 1.0
-by five months, which is already known to differ in the key derivation (MD5
-rather than SHA-256) and in having no edition field, so a saved-type-info
-back-reference where the later builds write the type again is exactly the
-kind of thing to expect.
+The absent script section is why nothing can be recovered from it: the
+names are not stripped, they were never written. And the byte that looked
+like an empty section is the **next record** -- a null behaviour, which is
+a complete record on its own.
 
-**And the evidence this file gave for Antony's encoded integer was the wrong
-example.** It read *"Antony separates the last: February 2012, and it writes
-a namespace while still reading 0x59 as 89 rather than as a two-byte
-value"* -- and 0x59 is one byte under **both** encodings, so it distinguishes
-nothing. What does: the plain form's one-byte range is 0..127 and the newer
-sign-flag form's is 0..63, so a value in between is the test.
-`creature`'s size is **0x48 = 72** and the six classes after it read
-coherently, which the newer reading could not produce. Confirmed from the
-binaries as well: all four early runtimes carry the plain reader's
-`cmp al,0x80 / 0xc0 / 0xe0 / 0xf0` ladder and **none** carries the sign-flag
-reader's `test al,0x7c / 0x7e`. The conclusion stands; the reason is
-different.
+How each function was found, for the record: `WriteFunction` by searching
+for the store of its own `'f'` tag (`c6 44 24 ?? 66`, one hit in the whole
+file), then `WriteTypeDeclaration` and `WriteInner` as its callers -- seven
+call sites to it in the first and five in the second, exactly as in the
+2011 build. The four tail tables are the four helpers `WriteInner` calls
+after its used-type loop, each one an `eu(count)` and a loop.
+
+#### Five releases, named rather than searched over
+
+With eleven per-build fields, a product of them is thousands of walks over
+a 300 KB module -- and worse, it invites a false landing, because enough
+free flags can fit a wrong story. They are not independent anyway: each one
+moved at a particular engine release, and the five titles in hand are five
+releases. So `as_early.PROFILES` is a release per entry and the product
+stays only as the fallback for a build that matches none:
+
+| release | what it changes from the one before |
+|---|---|
+| 2010-07 (a beta) | the six rows in the table above |
+| 2011-02 | the modern declaration order, three-field object variables, the `objVariableInfo` list, a script section per record, the later funcType numbering, the full tail |
+| 2011-09 | the default-argument list |
+| 2011-11 | one behaviour per class block rather than three |
+| 2012-02 | namespaces everywhere, and one byte after a body's line numbers |
+
+`bgt early` names the release it read a module with, and every one of the
+five lands exactly on EOF.
 
 #### Found on the way: two games' real SOURCE FILE LISTS
 

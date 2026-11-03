@@ -574,10 +574,13 @@ def cmd_early(args: argparse.Namespace) -> int:
     out = as_early.summarize(data, table)
     if out is None:
         return _fail("nothing to read")
+    print("engine release     %s"
+          % (out.get("release")
+             or "not one this reader knows; its fields were trialled"))
     print("per-build fields   namespace=%s defaults=%s objvar_three=%s "
-          "objinfo_fields=%d line_numbers=%s"
+          "objinfo_fields=%d line_numbers=%s behaviours=%d"
           % (out["namespace"], out["defaults"], out["objvar_three"],
-             out["objinfo_fields"], out["line_numbers"]))
+             out["objinfo_fields"], out["line_numbers"], out["behaviours"]))
     print("walked             0x%X of 0x%X (%.1f%%)%s"
           % (out["at"], out["size"], 100.0 * out["at"] / max(1, out["size"]),
              "  -- EXACTLY ON EOF" if out["eof"] else ""))

@@ -387,3 +387,45 @@ def test_a_used_global_prop_carries_a_namespace_too():
     out = as_early.summarize(USED_GLOBAL_PROPS)
     assert out["eof"] is True, out["error"]
     assert out["namespace"] is True
+
+# ---- the five engine releases -------------------------------------------
+
+def test_every_profile_answers_every_field():
+    # A profile is a release's whole answer, and anything it leaves out
+    # falls back to VERIFIED -- so a field missing from VERIFIED would be
+    # silently absent from every profile.
+    for name, profile in as_early.PROFILES:
+        for field in profile:
+            assert field in as_early.VERIFIED, "%s: %s" % (name, field)
+
+
+def test_the_first_profile_is_the_verified_one():
+    # The release this reader was built from is tried first, so adding a
+    # profile cannot re-describe a module that already landed on EOF.
+    _name, first = as_early.PROFILES[0][0], as_early.PROFILES[0][1]
+    assert first == {}, "the first profile must be the plain verified set"
+
+
+def test_a_profile_names_the_release_that_read_it():
+    out = as_early.summarize(_module())
+    assert out["eof"] is True
+    assert out["release"] == as_early.PROFILES[0][0]
+
+
+def test_the_2010_beta_profile_differs_in_what_the_binary_says():
+    beta = dict(as_early.PROFILES[-1][1])
+    assert as_early.PROFILES[-1][0] == "2010-07"
+    # Each of these was read out of that build's own writer, and each one
+    # on its own is enough to desynchronise the walk.
+    assert beta["size_before_flags"] is True
+    assert beta["section_field"] is False
+    assert beta["virtual_functype"] == 4
+    assert beta["objvar_three"] is False
+    assert beta["body_objinfo"] is False
+    assert beta["value_type_sizes"] is False
+    assert beta["used_object_props"] is False
+
+
+def test_the_fallback_still_tries_the_verified_answers_first():
+    first = as_early._fallback()[0]
+    assert first == as_early.VERIFIED

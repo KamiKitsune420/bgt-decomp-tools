@@ -89,6 +89,27 @@ class Early:
         #: not. Every record of that module needs it, including the ones
         #: with no line numbers at all.
         self.extra_after_lines = False
+        #: Whether the tail carries the VALUE types' sizes and the
+        #: `usedObjectProps` table. The 2010 beta has neither: its tail is
+        #: usedTypes, usedTypeIds, usedFunctions, usedGlobalProps and
+        #: usedStringConstants, and then the module ends.
+        self.value_type_sizes = True
+        self.used_object_props = True
+        #: Whether a function record ends with the source file it came
+        #: from. The 2010 beta writes none, so nothing can be recovered.
+        self.section_field = True
+        #: Which funcType marks a virtual declaration -- the record that
+        #: carries one extra encoded value after its traits byte. The 2011
+        #: builds write 3 and the 2010 beta writes 4, whose funcdef is 5
+        #: where theirs is 4: the whole numbering is one older.
+        self.virtual_functype = 3
+        #: Whether a body's tail carries an `objVariableInfo` list. The
+        #: 2010 beta goes from the stack figure straight to the line
+        #: numbers.
+        self.body_objinfo = True
+        #: Whether a declaration writes its SIZE before its flags. The
+        #: 2010 beta does; every build from 1.0 on writes the flags first.
+        self.size_before_flags = False
         #: Every source path the module has named, which is the result worth
         #: having even before a walk reaches EOF.
         self.sections = set()
@@ -257,13 +278,18 @@ class Early:
         self.functions.append(rec)
         if rec["funcType"] == 1:
             self.body(rec)
-        elif rec["funcType"] == 3:
+        elif rec["funcType"] == self.virtual_functype:
             self.eu()
         # The record's last field is the SCRIPT SECTION -- the path of the
         # file this function was compiled from -- or one zero byte when there
         # is none, which is every funcdef. That it is one or the other is the
         # check that makes a body shape judgeable: a desynchronised body
         # leaves something else here.
+        if not self.section_field:
+            # The 2010 beta writes no section at all, which is read out of
+            # its own `WriteFunction`: the record ends with the line numbers.
+            rec["section"] = None
+            return rec
         at = self.p
         section = self.string()
         if section and not section.lower().endswith((".bgt", ".nvgt")):
@@ -323,14 +349,15 @@ class Early:
             if self.objvar_three:
                 self.byte()                     # whether it is on the heap
         self.eu()                               # stackNeeded
-        for _ in range(self.eu()):              # objVariableInfo
-            for _f in range(self.objinfo_fields):
-                self.eu()
+        if self.body_objinfo:
+            for _ in range(self.eu()):          # objVariableInfo
+                for _f in range(self.objinfo_fields):
+                    self.eu()
         if self.line_numbers:
             for _ in range(self.eu()):
                 self.eu()
         if self.extra_after_lines:
-            self.byte()
+            self.eu()
 
     # ---- the module -----------------------------------------------------
 
@@ -340,8 +367,7 @@ class Early:
         enums = d.eu()
         for _ in range(enums):
             name = d.string()
-            d.u32()
-            d.eu()
+            d.declaration_head()
             if d.namespace:
                 d.string()
             for _v in range(d.eu()):
@@ -352,8 +378,7 @@ class Early:
         classes = []
         for _ in range(d.eu()):
             name = d.string()
-            flags = d.u32()
-            size = d.eu()
+            flags, size = d.declaration_head()
             ns = d.string() if d.namespace else ""
             classes.append({"name": name, "flags": flags, "size": size,
                             "namespace": ns})
@@ -387,8 +412,7 @@ class Early:
         typedefs = []
         for _ in range(d.eu()):
             typedefs.append(d.string())
-            d.u32()                          # flags
-            d.eu()                           # size
+            d.declaration_head()
             d.raw(4)                         # phase 2: the aliased token
         d.notes.append("%d typedef(s), to 0x%X" % (len(typedefs), d.p))
 
@@ -424,12 +448,13 @@ class Early:
         # The value types among them, with their sizes, so a module built
         # against a different build of a value type is refused rather than
         # mis-read.
-        value_types = d.eu()
-        for _ in range(value_types):
-            d.eu()                           # the index into usedTypes
-            d.eu()                           # that type's size
-        d.notes.append("%d value type size(s), to 0x%X"
-                       % (value_types, d.p))
+        if d.value_type_sizes:
+            value_types = d.eu()
+            for _ in range(value_types):
+                d.eu()                       # the index into usedTypes
+                d.eu()                       # that type's size
+            d.notes.append("%d value type size(s), to 0x%X"
+                           % (value_types, d.p))
 
         type_ids = [d.data_type() for _ in range(d.eu())]
         d.notes.append("%d usedTypeIds, to 0x%X" % (len(type_ids), d.p))
@@ -453,11 +478,13 @@ class Early:
         d.notes.append("%d usedStringConstants, to 0x%X"
                        % (len(literals), d.p))
 
-        obj_props = []
-        for _ in range(d.eu()):
-            d.type_info()
-            obj_props.append(d.string())
-        d.notes.append("%d usedObjectProps, to 0x%X" % (len(obj_props), d.p))
+        if d.used_object_props:
+            obj_props = []
+            for _ in range(d.eu()):
+                d.type_info()
+                obj_props.append(d.string())
+            d.notes.append("%d usedObjectProps, to 0x%X"
+                           % (len(obj_props), d.p))
         if d.p != len(d.d):
             raise Stop("the tail ended at 0x%X of 0x%X, not exactly on EOF"
                        % (d.p, len(d.d)))
@@ -486,6 +513,20 @@ class Early:
         found = [f for f in self.SCRIPT_OBJECT_FLAGS if common & f]
         return found[0] if len(found) == 1 else None
 
+    def declaration_head(self):
+        """A declaration's flags and size, in this build's own order.
+
+        Every build from BGT 1.0 on writes four bytes of flags and then an
+        encoded size; the 2010 beta writes the size first. Reading them the
+        wrong way round gives a plausible pair -- a size of 4 and a flag
+        word of 0x04100000 for an enum, say -- so this is trialled against
+        the landing like every other per-build field.
+        """
+        if self.size_before_flags:
+            size = self.eu()
+            return self.u32(), size
+        return self.u32(), self.eu()
+
     def is_interface(self, decl):
         """IsInterface: the script-object flag set AND a size of zero."""
         return bool(decl["flags"] & self.SCRIPT_OBJECT) and decl["size"] == 0
@@ -513,16 +554,53 @@ class Early:
             self.function()
 
 
-#: The per-build answers this reader already holds, tried first so that
-#: adding a trial cannot silently re-describe a module that already landed
-#: on EOF -- the same rule every per-build field in this project follows.
+#: The fields that vary between engine releases, with the answer each
+#: release gives. Every one was read out of that build's own `asCWriter`
+#: and then confirmed by the walk landing exactly on EOF.
+#:
+#: They are not independent flags to be searched over: each moved at a
+#: particular release, and a product of eleven of them is both slow and
+#: dangerous, because enough free choices can fit a wrong story. So the
+#: trial is over releases, and the product below is only the fallback for a
+#: build that matches none of them.
+PROFILES = (
+    # Grodan Gun, 2011-09: the generation this reader was built from.
+    ("2011-09", {}),
+    # Ljudfarmen, 2011-02, before the default-argument list existed.
+    ("2011-02", {"defaults": False}),
+    # Perilous Hearts, 2011-11: one behaviour per class block, not three.
+    ("2011-11", {"behaviours": 1}),
+    # Antony, 2012-02: namespaces everywhere, and one more byte after a
+    # body's line numbers.
+    ("2012-02", {"namespace": True, "behaviours": 1,
+                 "extra_after_lines": True}),
+    # Palace Punch-up, 2010-07, a BGT beta: the size before the flags, two
+    # fields per object variable, no objVariableInfo list, no script
+    # section, a funcType numbering one older, and a tail that stops after
+    # the string constants.
+    ("2010-07", {"defaults": False, "size_before_flags": True,
+                 "section_field": False, "virtual_functype": 4,
+                 "objvar_three": False, "body_objinfo": False,
+                 "value_type_sizes": False, "used_object_props": False}),
+)
+
+#: What a field means when a profile does not mention it: the answers this
+#: reader already held, which is also the 2011-09 release.
 VERIFIED = {"namespace": False, "defaults": True, "objvar_three": True,
             "objinfo_fields": 3, "line_numbers": True, "behaviours": 3,
-            "extra_after_lines": False}
+            "extra_after_lines": False, "size_before_flags": False,
+            "section_field": True, "virtual_functype": 3,
+            "body_objinfo": True, "value_type_sizes": True,
+            "used_object_props": True}
 
 
-def _candidates():
-    """Every per-build combination, the verified answers first."""
+def _fallback():
+    """Every combination of the fields a NEW build is most likely to move.
+
+    Deliberately not the whole product: the fields left out are the ones no
+    build has been seen to move on its own, and a trial over all eleven is
+    how a wrong story gets fitted.
+    """
     seen = []
     for namespace in (False, True):
         for defaults in (True, False):
@@ -531,15 +609,38 @@ def _candidates():
                     for lines in (True, False):
                         for beh in (3, 1):
                             for tail in (False, True):
-                                seen.append({"namespace": namespace,
-                                             "defaults": defaults,
-                                             "objvar_three": three,
-                                             "objinfo_fields": fields,
-                                             "line_numbers": lines,
-                                             "behaviours": beh,
-                                             "extra_after_lines": tail})
+                                for order in (False, True):
+                                    combo = dict(VERIFIED)
+                                    combo.update({
+                                        "namespace": namespace,
+                                        "defaults": defaults,
+                                        "objvar_three": three,
+                                        "objinfo_fields": fields,
+                                        "line_numbers": lines,
+                                        "behaviours": beh,
+                                        "extra_after_lines": tail,
+                                        "size_before_flags": order})
+                                    seen.append(combo)
     seen.sort(key=lambda c: c != VERIFIED)
     return seen
+
+
+def _walk(data, table, combo):
+    d = Early(data, namespace=combo["namespace"],
+              defaults=combo["defaults"], table=table)
+    for field, value in combo.items():
+        if field not in ("namespace", "defaults"):
+            setattr(d, field, value)
+    try:
+        d.walk()
+        stop = None
+    except Stop as exc:
+        stop = str(exc)
+    out = dict(combo)
+    out.update({"at": d.p, "size": len(data), "eof": d.p == len(data),
+                "error": stop, "sections": sorted(d.sections),
+                "notes": list(d.notes)})
+    return out
 
 
 def summarize(data, table=None):
@@ -552,26 +653,22 @@ def summarize(data, table=None):
     to absorb a mistake.
     """
     best = None
-    for combo in _candidates():
-        d = Early(data, namespace=combo["namespace"],
-                  defaults=combo["defaults"], table=table)
-        d.objvar_three = combo["objvar_three"]
-        d.objinfo_fields = combo["objinfo_fields"]
-        d.line_numbers = combo["line_numbers"]
-        d.behaviours = combo["behaviours"]
-        d.extra_after_lines = combo["extra_after_lines"]
-        try:
-            d.walk()
-            stop = None
-        except Stop as exc:
-            stop = str(exc)
-        out = dict(combo)
-        out.update({"at": d.p, "size": len(data), "eof": d.p == len(data),
-                    "error": stop, "sections": sorted(d.sections),
-                    "notes": list(d.notes)})
-        if out["eof"] and stop is None:
+    for name, profile in PROFILES:
+        combo = dict(VERIFIED)
+        combo.update(profile)
+        out = _walk(data, table, combo)
+        out["release"] = name
+        if out["eof"] and out["error"] is None:
             return out
-        key = (len(d.sections), d.p)
+        key = (len(out["sections"]), out["at"])
+        if best is None or key > best[0]:
+            best = (key, out)
+    for combo in _fallback():
+        out = _walk(data, table, combo)
+        out["release"] = None
+        if out["eof"] and out["error"] is None:
+            return out
+        key = (len(out["sections"]), out["at"])
         if best is None or key > best[0]:
             best = (key, out)
     return best[1] if best else None
@@ -595,11 +692,17 @@ def main():
             data = fh.read()
         print("== %s  %d bytes" % (os.path.basename(path), len(data)))
         out = summarize(data, table)
+        if out.get("release"):
+            print("   engine release     %s" % out["release"])
+        else:
+            print("   engine release     not one this reader knows; the "
+                  "fields below were trialled")
         print("   namespace=%-5s defaults=%-5s objvar3=%-5s objinfo=%d "
-              "lines=%-5s behaviours=%d tail=%s"
+              "lines=%-5s behaviours=%d tail=%s size-first=%s"
               % (out["namespace"], out["defaults"], out["objvar_three"],
                  out["objinfo_fields"], out["line_numbers"],
-                 out["behaviours"], out["extra_after_lines"]))
+                 out["behaviours"], out["extra_after_lines"],
+                 out["size_before_flags"]))
         print("   reached 0x%X of 0x%X (%.1f%%)%s"
               % (out["at"], out["size"], 100.0 * out["at"] / out["size"],
                  "  -- EXACTLY ON EOF" if out["eof"] else ""))
