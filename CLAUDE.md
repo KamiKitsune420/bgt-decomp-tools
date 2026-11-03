@@ -12103,13 +12103,58 @@ within about 0x30 bytes rather than drifting.
 
 Three things, each one disassembly away rather than a search:
 
-- **The body's tail fields.** The walk gets several functions into Grodan Gun
-  and then desynchronises, so one of the body's trailing counts is wrong. The
-  shape read from `WriteFunction` is the bytecode, the object variables, a
-  stack figure, an `objVariableInfo` list of three encoded values each, and a
-  line-number list -- and `WriteByteCode` at `0x004492D0` turns out to be a
-  **switch on the opcode** rather than a uniform walk, so the per-operand
-  encoding is the first thing to check.
+- **The body's tail fields.** Two of the three things that were wrong here are
+  now read out of `ReadByteCode` (`0x00447A30`) and are worth having
+  separately, because both contradict what the newer path assumes.
+
+  **A bytecode operand is FIXED-WIDTH, not a varint.** The reader takes the
+  opcode byte, looks up `asBCInfo[op].type`, and switches on it; each case
+  reads its operands with `ReadData` at a set width -- `push 2` for a word,
+  `push 4` for a dword, `push 8` for a quadword -- where `as_opcodes.
+  disassemble` reads one varint per operand. The stored size per type was
+  extracted from that switch (the jump table at `0x00447D7C`, indexed through
+  the byte table at `0x00447DA8`): thirteen of the nineteen came out directly,
+  and every one of those thirteen agrees with the layout its type name implies,
+  so the rest follow the same rule.
+
+  | stored | types |
+  |---|---|
+  | 1 -- no operand | 1 |
+  | 3 -- one word | 2, 3, 11 |
+  | 5 -- a dword, or two words | 4, 5, 10, 12, 14, 15, 18 |
+  | 7 -- three words | 8 |
+  | 9 -- a quadword, two dwords, or two words and a dword | 6, 7, 13, 19 |
+  | 11 -- a word and a quadword | 9, 17 |
+  | 13 -- a quadword and a dword | 16 |
+
+  **And the length field counts DWORDS of expanded instruction, not
+  instructions.** The loop's tail says so in five instructions:
+
+  ```
+  movzx edx, [opcode] ; shl edx, 4
+  mov eax, [edx + 0x4C547C]     ; asBCInfo[op].type
+  mov ecx, [eax*4 + 0x4C5428]   ; asBCTypeSize[type]
+  sub [esp+0x58], ecx           ; remaining -= dwords
+  jne ...                       ; while it is not zero
+  ```
+
+  This document's own rule is that *"the bytecode length field counts
+  instructions, not dwords"*, which is what it is for the build that rule was
+  read from -- so the unit is per generation like everything else here, and a
+  body of one `RET` reads 1 either way, which is why the smallest body cannot
+  tell them apart.
+
+  `asBCTypeSize` at `0x004C5428` is
+  `[0,1,1,1,2,2,3,3,2,3,2,1,2,3,2,2,4,3,2,3]`, which is **the same table** this
+  file records for BGT 1.3. Only the unit of the length field moved.
+
+  What is still wrong is in the second body of the first class, and the useful
+  instrument for it is already in hand: the script sections are findable
+  independently, so a correct walk has to land on each one exactly at a record
+  boundary. Counting the sections a walk reaches is a far better measure than
+  how far it gets -- which is the same lesson as the body-shape trial, where
+  the shape that swallowed a string as data got **further** than the right
+  one.
 - **The beta's `ReadTypeDeclaration`.** Its phase 2 needs two bytes where only
   one is there, so something in it is absent as well -- the interface count is
   the candidate, since its `funcType` numbering is already one generation
