@@ -12487,18 +12487,18 @@ of them were a NUMBERING rather than a layout:
 
 | title | lines | files | calls read back | gotos | unbalanced |
 |---|---|---|---|---|---|
-| Palace Punch-up | 3,549 | 10 | 824 | 0 | 0 |
-| Ljudfarmen | 3,329 | 10 | 704 | 1 | 0 |
-| Grodan Gun | 3,224 | 10 | 734 | 0 | 0 |
-| Perilous Hearts | 15,019 | 24 | 3,314 | 13 | 0 |
-| Antony | 2,907 | 10 | 521 | 0 | 0 |
+| Palace Punch-up | 3,537 | 10 | 824 | 0 | 0 |
+| Ljudfarmen | 3,304 | 9 | 704 | 0 | 0 |
+| Grodan Gun | 3,208 | 12 | 734 | 0 | 0 |
+| Perilous Hearts | 14,876 | 19 | 3,314 | 0 | 0 |
+| Antony | 2,874 | 10 | 521 | 0 | 0 |
 
-**0 unmodelled opcodes, 0 bodies given up on and a verified split on every
-one**, with the calls read back against each build's own declarations. Three
-of the five have no residual goto and none has an unbalanced file, so three
-are structurally compilable; the two that are not say so in the goto column.
+**0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling
+gotos, 0 unbalanced files and a verified split on every one**, with the
+calls read back against each build's own declarations -- so all five are
+structurally compilable, five engine releases from a 2010 beta to 2012.
 
-Those figures are after the five fixes below, which are what made them --
+Those figures are after the six fixes below, which are what made them --
 the row this table carried when it was first written was 42, 27, 20, 547
 and 54 gotos, with every string literal in all five games lost.
 
@@ -12774,6 +12774,102 @@ place. Battle of the Hunter's `animals.bgt` came out with
 ".ogg");` in four places, valid and not what the source wrote. The two
 positive witnesses above cost that title nothing: it renders
 byte-identical.
+
+###### ...and a `for` whose condition is at the TOP, which is every goto left
+
+This file reads the `for` shape out of BGT 1.3's `CompileForStatement`:
+an unconditional jump to the condition, the condition emitted **last**
+after the increment, and a conditional back edge above the body -- so a
+`for` and a `do-while` share a CFG shape there, and the header hoisting
+keys on *"the event just before the condition"*.
+
+**The 2010-2012 compiler does not rotate it.** The condition sits at the
+top with a branch to the exit, the increment is the last event of the
+body, and the latch is an unconditional jump back to the condition:
+
+```
+head:  cond ; J<exit>
+       body...
+227:   IncVi i            <- `continueLabels` points HERE
+228:   JMP head
+exit:
+```
+
+So a `continue` jumps to the **increment**, which is neither the header
+nor the exit -- and with the loop claimed as a `while (true)`, such a
+jump has no form to be written in. **Every residual goto left in the
+corpus was this one shape**: Ljudfarmen's `mouse_generate_question` 1,
+and Perilous Hearts' `computer_character` 9 and `weapon` 4.
+
+Ljudfarmen's is the clearest, and what it cost shows in the output.
+The author's retry path came out as
+
+```
+if ((mouse_answer - local_12) < 1) {
+    local_11--;
+}
+...
+goto L00e3;
+local_11++;
+```
+
+-- a jump to nowhere followed by dead code, and the digit-appending that
+the retry is supposed to skip left inside the loop. It reads as the
+source now:
+
+```
+for (; local_11 < mouse_questions; local_11++) {
+    local_12 = int(random(1.0, 10.0));
+    if (random(1.0, 2.0) == 1.0) { ... }
+    else {
+        if ((mouse_answer - local_12) < 1) {
+            local_11--;
+            continue;
+        }
+        ...
+    }
+    ...
+}
+```
+
+**Rendering it `continue` inside a `while (true)` would be wrong**, which
+is why the increment has to be hoisted: `continue` there jumps to the top
+and skips the increment, so the loop would never advance. Hoisting it
+into a `for` header is what makes `continue` run it exactly once, which
+is what the engine does.
+
+Two things keep it to the one shape. The header's branch must go to the
+loop's own exit, so the condition really is the loop's; and **some jump
+must really be about to become a goto** -- a jump to the increment that
+is the next event anyway is an ordinary fallthrough and wants nothing.
+
+| title | residual gotos | dangling | unbalanced | lines | calls |
+|---|---|---|---|---|---|
+| Palace Punch-up | **0** | 0 | 0 | 3,537 | 824 |
+| Ljudfarmen | 1 -> **0** | 0 | 0 | 3,304 | 704 |
+| Grodan Gun | **0** | 0 | 0 | 3,208 | 734 |
+| Perilous Hearts | 13 -> **0** | 0 | 0 | 14,876 | 3,314 |
+| Antony | **0** | 0 | 0 | 2,874 | 521 |
+
+So **all five of the 2010-2012 titles now recover with 0 residual gotos,
+0 dangling gotos, 0 unbalanced files, 0 unmodelled opcodes, 0 bodies
+given up on and a verified split** -- which makes them structurally
+compilable, five engine releases from a 2010 beta to 2012.
+
+And the newer half does not move. Battle of the Hunter, constant
+velocity, the `cs` client and the `cs` server all render **byte-identical**
+to the commit before this session, and the three that came with their
+author's source score exactly as this file records: constant velocity 94
+of 95, the `cs` server 194 of 196 and its client 216 of 218, each with
+the same known rows.
+
+(That client figure supersedes the **218 of 218** this file records under
+the reserved-word fix. It is 216 at the commit before this session as
+well, with `position_sound_custom_2d` and `_3d` as the two rows -- which
+is exactly what the webs section records as the accepted cost of that
+change, and the earlier sentence had not been re-derived. The `cs`
+server's 9,713 lines likewise supersede the standings' 9,712, and it too
+is byte-identical to the frozen commit.)
 
 ##### The TOKEN shift is four here and two in BGT 1.3
 

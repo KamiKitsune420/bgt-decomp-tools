@@ -1631,6 +1631,61 @@ def test_a_backward_branch_with_a_real_body_is_still_a_do_while():
     assert not any("goto" in line for line in rendered), rendered
 
 
+# -- an unrotated for, whose continue lands on its increment ----------------
+
+def _unrotated_for(extra_jump=True):
+    """The 2010-2012 compiler's `for`: condition at the TOP.
+
+        head:  cond ; J<exit>
+               body...
+        227:   IncVi i            <- `continueLabels` points HERE
+        228:   JMP head
+        exit:
+
+    One arm jumps to the increment, which is what a `continue` compiles to
+    in this shape -- neither the header nor the exit.
+    """
+    events = [decompile.Event("stmt", 60, ("int", "i = 0;")),
+              decompile.Event("branch", 76, ("(i < n)", 230)),
+              decompile.Event("branch", 150, ("(c)", 164))]
+    if extra_jump:
+        events.append(decompile.Event("jump", 158, 227))
+    events += [decompile.Event("stmt", 171, ("", "work();")),
+               decompile.Event("stmt", 227, ("", "i++;")),
+               decompile.Event("jump", 228, 71)]
+    return events
+
+
+def test_an_unrotated_for_hoists_its_increment():
+    """A jump to the increment is a `continue`, and `continue` only runs
+    the increment if it is in the header.
+
+    Left as a `while (true)`, the jump had no form to be written in and
+    came out as a `goto` with the increment dead after it -- which was
+    every residual goto left in this corpus: Ljudfarmen's
+    `mouse_generate_question` and Perilous Hearts' `computer_character`
+    and `weapon`.
+    """
+    rendered = decompile.Structurer(_unrotated_for(), None, ()).render(0)
+    assert "for (; i < n; i++) {" in rendered, rendered
+    assert any("continue;" in line for line in rendered), rendered
+    assert not any("goto" in line for line in rendered), rendered
+    # The increment is in the header, not left in the body as well.
+    assert sum("i++" in line for line in rendered) == 1, rendered
+
+
+def test_without_such_a_jump_the_loop_is_left_alone():
+    """The gate is that some jump really would become a goto. A loop with
+    nothing jumping to its increment keeps the `while (true)` reading every
+    other title relies on.
+    """
+    rendered = decompile.Structurer(_unrotated_for(extra_jump=False),
+                                    None, ()).render(0)
+    assert "while (true) {" in rendered, rendered
+    assert not any(line.startswith("for (") for line in rendered), rendered
+    assert not any("goto" in line for line in rendered), rendered
+
+
 # -- the funcdef the module records only as a placeholder -------------------
 
 def test_the_documented_signature_names_an_engine_funcdef():

@@ -6875,6 +6875,55 @@ class Structurer:
                 # all. It is when events sit between the back edge and the
                 # exit that those events are the rest of the body.
                 and self._next_index(e.data[1]) > plain_latches[-1] + 1)
+            #: **A `for` whose condition is at the top.** The 2010-2012
+            #: compiler does not rotate a `for`: the condition stays at
+            #: the top with a branch to the exit, the increment is the
+            #: last event of the body, and `continueLabels` points at the
+            #: increment -- so a `continue` jumps there, which is neither
+            #: the header nor the exit. Claimed as a `while (true)`, such
+            #: a jump has no form to be written in, and every residual
+            #: goto left in this corpus is one: Ljudfarmen's
+            #: `mouse_generate_question` and Perilous Hearts'
+            #: `computer_character` and `weapon`.
+            #:
+            #: Rendering it `continue` inside a `while (true)` would skip
+            #: the increment, so the increment is hoisted into a `for`
+            #: header, which is what makes `continue` run it exactly once.
+            #: The gate is that some jump really would become a goto: a
+            #: jump to the increment that is the next event anyway is a
+            #: fallthrough and wants nothing.
+            for_continue = None
+            if (plain_latches and e.kind == "branch" and not self.done[i]
+                    and i not in self.handled_plain_loops):
+                tail = plain_latches[-1]
+                update = tail - 1
+                exit_pos = self.ev[tail].pos + 2
+                if (i < update and self.ev[update].kind == "stmt"
+                        and e.data[1] >= exit_pos
+                        and re.fullmatch(
+                            r"[A-Za-z_]\w*(?:\+\+|--);",
+                            self.ev[update].data[1])
+                        and any(ev.kind == "jump" and not self.done[j]
+                                and ev.data == self.ev[update].pos
+                                and self._next_index(ev.data) != j + 1
+                                for j, ev in enumerate(self.ev[i + 1:update],
+                                                       i + 1))):
+                    for_continue = (tail, update, exit_pos)
+            if for_continue is not None:
+                tail, update, exit_pos = for_continue
+                self.handled_plain_loops.add(i)
+                self.done[i] = True
+                self.done[tail] = True
+                self.done[update] = True
+                increment = self.ev[update].data[1][:-1]
+                self.out.append((indent, "for (; %s; %s) {"
+                                 % (_strip(_condition(e.data[0])), increment)))
+                self._block(indent + 1, i + 1, update,
+                            LoopCtx(self.ev[tail].data, self.ev[update].pos,
+                                    self.ev[update].pos, exit_pos))
+                self.out.append((indent, "}"))
+                i = tail + 1
+                continue
             if (plain_latches and i not in self.handled_plain_loops
                     and not conditional_header):
                 tail = plain_latches[-1]
