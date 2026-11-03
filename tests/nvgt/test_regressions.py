@@ -333,51 +333,6 @@ class FoldSafetyTests(unittest.TestCase):
         self.assertFalse(
             sim({2: [4], 0: [4]})._stale_fold(12))
 
-    def test_a_call_inside_a_condition_has_run(self):
-        """A branch is not a statement, so nothing could see its call.
-
-        Both staleness clauses read `stmt_texts[bound[1]:]` and look for a
-        call. A call in a CONDITION never gets there -- the branch carries
-        it -- and `stmt_count` does not advance either, so
-        `bound[1] == self.stmt_count` and the answer is "nothing has run".
-
-        Perilous Hearts' `computer_character::think` is the shape:
-
-            int old = level;
-            if (!run_state()) return;      <- where the level changes
-            if (level != old) return;
-
-        so the guard came out `if (level != level)`, always false, and
-        `think` carried on acting on a level that had changed under it.
-        Three sites in that title, and Crazy Party's two remaining
-        tautologies are the same thing in `DeRetournable::bouge`.
-
-        **Both witnesses together.** `impure_positions` says a call ran --
-        the right half by construction, a pure call writing nothing -- and
-        a branch says we are past it, the branch event being emitted once
-        its condition has been built. A call position alone would make a
-        value stale against a call in its own statement.
-        """
-        def sim(branches, impure):
-            return self._sim(stmt_count=0, stmt_texts=[],
-                             branch_texts=branches,
-                             impure_positions=impure)
-
-        # Bound at 8; `run_state` rendered at 12; the branch at 16.
-        self.assertTrue(sim([16], [12])._ran_since((8, 0)))
-        # The call is before the bind, so the value is as fresh as it was.
-        self.assertFalse(sim([16], [4])._ran_since((8, 0)))
-        # A branch with no call before it says nothing ran.
-        self.assertFalse(sim([16], [])._ran_since((8, 0)))
-        # **And a call with no branch past it is not a witness**: inside
-        # one statement the bind and the read are the same moment, which
-        # is what an ordinary expression temporary is.
-        self.assertFalse(sim([4], [12])._ran_since((8, 0)))
-        # A statement with a call in it still answers on its own.
-        self.assertTrue(self._sim(stmt_count=1, stmt_texts=["f();"],
-                                  branch_texts=[], impure_positions=[]
-                                  )._ran_since((8, 0)))
-
     def test_a_global_read_goes_stale_through_any_call(self):
         """A global is not one of the frame's slots, and has no receiver.
 
@@ -2238,10 +2193,6 @@ class RecordedCallTests(unittest.TestCase):
         fd = object.__new__(FuncDecompiler)
         fd.invocations = {}
         fd.invocation_sites = {}
-        #: The flat, sorted half of the same record -- `_ran_since`
-        #: bisects it. The class default is a read-only tuple, so a
-        #: fake that WRITES has to bring its own list.
-        fd.impure_positions = []
         fd.call_sites = {}
         fd.purity = _Purity()
         fd.k, fd.instrs = 0, [None]

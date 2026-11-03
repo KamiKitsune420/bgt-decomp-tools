@@ -31,7 +31,6 @@ import argparse
 import re
 import struct
 import collections
-import bisect
 import copy
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -1827,15 +1826,6 @@ class FuncDecompiler:
         #: position at the end, not kept in append order, which is what lets a
         #: promotion insert its assignment where it belongs rather than here.
         self.stmt_count = 0
-        #: The position of every branch the simulation has emitted. A call
-        #: inside a condition is not a statement, so `stmt_texts` cannot
-        #: see it and neither clause that asks "has anything run since"
-        #: could tell that it had -- see `_ran_since`.
-        self.branch_texts: list[int] = []
-        #: Every position an impure call was rendered at, in order -- the
-        #: same record `invocation_sites` keeps per text, flat and sorted
-        #: so `_ran_since` is a bisect rather than a walk.
-        self.impure_positions: list[int] = []
         self.stmt_texts: list[str] = []
         #: {(slot, bind position): folds} for a value that is not repeatable.
         #: Counted so the *next* simulation of this function can promote the
@@ -2198,11 +2188,6 @@ class FuncDecompiler:
         #: call from two. A SET, because `_body` re-simulates a function once
         #: per pass and a list would count each call once per pass.
         self.invocation_sites.setdefault(calltxt, set()).add(self._pos())
-        here = self._pos()
-        if not self.impure_positions or self.impure_positions[-1] <= here:
-            self.impure_positions.append(here)
-        else:
-            bisect.insort(self.impure_positions, here)
 
     def _discarded_call(self, off: int) -> None:
         """A call whose result nothing reads still ran: emit it where it ran.
@@ -3715,8 +3700,9 @@ class FuncDecompiler:
                 #: does. What moves the object may be a method on something
                 #: ELSE that holds a handle to it, which no receiver test can
                 #: see.
-                if self._ran_since(ran):
-                    return declarable
+                for text in self.stmt_texts[ran[1]:]:
+                    if _ANY_CALL.search(_mask_strings(text)):
+                        return declarable
             # **...and so does a GLOBAL, which has no receiver at all.**
             # `pause_menu` keeps `current_bgm` across the menu music and
             # restores it on the way out; folded, the restore read the
@@ -3821,54 +3807,6 @@ class FuncDecompiler:
             return False
         return declarable
 
-    #: Default so a partially-built instance has it -- the fold-safety
-    #: tests construct one without running `__init__`, and a staleness
-    #: question that raised there would be a test harness failing rather
-    #: than a rule being checked.
-    branch_texts: tuple = ()
-    impure_positions: tuple = ()
-
-    def _ran_since(self, bound) -> bool:
-        """Has anything run between where a value was computed and here?
-
-        A statement with a call in it is the obvious half, and the one
-        both staleness clauses used to ask alone. The other half is a
-        call inside a **condition**: a branch is not a statement, so
-        `stmt_texts` never gets it and `stmt_count` never advances --
-        which answered "nothing has run" for Perilous Hearts'
-        `if (!run_state()) return;` and for Crazy Party's
-        `DeRetournable::bouge`, the one case this file records the member
-        clause as unable to reach.
-
-        **Both witnesses together**, which is the narrowing that makes it
-        cost nothing. *A call ran* is `invocation_sites`, every position
-        an IMPURE call was rendered at -- the right half by construction,
-        since a pure call writes nothing and can make neither a global nor
-        a member stale. *We are past it* is the branch, emitted once its
-        condition has been built, so it can never fall inside the
-        expression being built now -- which a call position alone cannot
-        promise, and this file records at length what collapsing a loop
-        condition costs.
-
-        Asking instead whether a branch's condition TEXT holds a call cost
-        452 lines across three titles: `_ANY_CALL` matches any `name(`, a
-        numeric conversion included, so `if (int(falling) > 0)` counted as
-        something having run and every member read a concatenation had
-        folded got a local of its own for nothing.
-        """
-        for text in self.stmt_texts[bound[1]:]:
-            if _ANY_CALL.search(_mask_strings(text)):
-                return True
-        if not self.branch_texts:
-            return False
-        #: The latest branch is the most permissive, and both lists are
-        #: appended in increasing position order by the simulation -- so
-        #: the whole question is one bisect.
-        latest = self.branch_texts[-1]
-        index = bisect.bisect_right(self.impure_positions, bound[0])
-        return (index < len(self.impure_positions)
-                and self.impure_positions[index] <= latest)
-
     def _stale_global(self, value: Atom, bound) -> bool:
         """Has a global this value reads been written since it was bound?
 
@@ -3903,17 +3841,18 @@ class FuncDecompiler:
         live, and the clamp that keeps it inside -24..-4 never ran
         either. Both compile, both run, and neither shows in any count.
         """
-        if bound[1] == self.stmt_count and not self._ran_since(bound):
+        if bound[1] == self.stmt_count:
             return False        # nothing has run since: the same moment
         masked = _mask_strings(value.text)
         names = [n for n in set(_IDENT.findall(masked))
                  if n in self.global_types]
         if not names:
             return False
-        if self._ran_since(bound):
-            return True
         for text in self.stmt_texts[bound[1]:]:
-            if any(_mutates(_mask_strings(text), name) for name in names):
+            clean = _mask_strings(text)
+            if _ANY_CALL.search(clean):
+                return True
+            if any(_mutates(clean, name) for name in names):
                 return True
         return False
 
@@ -5925,7 +5864,6 @@ class FuncDecompiler:
                 if value.kind != "null" and off in self.var_types
                 and self.var_types[off].obj_type is not None})
             cond = _negate_cond(cond)
-        self.branch_texts.append(self._pos())
         self.events.append(Event("branch", self._pos(), (cond, target)))
 
     def _declared_numeric(self, text: str) -> bool:

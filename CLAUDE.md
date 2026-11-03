@@ -7473,7 +7473,8 @@ writes a named slot really is unordered, and leaving it so is a wrong
 claim waiting for the next title with the shape. The cost of being wrong
 in this direction is five lines.
 
-### Thirteen: a call inside a CONDITION has run, and nothing could see it
+### Thirteen, REVERTED: a call inside a CONDITION has run, and
+### nothing could see it
 
 Both staleness clauses that turn on *"has anything run since"* read
 `self.stmt_texts[bound[1]:]` and look for a call in the text. **A call
@@ -7676,6 +7677,70 @@ the diff is what explained it.
 rather than guessed at now (see above). The next attempt has to reach a
 folded call without disturbing what else gets promoted, which is a
 question about promotion rather than about staleness.
+
+#### REVERTED, and the sweep is what caught it -- after the commit
+
+The condition-call witness went in, was measured on nine artefacts, and
+**the measurement that mattered was not taken**: `bgt signatures` on the
+`cs` server. Run afterwards, it says
+
+| the server's sweep | before | after |
+|---|---|---|
+| `same_argument` | **0** | **35** |
+| `double_assign` | 11 | 16 |
+
+and `same_argument` is this file's own signature for the defect it
+records as *"every positional sound in that server plays with all three
+axes equal to x"*. It was 38 rows before the named-slot fix and 0 after.
+The change put 35 of them back:
+
+```
+before:  play2(local_12, int(players[local_32].x),
+                         int(players[local_32].y),
+                         int(players[local_32].z), ...)
+
+after:   local_9 = players[local_32].z;
+         local_9 = players[local_32].y;
+         local_9 = players[local_32].x;
+         play2(local_12, int(local_9), int(local_9), int(local_9), ...)
+```
+
+-- three coordinates that are all x. And the same collapse on a string
+test: `local_11 = "back"; local_11 = ""; if ((local_59[1] == local_11)
+|| (local_59[1] == local_11))`, which compares against the empty string
+twice where the source compares against `"back"` and `""`.
+
+**The cause is promotion against pushed values.** `_snapshot_pushed`
+exists for exactly this -- *"at a write to a named slot, substitute
+every value already on the simulated stack that reads it"* -- and it can
+substitute a VALUE where a named slot has only a NAME. Promoting slot 9
+turned three pushed member reads into three copies of `local_9`, and
+there was nothing left for the substitution to put back.
+
+So it is reverted. **Both defects it fixed are real and are now
+recorded rather than fixed**:
+
+- `cs`'s mouse-mode toggle comes out as `if (mousemode == 1) { } else
+  { } mousemode = 1;` -- both arms empty, the mode always 1, so the
+  backslash key puts the player into inventory mode and can never take
+  them out. Confirmed against that game's own source,
+  `mousemode = mousemode==1 ? 0 : 1;`.
+- Perilous Hearts' `computer_character::think` snapshots the global
+  `level`, calls `run_state` -- which is where the level changes -- and
+  checks `level != old`. The guard comes out `if (level != level)`,
+  always false, three times in that title.
+
+What a correct version has to do is give a *pushed* value its own text
+before the slot it reads is promoted, which is a question about
+promotion rather than about staleness -- the same conclusion the
+folded-call witness reached from the other side.
+
+**And the lesson is mine rather than the code's.** Nine artefacts were
+measured and the one instrument built for this defect class was not run
+on the one title that has it. A ground-truth score held, every goto held,
+every split held, and the thing that moved was a sweep nobody asked.
+`bgt signatures` over every title with a recovery on disk is the check,
+and it costs nothing.
 
 ### A call whose result NOTHING READS is dropped, call and all
 
