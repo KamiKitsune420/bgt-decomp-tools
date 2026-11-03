@@ -7473,6 +7473,154 @@ writes a named slot really is unordered, and leaving it so is a wrong
 claim waiting for the next title with the shape. The cost of being wrong
 in this direction is five lines.
 
+### Thirteen: a call inside a CONDITION has run, and nothing could see it
+
+Both staleness clauses that turn on *"has anything run since"* read
+`self.stmt_texts[bound[1]:]` and look for a call in the text. **A call
+rendered inside a condition is not a statement**: the branch carries it,
+`stmt_texts` never gets it and `stmt_count` never advances -- so
+`bound[1] == self.stmt_count` and the question is answered "nothing has
+run" at the first line, before any of the eight rules above can be
+asked.
+
+It is the hole under the one case this file records the member clause as
+unable to reach, and under two more it never named.
+
+**The cs client's mouse mode could be switched on and never off**, and
+that game came with its author's source, so there is no arguing about
+it:
+
+```
+mousemode = mousemode==1 ? 0 : 1;
+speak((mousemode==1 ? "Inventory management" : "Movement and weapons"));
+```
+
+recovered as
+
+```
+if (mousemode == 1) {
+} else {
+}
+mousemode = 1;
+```
+
+-- a ternary with both arms empty and the mode assigned the constant 1,
+which is this file's own `empty_arm` signature saying a condition has
+lost its value. The `\` key put the player into inventory mode and could
+never take them out of it. It now reads
+
+```
+if (mousemode == 1) {
+    local_9 = 0;
+} else {
+    local_9 = 1;
+}
+mousemode = local_9;
+```
+
+which is the toggle. `_diamond_bind` exists for exactly this -- both arms
+assign, so neither may be folded into the read after the join -- and it
+is reached through `_stale_fold`, which had already answered "nothing has
+run" because the only thing between the arms and the read is a branch.
+
+**Perilous Hearts' `computer_character::think` acted on a level that had
+changed under it.** The bytecode is four lines of source:
+
+```
+int old = level;              LdGRdR4 3, level ; CpyVtoV4 18, 3
+if (!run_state()) return;     CALLINTF run_state
+if (level != old) return;     CpyGtoV4 1, level ; CMPi 1, 18
+```
+
+`run_state` is where the level changes -- that is what the guard is for
+-- and the only thing between the snapshot and the read is an `if`. So
+the guard came out `if (level != level)`, always false. Three sites in
+that title, and the recovery now reads as the source.
+
+**I predicted this was also Crazy Party's two remaining tautologies,
+and the measurement says it is not.** Those are still 2 after the
+change, and `DeRetournable::bouge` is still
+`if ((this.x != this.x) || (this.y != this.y))`. The prediction was
+reasonable and wrong, and reading the body says why -- which is worth
+more than the prediction was:
+
+```
+13 LoadThisR DeRetournable.x ; RDR4 1 ; CpyVtoV4 3, 1   int oldx = x;
+16 LoadThisR DeRetournable.y ; RDR4 2 ; CpyVtoV4 4, 2   int oldy = y;
+19-24 push six arguments
+30 CALL JoueurTerrain::bouge                            the move
+31 CpyRtoV4 1 ; CpyVtoV4 5, 1                           bool moved = ...
+33 LoadThisR DeRetournable.x ...                         the compare
+```
+
+The move at 30 is not in a condition at all -- it is an ordinary call
+whose result goes to slot 5. **It is not a statement either**, because
+`local_5` is read later and the call folded into that read, so
+`stmt_count` never advanced and `stmt_texts` never got it. There is no
+branch between the snapshot and the compare, so neither witness fires.
+
+So the shape that is still open is narrower than the one fixed here and
+has its own discriminator waiting: a folded call that **reached a slot**
+has run as its own step, and `call_binds` is the record of exactly that
+-- *"only that it WAS bound, which is the census's guard"*. A call that
+merely contributes to the expression being built now never reaches one.
+That is the next attempt, and it wants its own five-title measurement
+rather than being bolted on to this one.
+
+#### Both witnesses together, which is what makes it narrow
+
+*A call ran* is `invocation_sites`, every position an **impure** call was
+rendered at -- the right half by construction, since a pure call writes
+nothing and can make neither a global nor a member stale. *We are past
+it* is the **branch**, emitted once its condition has been built, so it
+can never fall inside the expression being built now.
+
+A call position alone cannot promise that, and this file records at
+length what collapsing a loop condition costs. Asking instead whether a
+branch's condition TEXT holds a call was the first version, and
+`_ANY_CALL` matches any `name(` -- a numeric conversion included -- so
+`if (int(falling) > 0)` counted as something having run.
+
+`impure_positions` is the same record flat and sorted, so the whole
+question is one bisect: the latest branch is the most permissive, and
+both lists are appended in increasing position order.
+
+#### What it cost
+
+| title | lines | calls read back | goto | split |
+|---|---|---|---|---|
+| Grodan Gun, Ljudfarmen, Antony, Palace Punch-up | **byte-identical** | unchanged | 0 | verified |
+| constant velocity | **byte-identical** | 1,767 | 0 | verified |
+| Perilous Hearts | 14,876 -> 14,880 | 3,314 | 0 | verified |
+| cs client | 7,963 -> 7,970 | 2,858 | 0 | verified |
+| Battle of the Hunter | 4,269 -> 4,331 | 1,334 | 0 | verified |
+| cs server | 9,713 -> 10,096 | 3,060 -> 3,064 | 0 | verified |
+
+**The ground truth does not move**: the `cs` server 194 of 196, its
+client 216 of 218 and constant velocity 94 of 95, each with the same
+known rows.
+
+The server's 383 lines are the one real cost, and they are the shape
+this file already records as the price of the member clause: a member
+read a concatenation had folded gets a local of its own, because the
+compiler held it across a branch. Faithful and longer. Battle of the
+Hunter's 62 are the same, plus one piece of genuine ugliness --
+`speak(local_1, (local_7 != 0))` where the source wrote
+`speak(name, true)` -- which is promotion working as it always has: the
+slot gets one name, so every later value in it becomes an assignment.
+
+**Crazy Party is the canary and it holds**: 0 residual gotos, 0
+dangling, 0 unbalanced, a verified split and 90,194 calls read back,
+which is the standings' figure to the digit, for +18 lines. That is the
+title every over-broad fold change in this file was caught by.
+
+`bgt signatures`, which is the instrument that found all of this:
+Perilous Hearts' tautologies **3 -> 1**, Crazy Party's 2 unchanged for
+the reason above, and every other shape on every title unchanged. The
+one Perilous Hearts row left is a different gap again -- a snapshot
+wrapped in a cast is kind `call`, so neither the member nor the global
+clause is asked about it at all, which is rule seven's territory.
+
 ### A call whose result NOTHING READS is dropped, call and all
 
 Diagnosed and **not fixed**, with the sites named, because it is the
