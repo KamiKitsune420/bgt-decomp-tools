@@ -1050,6 +1050,14 @@ class _Reader:
             for dt in f.param_types:
                 apply(dt)
 
+    #: Whether a stored program position is already a dword offset. The
+    #: newer engine writes every position -- a jump delta, an object
+    #: variable's live range, a line-number entry -- as an INSTRUCTION
+    #: NUMBER, so that one module loads into builds whose instruction
+    #: widths differ; this reader restores the dword offset from it. The
+    #: 2010-2012 engine never did that, and `bgt_asir` sets this for it.
+    positions_are_dwords = False
+
     def _translate_function(self, f: Function, used_obj_props, find_used_function) -> None:
         """Resolve instruction operands for one function (TranslateFunction)."""
         m = self.module
@@ -1127,6 +1135,14 @@ class _Reader:
                     ins.string_const = m.used_strings[idx]
             elif n in ("JMP", "JZ", "JNZ", "JLowZ", "JLowNZ",
                        "JS", "JNS", "JP", "JNP"):
+                if self.positions_are_dwords:
+                    # The 2010-2012 engine stores the dword delta itself, so
+                    # there is nothing to restore and `_jump_target`'s own
+                    # `pos + 2 + d` is the answer. Converting it anyway put
+                    # every target one instruction past where it belongs.
+                    ins.jump_arg = (ins.dw_arg if ins.dw_arg < 0x80000000
+                                    else ins.dw_arg - 0x100000000)
+                    continue
                 # Saved arg is an instruction-number delta relative to the
                 # NEXT instruction (asCWriter::WriteData). Restore the dword
                 # offset exactly as asCReader::TranslateFunction does:
@@ -1148,6 +1164,9 @@ class _Reader:
                 ins.jump_target = ins.pos + 2 + size if 0 <= target_nbr < len(f.bytecode) else None
         # Convert instruction-number-based positions back to dword offsets
         # (asCReader::TranslateFunction does this via instructionNbrToPos).
+        if self.positions_are_dwords:
+            # ...and an engine that never converted them has nothing to undo.
+            return
         nbr_to_pos = [i.pos for i in f.bytecode]
         nbr_to_pos.append(f.bytecode[-1].pos + f.bytecode[-1].size if f.bytecode else 0)
         if f.has_debug_info:

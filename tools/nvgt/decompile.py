@@ -244,9 +244,24 @@ def _handle_comparison(pair, flagged: bool) -> bool:
     """
     if flagged:
         return True
-    return pair is not None and any(
-        getattr(a, "kind", None) == "null" or getattr(a, "text", None) == "null"
-        for a in pair)
+    if pair is None:
+        return False
+    if any(getattr(a, "kind", None) == "null"
+           or getattr(a, "text", None) == "null" for a in pair):
+        return True
+    #: **...and so do two handle-typed operands**, which is the only
+    #: witness the 2010-2012 engine leaves: a handle is an ordinary
+    #: four-byte slot there, so two of them are compared with `CMPi` and
+    #: the `null` the source wrote has been put in a slot of its own
+    #: first. BGT's own `sound_pool_item::reset` is the case, and `==` on
+    #: a `sound` handle asks for an `opEquals` it does not have.
+    #:
+    #: Both sides, because one is not enough: a script class with an
+    #: `opEquals` is compared by value through its handle, and that is
+    #: rendered as a call rather than as a pair.
+    types = [getattr(a, "data_type", None) for a in pair]
+    return len(types) == 2 and all(
+        dt is not None and dt.is_object_handle for dt in types)
 
 
 def _read_slots(instrs: list[Instr]) -> set[int]:
@@ -411,6 +426,20 @@ def _esc(s: str) -> str:
         else:
             result.append(character)
     return "".join(result)
+
+
+#: Every name the registered string factory goes by. BGT 1.3 and most
+#: forks call it `_string_factory_`, Manamon 1's calls it `$str`, and NVGT
+#: builds carry a mangled `...stringfactory`. **A registered name is a
+#: per-build field like any other**, and this file records that knowing
+#: only one spelling cost 24,916 diagnostics on one title -- so the
+#: question is asked in one place.
+STRING_FACTORIES = ("_string_factory_", "$str")
+
+
+def _is_string_factory(name: str) -> bool:
+    return bool(name) and (name in STRING_FACTORIES
+                           or name.endswith("stringfactory"))
 
 
 def _jump_target(ins: Instr) -> int:
@@ -1574,12 +1603,23 @@ class FuncDecompiler:
             #: generated local holding `local_1` for nothing. This file
             #: already says the dual of it one place over: "destructing a
             #: value is not reading it".
-            if ((callee.startswith(("$beh", "_beh_"))
-                 and callee not in _DTOR_SPELLINGS)
+            #: **...and the 2010-2012 engine's string factory is this
+            #: shape too.** It returns a `string` BY VALUE, so a literal is
+            #: constructed into the slot the hidden return address names:
+            #: `STR "x" ; PSF 7 ; CALLSYS _string_factory_`. Unseen here,
+            #: every literal in those five games came out routed through a
+            #: named local -- `local_7 = "Grodan Gun"; show_game_window(
+            #: local_7);` -- which is exactly what `_reused_object_slot`
+            #: exists to fold. It cannot reach a later engine, whose
+            #: factory returns a reference and whose shape puts the `STR`
+            #: between the `PSF` and the call.
+            constructs = (callee.startswith(("$beh", "_beh_"))
+                          or _is_string_factory(callee))
+            if ((constructs and callee not in _DTOR_SPELLINGS)
                     or callee in _ASSIGN_OPS):
                 self.behaviour_writes.setdefault(
                     _s16(op.w_arg), []).append(op.pos)
-            if callee.startswith(("$beh", "_beh_")):
+            if constructs:
                 self.construct_sites.setdefault(
                     _s16(op.w_arg), []).append(op.pos)
             #: **A slot the engine RE-ASSIGNS was already constructed, so the
@@ -2189,8 +2229,15 @@ class FuncDecompiler:
         self.events.append(Event("stmt", bound[0], ("", f"{value.text};")))
         self.consumed_temps.add(off)
 
-    def _bind(self, off: int, a: Atom) -> None:
+    def _bind(self, off: int, a: Atom, constructed: bool = False) -> None:
         """Store a value into frame slot `off` (statement or temp alias).
+
+        `constructed` says the slot was CONSTRUCTED here rather than
+        assigned, which brings in one more question: `_reused_object_slot`,
+        asking whether the compiler materialised the slot or the source
+        named it. The constructor branch of `_call` asks it in its own path
+        for the same reason; this is for the 2010-2012 string factory, which
+        constructs a slot because it returns a `string` by value.
 
         **Flushing a discarded call here was tried and is wrong**, and the
         measurement is why: a rebind is not proof that the previous value
@@ -2230,7 +2277,8 @@ class FuncDecompiler:
                 #: of another slot and the question belongs at that slot's
                 #: own read. `_value_origin` is where it is answered.
                 return
-        if self.is_named_here(off):
+        if self.is_named_here(off) and not (
+                constructed and self._reused_object_slot(off, a)):
             self._emit_assign(off, a)
         else:
             self.consumed_temps.discard(off)
@@ -4195,6 +4243,19 @@ class FuncDecompiler:
             # implicitly: "No matching signatures to 'path::to_string(const
             # int)'". `Enum(3)` is AngelScript's explicit conversion, checked
             # against the installed compiler.
+            # ...unless the type is a REFERENCE type, which no integer
+            # converts to. The 2010-2012 engine has no `ClrVPtr`: a handle
+            # is an ordinary four-byte slot there, so `@h = null` is
+            # `SetV4 h, 0` and two handles are compared with `CMPi`. BGT's
+            # own `sound_pool_item::reset` recovered as `sound local_2(0);`
+            # and `local_1 != local_2` -- a constructor `sound` does not
+            # have, and an operator the language spells `is`. Rendering the
+            # constant `null` settles the operator too, because
+            # `_handle_comparison` answers that a `null` operand is a handle
+            # comparison whatever opcode produced it.
+            if (value == 0 and dt.obj_type is not None
+                    and self._is_reference_type(dt)):
+                return Atom("const", "null", data_type=dt, constant_bits=bits)
             if (dt.obj_type is not None and not dt.is_object_handle
                     and dt.obj_type.kind in ("enum", "app")):
                 return Atom("const", f"{dt.obj_type.format_name()}({value})",
@@ -4895,13 +4956,23 @@ class FuncDecompiler:
         # slots `STR` pushes on the stack, so every literal in that title
         # rendered as `string(<strlen>, "the text")` -- a placeholder that
         # is not source, and a parse error that cascades.
-        if meth in ("_string_factory_", "$str") \
-                or meth.endswith("stringfactory"):
+        if _is_string_factory(meth):
             literal = next((a.text for a in args
                             if a.kind == "const" and a.text.startswith('"')), None)
-            self.value_reg = Atom("const", literal if literal is not None else '""',
-                                  data_type=ret)
+            value = Atom("const", literal if literal is not None else '""',
+                         data_type=ret)
+            self.value_reg = value
             self.pending_value_call = None
+            # The 2010-2012 engine registers the factory as returning a
+            # `string` BY VALUE, so the call carries a hidden return address
+            # and the literal is constructed into the slot it names -- which
+            # is what every later instruction reads. Left in the value
+            # register, nothing read it: every literal in all five of those
+            # games recovered as `null`. Inert for an engine whose factory
+            # returns `const string&`, where there is no such slot.
+            if (has_out and pop_out is not None and pop_out.is_ptr
+                    and pop_out.offset is not None):
+                self._bind(pop_out.offset, value, constructed=True)
             return
 
         # constructors: $beh0(out) = copy-construct (this=dest, out=source),

@@ -667,6 +667,17 @@ def test_which_opcode_carries_the_literals_decides_the_encoding():
     assert plain(0, 149762) is False
     # No literals either way is not an answer.
     assert plain(0, 0) is None
+    # ...and the 2010-2012 builds are what make this a mechanism rather than
+    # a magnitude comparison: they carry both opcodes in quantity, and all
+    # five are plain -- their global operands saturate `usedGlobalProps`
+    # exactly and agree with the operand width 94-99.6% of the time against
+    # 25-53% for the tagged reading. `str_count > pga_count` called every
+    # one of them tagged, which lost every string literal in five games.
+    assert plain(322, 640) is True         # grodan gun
+    assert plain(354, 526) is True         # ljudfarmen
+    assert plain(177, 403) is True         # antony
+    assert plain(1178, 2400) is True       # perilous hearts
+    assert plain(362, 940) is True         # palace punch-up
 
 
 def test_alloc_constructor_index_is_one_based():

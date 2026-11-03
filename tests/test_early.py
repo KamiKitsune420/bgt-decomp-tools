@@ -549,3 +549,145 @@ def test_every_bytecode_type_has_a_name_and_a_read():
         assert len(bgt_asir.BC_FIELDS[name]) == len(as_early.BC_READS[kind]), \
             "%s: %d fields, %d reads" % (name, len(bgt_asir.BC_FIELDS[name]),
                                          len(as_early.BC_READS[kind]))
+
+# ---- positions, not instruction numbers ---------------------------------
+
+def test_a_position_is_a_dword_offset_on_the_early_path_only():
+    """The one operand kind the two engines do NOT serialise alike.
+
+    The newer writer turns every stored program position into an
+    instruction-number delta so that one module loads into builds whose
+    instruction widths differ; `asreader` restores the dword offset from
+    it. The 2011 writer never did that -- `WriteByteCode` at 0x004492D0
+    compares the opcode against twenty-four numbers and the jump family
+    0x0B..0x11 is not among them -- so there is nothing to restore.
+
+    Measured both ways on every title, and it discriminates in both
+    directions: 9,808 early jumps land exactly on an instruction boundary
+    as dwords and 73-82% of them do as instruction numbers, while Battle
+    of the Hunter is 100% as instruction numbers and 72.5% as dwords.
+    """
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import asreader
+
+    # The flag defaults off, so nothing about the newer path moves.
+    assert asreader._Reader.positions_are_dwords is False
+    assert bgt_asir._Translator(None).positions_are_dwords is False
+    assert bgt_asir._Translator(None, True).positions_are_dwords is True
+    # ...and `_translate_function` is borrowed rather than transcribed, so
+    # the flag has to be read off `self` there.
+    import inspect
+    body = inspect.getsource(asreader._Reader._translate_function)
+    assert body.count("self.positions_are_dwords") == 2, \
+        "the jump branch and the position conversion each ask once"
+
+
+def test_a_pointer_operand_is_named_by_the_newer_reader():
+    """A 32-bit build calls it a DWORD where the 64-bit engine calls it a
+    QWORD, and the field NAME is what every resolver reads.
+
+    `REFCPY` is `asBCTYPE_DW_ARG` in a 2011 runtime and `asBCTYPE_QW_ARG`
+    in the engine `asreader` models, and `TranslateFunction` reads
+    `qw_arg` -- so the operand was written to `dw_arg` and read as 0,
+    which is `used_types[0]` for an object type and `used_strings[0]` for
+    a literal. 13,887 instructions across the five titles, `PGA` 4,909 of
+    them, which is every string literal in all five games.
+    """
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    # Every pointer-sized operand the early builds name narrowly.
+    for name in ("PGA", "LDG", "PshG4", "SetG4", "CpyVtoG4", "CpyGtoV4",
+                 "LdGRdR4", "FREE", "REFCPY", "OBJTYPE", "FuncPtr"):
+        newer = bgt_asir.LEGACY_BC_TYPE.get(name,
+                                           bgt_asir.NEWER_BC_TYPE.get(name))
+        assert newer is not None, name
+        assert "qw_arg" in bgt_asir.BC_FIELDS[newer], name
+    # ...and the map is keyed by NAME, because the numbering moved: 0x01 is
+    # `PUSH` here and `PshGPtr` there, so a lookup by number would answer
+    # about a different instruction.
+    assert "PUSH" not in bgt_asir.NEWER_BC_TYPE
+
+
+def test_a_zero_into_a_reference_type_is_null():
+    """`@h = null` is `SetV4 h, 0` where there is no `ClrVPtr`.
+
+    BGT's own `sound_pool_item::reset` is the shape, and typed from the
+    slot that constant rendered as `sound(0)` -- a constructor `sound` has
+    not. `_is_reference_type` is the discriminator, so an enum and a
+    value type are untouched and the enum conversion the branch exists for
+    still happens.
+    """
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import inspect
+    import decompile
+    src = inspect.getsource(decompile.FuncDecompiler._typed_constant)
+    null_at = src.index("_is_reference_type")
+    enum_at = src.index('kind in ("enum", "app")')
+    assert null_at < enum_at, "the reference-type test must come first"
+
+
+def test_two_handles_compared_want_is():
+    """`CMPi h1, h2` is an identity test, and nothing else says so.
+
+    `CmpPtr` sets the flag and a `null` operand is the other witness. This
+    engine has neither for the shape: a handle is a four-byte slot, so two
+    of them are compared with `CMPi` and the `null` the source wrote has
+    been materialised into a slot first.
+
+    **Both** operands must be handles. One is not enough -- a script class
+    with an `opEquals` is compared by value through its handle.
+    """
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    from decompile import Atom, _handle_comparison
+    try:
+        from tools.nvgt.asreader import DataType, TypeInfo
+    except ImportError:
+        from asreader import DataType, TypeInfo
+
+    sound = TypeInfo(kind="app", name="sound")
+    handle = DataType(token_type=5, obj_type=sound, is_object_handle=True)
+    value = DataType(token_type=5, obj_type=sound)
+    both = (Atom("var", "local_1", data_type=handle),
+            Atom("var", "local_2", data_type=handle))
+    one = (Atom("var", "local_1", data_type=handle),
+           Atom("var", "local_2", data_type=value))
+    assert _handle_comparison(both, False) is True
+    assert _handle_comparison(one, False) is False
+    # The flag and the null operand still answer on their own.
+    assert _handle_comparison(one, True) is True
+    assert _handle_comparison((Atom("const", "null"),
+                               Atom("var", "x")), False) is True
+
+
+def test_the_string_factory_is_named_in_one_place():
+    """A registered name is a per-build field, and this one has three
+    spellings. Two places knowing it is the shape this file keeps
+    recording -- the construction pre-pass needs the same list as the
+    rendering branch, because the 2010-2012 factory CONSTRUCTS its slot.
+    """
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import decompile
+    assert decompile._is_string_factory("_string_factory_")
+    assert decompile._is_string_factory("$str")
+    assert decompile._is_string_factory("nvgt_stringfactory")
+    assert not decompile._is_string_factory("")
+    assert not decompile._is_string_factory("string_factory")
+    # The construction pre-pass and the rendering branch both go through
+    # it, which is the whole point of the helper.
+    import inspect
+    src = inspect.getsource(decompile.FuncDecompiler)
+    assert src.count("_is_string_factory(") == 2

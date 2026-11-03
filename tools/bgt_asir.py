@@ -258,6 +258,13 @@ LEGACY_BC_TYPE = {"ALLOC": "asBCTYPE_QW_DW_ARG",
                   "CALLSYS": "asBCTYPE_DW_ARG",
                   "CallPtr": "asBCTYPE_rW_ARG"}
 
+#: The bytecode type the newer reader gives each opcode, by NAME. The
+#: opcode numbering moved between the 2010-2012 AngelScript and the one
+#: `asreader` models, so a lookup by number would answer about a different
+#: instruction -- and the name is what both tables agree on.
+NEWER_BC_TYPE = {name: bc_type
+                 for name, bc_type, _size, _inc in asreader.OPCODES.values()}
+
 #: What each behaviour of the 2010-2012 engine is, in the name the newer
 #: reader uses. Read off what each one is registered on and what it looks
 #: like: `_beh_1_` on `string` taking nothing and returning nothing is the
@@ -447,8 +454,12 @@ class _Translator:
     _post_process = asreader._Reader._post_process
     _translate_function = asreader._Reader._translate_function
 
-    def __init__(self, module: Module) -> None:
+    def __init__(self, module: Module,
+                 positions_are_dwords: bool = False) -> None:
         self.module = module
+        #: The one operand kind the two engines do NOT serialise alike --
+        #: see `asreader._Reader.positions_are_dwords`.
+        self.positions_are_dwords = positions_are_dwords
 
 
 class Builder:
@@ -686,6 +697,24 @@ class Builder:
         #: authoritative op has typed.
         agnostic: Dict[int, List[int]] = {}
 
+        #: The two handle writes `HANDLE_SLOT_OPS` cannot see, because in
+        #: both the slot is named by something other than the instruction
+        #: doing the writing. `PSF v ; REFCPY` is the unfused form of
+        #: `RefCpyV` and means the same thing; `SetV4 v, 0` into a slot
+        #: `objVariableTypes` records as an object is `@v = null`, there
+        #: being no `ClrVPtr` in this instruction set.
+        object_slots = {ov[-1] for ov in rec.get("objVars", [])}
+        for index, ins in enumerate(f.bytecode):
+            if ins.name == "PSF":
+                nxt = next((f.bytecode[j] for j in
+                            range(index + 1, min(index + 3, len(f.bytecode)))
+                            if f.bytecode[j].name != "SUSPEND"), None)
+                if nxt is not None and nxt.name == "REFCPY":
+                    handles.add(_s16(ins.w_arg))
+            elif (ins.name in ("SetV4", "SetV8") and not ins.dw_arg
+                  and _s16(ins.w_arg) in object_slots):
+                handles.add(_s16(ins.w_arg))
+
         for ins in f.bytecode:
             slots = SLOT_FIELDS.get(ins.bc_type, ())
             if ins.name in HANDLE_SLOT_OPS:
@@ -910,8 +939,24 @@ class Builder:
                 raise AdapterError("%s: %s has bytecode type %d, which is not "
                                    "an asEBCType" % (where, name, bgt["type"]))
             bc_type = LEGACY_BC_TYPE.get(name, bc_type)
-            fields = BC_FIELDS[bc_type]
             reads = as_early.BC_READS.get(bgt["type"])
+            # ...but a POINTER-sized operand is named differently by a
+            # 32-bit build and the 64-bit engine `asreader` models, and the
+            # field NAME is what every resolver downstream reads. `REFCPY`
+            # is `asBCTYPE_DW_ARG` here and `asBCTYPE_QW_ARG` there, so the
+            # operand was written to `dw_arg` and read from `qw_arg`, which
+            # is 0: `used_types[0]` for an object type and `used_strings[0]`
+            # for a literal. The widths stay the build's -- it is the same
+            # value, stored narrower -- and only the field it lands in comes
+            # from the newer reader, and only where the two agree on how
+            # many operands there are. Where they disagree the instruction
+            # really differs: Palace Punch-up's `ADDSi` takes one operand
+            # where the newer takes two.
+            newer = LEGACY_BC_TYPE.get(name, NEWER_BC_TYPE.get(name))
+            fields = BC_FIELDS[bc_type]
+            if newer is not None and len(BC_FIELDS[newer]) == len(fields):
+                fields = BC_FIELDS[newer]
+                bc_type = newer
             if reads is None:
                 raise AdapterError("%s: %s has bytecode type %d, whose "
                                    "operand reads are not known"
@@ -1026,7 +1071,7 @@ class Builder:
         self.mark_inherited(m)
         self.name_funcdef_types(m)
         self.normalise(m)
-        _Translator(m)._post_process()
+        _Translator(m, positions_are_dwords=self.early)._post_process()
         return m
 
     def mark_inherited(self, m: Module) -> None:

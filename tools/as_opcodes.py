@@ -250,16 +250,30 @@ def global_index_is_plain(str_count: int, pga_count: int):
     the wrong table (`@local_10 = "";` for a `character@[]@` global) and
     the odd half to the global at half its index.
 
-    So the question is which opcode this module's literals arrive through,
-    counted rather than inferred. The gap is three orders of magnitude in
-    both directions -- Manamon 2 carries 149,656 literals in `PGA` and
-    this corpus's five other modules carry theirs in `STR` -- so a module
-    with neither returns None and the caller keeps its dialect default,
-    which is the honest answer for a module with no literals at all.
+    So the question is whether this build emits `STR` **at all**, which is
+    the mechanism rather than a threshold: one `STR` means the compiler has
+    somewhere else to put a literal, so a global pointer has no reason to
+    share its field. A module with neither opcode returns None and the
+    caller keeps its dialect default, which is the honest answer for a
+    module with no literals at all.
+
+    **This was a magnitude comparison, `str_count > pga_count`, and the
+    2010-2012 builds refuted it.** Those carry both in quantity -- Grodan
+    Gun is 322 `STR` against 640 `PGA` -- so the comparison called all five
+    of them tagged, and every one is plain by three measures that agree:
+    the plain reading saturates `usedGlobalProps` exactly (46 of 47, 76 of
+    77, 49 of 50, 201 of 202, 27 of 28), the operand-width agreement is
+    93.9-99.6% plain against 25-53% tagged, and the operands are freely
+    even AND odd, which a tag bit does not produce. Read the other way,
+    every global pointer in those games resolved to the wrong thing and
+    every string literal was lost.
+
+    It gives the same answer as the comparison on every title in the
+    corpus, because there the gap really is three orders of magnitude.
     """
     if not str_count and not pga_count:
         return None
-    return str_count > pga_count
+    return str_count > 0
 
 def disassemble(bc: bytes, table: Dict[int, Dict[str, Any]], start: int = 0,
                 limit: Optional[int] = None) -> List[Tuple[int, int, str, List[int]]]:

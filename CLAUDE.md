@@ -12487,16 +12487,293 @@ of them were a NUMBERING rather than a layout:
 
 | title | lines | files | calls read back | gotos | unbalanced |
 |---|---|---|---|---|---|
-| Palace Punch-up | 3,778 | 10 | 801 | 42 | 3 |
-| Ljudfarmen | 3,633 | 10 | 669 | 27 | 4 |
-| Grodan Gun | 3,325 | 10 | 704 | 20 | 4 |
-| Perilous Hearts | 18,513 | 24 | 3,191 | 547 | 9 |
-| Antony | 3,291 | 10 | 507 | 54 | 5 |
+| Palace Punch-up | 3,549 | 10 | 824 | 0 | 0 |
+| Ljudfarmen | 3,329 | 10 | 704 | 1 | 0 |
+| Grodan Gun | 3,224 | 10 | 734 | 0 | 0 |
+| Perilous Hearts | 15,019 | 24 | 3,314 | 13 | 0 |
+| Antony | 2,907 | 10 | 521 | 0 | 0 |
 
 **0 unmodelled opcodes, 0 bodies given up on and a verified split on every
-one**, with the calls read back against each build's own declarations. They
-do not compile yet -- see the goto and unbalanced columns -- so this is a
-readable recovery rather than a runnable one, and the two columns say which.
+one**, with the calls read back against each build's own declarations. Three
+of the five have no residual goto and none has an unbalanced file, so three
+are structurally compilable; the two that are not say so in the goto column.
+
+Those figures are after the five fixes below, which are what made them --
+the row this table carried when it was first written was 42, 27, 20, 547
+and 54 gotos, with every string literal in all five games lost.
+
+##### Five things the adapter had wrong, and four of them were QUIET
+
+The table above was the honest state at the commit before this one, and
+the goto and unbalanced columns were the visible half. The invisible half
+was worse: **every string literal in all five games was lost**, and
+nothing in any count said so. Grodan Gun recovered with 31 distinct
+string literals, every one a fragment of the decompiler's own
+concatenation, and 143 `null`s where the game's own text belongs:
+
+```
+show_game_window(null);
+set_sound_decryption_key(null, true);
+set_sound_storage(null);
+```
+
+Five findings, each measured against the format's own acceptance test,
+and every one of them is a thing the two engines do NOT serialise alike
+where `bgt_asir`'s docstring said they do.
+
+| title | gotos | unbalanced | lines | calls read back |
+|---|---|---|---|---|
+| Palace Punch-up | 42 -> **0** | 3 -> **0** | 3,778 -> 3,549 | 801 -> **824** |
+| Ljudfarmen | 27 -> **1** | 4 -> **0** | 3,633 -> 3,329 | 669 -> **704** |
+| Grodan Gun | 20 -> **0** | 4 -> **0** | 3,325 -> 3,224 | 704 -> **734** |
+| Perilous Hearts | 547 -> **13** | 9 -> **0** | 18,513 -> 15,019 | 3,191 -> **3,314** |
+| Antony | 54 -> **0** | 5 -> **0** | 3,291 -> 2,907 | 507 -> **521** |
+
+**Battle of the Hunter renders byte-identical** through all five, which
+is what says none of it reached the newer half.
+
+###### A POSITION is a dword offset here, and an instruction number there
+
+The expensive one, and the one that was costing the gotos. `bgt_asir`
+borrows `asCReader::TranslateFunction` from the newer reader, on the
+stated grounds that *"it is identical for both engines because the
+serialised operands are"*. That is true of every operand but one kind: a
+**position**. The newer writer converts a jump's offset, an object
+variable's live range and every other stored program position into an
+**instruction-number delta**, so that one module can be loaded by a
+32-bit and a 64-bit build whose instruction widths differ. The 2011
+writer does not.
+
+Read out of `WriteByteCode` at `0x004492D0`, which special-cases the
+opcode twenty-four times -- `0x07`, `0x08`, `0x09`, `0x2E`, `0x3C`,
+`0x3D`, `0x3E`, `0x40`, `0x41`, `0x45`, `0x4B`, `0x4C`, `0x4F`, `0x54`,
+`0x57`, `0x60`, `0x62`, `0x88`, `0x8B`, `0x90`, `0xB1`, `0xB2`, `0xB8`,
+`0xB9` -- and **the jump family is `0x0B` to `0x11`, which is not among
+them.** It writes the raw dword operand.
+
+Measured the way every per-build field here is, and it discriminates in
+**both** directions:
+
+| module | jumps | as DWORDS | as INSTRUCTION NUMBERS |
+|---|---|---|---|
+| Grodan Gun | 932 | **100.0%** | 72.9% |
+| Ljudfarmen | 986 | **100.0%** | 73.4% |
+| Antony | 964 | **100.0%** | 76.9% |
+| Perilous Hearts | 5,639 | **100.0%** | 81.7% |
+| Palace Punch-up | 1,287 | **100.0%** | 75.9% |
+| **Battle of the Hunter** | 2,200 | 72.5% | **100.0%** |
+
+9,808 early jumps land exactly on an instruction boundary under the dword
+reading and not one does under the other; the control title is the mirror
+image, which is what makes the five negatives mean something. The same
+question was put to every other position the format stores:
+`objVariableInfo`'s are dwords too -- **7,826 cases across four titles
+where the two readings disagree, unanimously** -- and Palace Punch-up
+writes no such list at all, which is what the beta's own writer said.
+
+What it cost: a jump landing one instruction past its real target, so
+`_begin_bool_merge` found `PshV4` where the merge's own `CpyVtoR4` is,
+and declined. BGT's shipped `sound_pool_item::update` --
+`if(max_distance>0 and looping==true)` -- came out as
+
+```
+if (arg2 <= 0) {
+    goto L003a;
+    local_4 = (looping ? 1 : 0);
+}
+```
+
+a jump to nowhere with the whole condition lost. It reads
+`if ((arg2 > 0) && looping)` now, and the body matches BGT's own source
+statement for statement.
+
+`asreader._Reader.positions_are_dwords` is the one flag, read off `self`
+in the two places that convert, and it defaults off -- so the newer path
+is untouched by construction as well as by measurement.
+
+###### ...and a POINTER operand is named narrowly by a 32-bit build
+
+`asEBCType` itself differs between a 32- and a 64-bit build for a
+pointer-sized operand, and **the field NAME is what every resolver
+downstream reads**. `REFCPY` is `asBCTYPE_DW_ARG` in a 2011 runtime and
+`asBCTYPE_QW_ARG` in the engine `asreader` models, and
+`TranslateFunction` reads `qw_arg` -- so the operand was written to
+`dw_arg` and read from `qw_arg`, which is 0: `used_types[0]` for an
+object type and `used_strings[0]` for a literal.
+
+**13,887 instructions across the five titles**, in eleven opcodes:
+`PGA` (4,909 of them), `FREE`, `REFCPY`, `CpyGtoV4`, `PshG4`, `LDG`,
+`SetG4`, `CpyVtoG4`, `LdGRdR4`, `OBJTYPE` and `FuncPtr`. So every global
+read, every global write and every object type in all five games was
+resolving against index 0.
+
+`decode_early` took both the widths and the names from the build's own
+table, on the grounds that the opcode numbering moved so the build is the
+only authority. The widths half is right. The names come from the newer
+reader now, by **name** rather than by number -- 0x01 is `PUSH` here and
+`PshGPtr` there -- and only where the two agree on how many operands
+there are. Where they disagree the instruction really differs: Palace
+Punch-up's `ADDSi` takes one operand where the newer takes two, and its
+`COPY` likewise, and there the build wins.
+
+###### `STR` existing at all is the mechanism; a magnitude is not
+
+`global_index_is_plain` answered `str_count > pga_count`, and the
+docstring beside it states the real mechanism: the newer generation has
+**no opcode of its own** for a string literal, so `PGA` carries both and
+the low bit says which; the older gives a literal its own `STR`, so
+nothing needs to share the field. The comparison agreed with that on
+every title in the corpus because the gap happened to be three orders of
+magnitude -- Manamon 2 has 0 `STR` and the five plain titles have
+thousands.
+
+The 2010-2012 builds carry both in quantity and break it. Grodan Gun is
+322 `STR` against 640 `PGA`, so the comparison called all five tagged,
+and all five are **plain** by three measures that agree:
+
+| title | plain max / `usedGlobalProps` | width agreement, plain | tagged |
+|---|---|---|---|
+| Grodan Gun | **46 / 47** | 95.6% | 36.0% |
+| Ljudfarmen | **76 / 77** | 99.6% | 48.2% |
+| Antony | **49 / 50** | 93.9% | 25.0% |
+| Perilous Hearts | **201 / 202** | 97.3% | 52.8% |
+| Palace Punch-up | **27 / 28** | 96.6% | 40.3% |
+
+Every one saturates exactly -- one more would not fit, one fewer would
+leave the last global unreachable -- the width agreement sits in the band
+this file records for a known-right reading (85-94%) against chance for
+the wrong one, and the operands are freely even **and** odd, which a tag
+bit does not produce. The test is `str_count > 0` now, which is the
+mechanism, and it gives the same answer as the comparison on every title
+in the corpus.
+
+###### The early string factory returns a string BY VALUE
+
+BGT 1.3 and the forks register `const string& _string_factory_(...)`, so
+a literal arrives in the value register. This generation registers
+
+```
+string _string_factory_(const int, const uint8&)
+```
+
+-- by **value**, so the call carries the hidden return address this file
+calls `DoesReturnOnStack`, and the literal is constructed into the slot
+that address names:
+
+```
+STR  "Grodan Gun"
+PSF  7                       <- the return address
+CALLSYS _string_factory_
+VAR 7 ; GETREF
+CALLSYS show_game_window     <- reads the SLOT
+PSF 7 ; CALLSYS string::$beh2
+```
+
+Put in the value register, nothing read it, and that is where every
+literal went. The branch directly above the factory's in `_call` already
+binds into `pop_out` for exactly this reason, so this is that rule at the
+branch that did not have it -- and it is inert for any engine whose
+factory returns a reference, because `has_out` is False there.
+
+`main()` reads as the author wrote it now, the pack key included:
+
+```
+show_game_window("Grodan Gun");
+set_sound_decryption_key("evil_frog", true);
+set_sound_storage("sounds.dat");
+```
+
+**And the factory CONSTRUCTS its slot**, which `construct_sites` had no
+way to know: `PSF v ; CALLSYS <behaviour>` is the shape it reads, and the
+factory is that shape with a different callee. Unseen, every literal was
+routed through a named local -- `local_7 = "Grodan Gun";
+show_game_window(local_7);` -- which is exactly what
+`_reused_object_slot` exists to fold. Grodan Gun's slot 7 is constructed
+54 times. `_bind` takes a `constructed` flag for it, so the one place
+that decides between a statement and a temp alias asks the one extra
+question a construction needs.
+
+Which names the factory goes by is asked in one place now rather than
+two. This file records that knowing only `_string_factory_` cost 24,916
+diagnostics on one title.
+
+###### A handle is a FOUR-BYTE VALUE here, so `null` is 0 and `is` is `CMPi`
+
+There is no `ClrVPtr` in this instruction set. A handle is an ordinary
+four-byte slot, so `@h = null` is `SetV4 h, 0` and two handles are
+compared with `CMPi`. BGT's shipped `sound_pool_item::reset` is three
+lines of exactly that:
+
+```
+if(@handle!=null) handle.close();
+@handle=null;
+filename="";
+```
+
+and it recovered as
+
+```
+sound local_1 = handle;
+sound local_2(0);
+if (local_1 != local_2) { handle.close(); }
+local_1 = sound(0);
+@handle = local_1;
+filename = null;
+```
+
+-- a constructor `sound` has not, an operator the language spells `is`,
+and two declarations that cannot compile (`Can't implicitly convert from
+'<null handle>' to 'sound'`). Three readings fix it, each from evidence
+already in hand:
+
+- **A zero constant meeting a reference type is `null`.**
+  `_typed_constant` ends with *"an integer constant meeting a by-value
+  object type can only be an enum -- a real object would have been
+  constructed first"*, which is true of every engine whose null handle
+  has its own opcode. `_is_reference_type` is the discriminator and it
+  was already there: a script class, or a registered type whose values
+  were seen coming back through the object register. An enum and a value
+  type answer no, so the enum conversion the branch exists for is
+  untouched.
+- **Two more handle witnesses, both named by a `PSF`.**
+  `HANDLE_SLOT_OPS` reads the slot out of `w_arg`, and this engine writes
+  a handle two ways where the slot is named by something else: the
+  unfused `PSF v ; REFCPY`, which means exactly what `RefCpyV` means, and
+  `SetV4 v, 0` into a slot `objVariableTypes` records as an object, which
+  can only be a null handle since an integer does not convert to an
+  object.
+- **Two handle-typed operands of a comparison want `is`.** `CmpPtr` sets
+  the flag and a `null` operand is the other witness, and this shape has
+  neither -- the `null` the source wrote has been materialised into a
+  slot first. **Both** sides must be handles: one is not enough, because
+  a script class with an `opEquals` is compared by value through its
+  handle, which this file records from Crazy Party's `TypeElementaire`,
+  and that one is rendered as a call rather than as a pair.
+
+It comes out as the source:
+
+```
+sound@ local_1;
+sound@ local_2;
+@local_1 = handle;
+@local_2 = null;
+if (local_1 !is local_2) { handle.close(); }
+@local_1 = null;
+filename = "";
+```
+
+###### One rule was tried, measured and rejected
+
+**"An object slot nothing CONSTRUCTS can only be a handle."** It reads
+well -- an object local is always constructed, so a slot with no
+construction anywhere in the body must be a handle -- and it is false for
+the commonest object local there is: a `string` built from a
+concatenation is **assigned** a new object rather than constructed in
+place. Battle of the Hunter's `animals.bgt` came out with
+`string@ local_25;` and `@local_25 = (("step" + random(1, 5)) +
+".ogg");` in four places, valid and not what the source wrote. The two
+positive witnesses above cost that title nothing: it renders
+byte-identical.
 
 ##### The TOKEN shift is four here and two in BGT 1.3
 
