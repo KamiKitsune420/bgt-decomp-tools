@@ -291,3 +291,64 @@ def test_an_ambiguous_script_object_flag_declines():
     assert d.script_object_flag([]) is None
     assert d.script_object_flag([{"flags": 0x00090001, "size": 1}]) is None
     assert d.script_object_flag([{"flags": 0x00000001, "size": 1}]) is None
+
+# ---- namespaces arrived in every record at once -------------------------
+
+#: The smallest module that exercises a namespace in two different records:
+#: a global property's and a function signature's. With the flag off the
+#: walk dies inside the function record; with it on it lands on EOF.
+NAMESPACED = (b"\x00\x00\x00\x00"      # enums, classes, funcdefs, typedefs
+              b"\x01"                  # one global property
+              b"\x6e\x01g"              # its name
+              b"\x00"                  # its namespace
+              b"\x44\x00\x00"          # its data type
+              b"\x00"                  # no initialiser
+              b"\x01"                  # one module function
+              b"\x66"                  # 'f'
+              b"\x6e\x01f"              # its name
+              b"\x00"                  # the signature's namespace
+              b"\x44\x00\x00"          # its return type
+              b"\x00\x00"              # no parameters, no in/out flags
+              b"\x00\x00\x00\x02"      # funcType 2, so no body follows
+              b"\x00"                  # no default arguments
+              b"\x00"                  # no owner
+              b"\x00"                  # no script section
+              + b"\x00" * 9)           # the rest of the tail
+
+
+def test_one_flag_gates_every_namespace():
+    out = as_early.summarize(NAMESPACED)
+    assert out["eof"] is True, out["error"]
+    assert out["namespace"] is True
+
+
+def test_without_it_the_same_module_desynchronises():
+    d = Early(NAMESPACED, namespace=False)
+    with pytest.raises(Stop):
+        d.walk()
+
+
+def test_a_type_info_carries_a_namespace_only_when_it_should():
+    raw = b"\x6f\x6e\x05timer\x00"
+    with_ns = Early(raw)
+    with_ns.namespace = True
+    got = with_ns.type_info()
+    assert got["name"] == "timer" and got["namespace"] == ""
+    assert with_ns.p == len(raw)
+
+    without = Early(raw)
+    got = without.type_info()
+    assert got["name"] == "timer"
+    assert without.p == len(raw) - 1, "it read the namespace anyway"
+
+
+def test_a_template_name_is_followed_by_its_subtype_not_a_namespace():
+    # The `a` form is the exception: its name runs straight into the
+    # subtype tag even in the build that namespaces everything else.
+    raw = b"\x61\x6e\x05array\x73\x6f\x6e\x01T\x00\x6f"
+    d = Early(raw)
+    d.namespace = True
+    got = d.type_info()
+    assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
+    assert got["name"] == "array"
+    assert got["subtype"]["type"]["name"] == "T"

@@ -85,6 +85,10 @@ class Early:
         self.objvar_three = True
         self.objinfo_fields = 3
         self.line_numbers = True
+        #: One byte after the line numbers, which Antony has and 2011 does
+        #: not. Every record of that module needs it, including the ones
+        #: with no line numbers at all.
+        self.extra_after_lines = False
         #: Every source path the module has named, which is the result worth
         #: having even before a walk reaches EOF.
         self.sections = set()
@@ -163,9 +167,13 @@ class Early:
         if tag == 0x00:
             return None
         if tag == 0x6F:                               # 'o'
-            return {"kind": "named", "name": self.string()}
+            name = self.string()
+            ns = self.string() if self.namespace else ""
+            return {"kind": "named", "name": name, "namespace": ns}
         if tag == 0x73:                               # 's'
-            return {"kind": "subtype", "name": self.string()}
+            name = self.string()
+            ns = self.string() if self.namespace else ""
+            return {"kind": "subtype", "name": name, "namespace": ns}
         if tag == 0x61:                               # 'a' -- a template
             # ONE subtype, with no count: this AngelScript has no multi-subtype
             # template, so the subtype's own tag follows the name directly.
@@ -212,6 +220,8 @@ class Early:
     def function_signature(self):
         """WriteFunctionSignature at 0x00449A90."""
         name = self.string()
+        if self.namespace:
+            self.string()
         ret = self.data_type()
         nparams = self.eu()
         if nparams > 0x100:
@@ -308,9 +318,9 @@ class Early:
                        % -remaining)
         for _ in range(self.eu()):              # object variables
             self.type_info()
-            self.eu()
+            self.eu()                           # its position
             if self.objvar_three:
-                self.byte()
+                self.byte()                     # whether it is on the heap
         self.eu()                               # stackNeeded
         for _ in range(self.eu()):              # objVariableInfo
             for _f in range(self.objinfo_fields):
@@ -318,6 +328,8 @@ class Early:
         if self.line_numbers:
             for _ in range(self.eu()):
                 self.eu()
+        if self.extra_after_lines:
+            self.byte()
 
     # ---- the module -----------------------------------------------------
 
@@ -382,6 +394,8 @@ class Early:
         globals_ = []
         for _ in range(d.eu()):
             name = d.string()
+            if d.namespace:
+                d.string()
             d.data_type()
             has_init = d.byte()
             if has_init not in (0, 1):
@@ -500,7 +514,8 @@ class Early:
 #: adding a trial cannot silently re-describe a module that already landed
 #: on EOF -- the same rule every per-build field in this project follows.
 VERIFIED = {"namespace": False, "defaults": True, "objvar_three": True,
-            "objinfo_fields": 3, "line_numbers": True, "behaviours": 3}
+            "objinfo_fields": 3, "line_numbers": True, "behaviours": 3,
+            "extra_after_lines": False}
 
 
 def _candidates():
@@ -512,12 +527,14 @@ def _candidates():
                 for fields in (3, 2, 1):
                     for lines in (True, False):
                         for beh in (3, 1):
-                            seen.append({"namespace": namespace,
-                                         "defaults": defaults,
-                                         "objvar_three": three,
-                                         "objinfo_fields": fields,
-                                         "line_numbers": lines,
-                                         "behaviours": beh})
+                            for tail in (False, True):
+                                seen.append({"namespace": namespace,
+                                             "defaults": defaults,
+                                             "objvar_three": three,
+                                             "objinfo_fields": fields,
+                                             "line_numbers": lines,
+                                             "behaviours": beh,
+                                             "extra_after_lines": tail})
     seen.sort(key=lambda c: c != VERIFIED)
     return seen
 
@@ -539,6 +556,7 @@ def summarize(data, table=None):
         d.objinfo_fields = combo["objinfo_fields"]
         d.line_numbers = combo["line_numbers"]
         d.behaviours = combo["behaviours"]
+        d.extra_after_lines = combo["extra_after_lines"]
         try:
             d.walk()
             stop = None
@@ -575,10 +593,10 @@ def main():
         print("== %s  %d bytes" % (os.path.basename(path), len(data)))
         out = summarize(data, table)
         print("   namespace=%-5s defaults=%-5s objvar3=%-5s objinfo=%d "
-              "lines=%-5s behaviours=%d"
+              "lines=%-5s behaviours=%d tail=%s"
               % (out["namespace"], out["defaults"], out["objvar_three"],
                  out["objinfo_fields"], out["line_numbers"],
-                 out["behaviours"]))
+                 out["behaviours"], out["extra_after_lines"]))
         print("   reached 0x%X of 0x%X (%.1f%%)%s"
               % (out["at"], out["size"], 100.0 * out["at"] / out["size"],
                  "  -- EXACTLY ON EOF" if out["eof"] else ""))

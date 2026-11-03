@@ -12123,6 +12123,9 @@ the landing validates every field width above it.
 | Grodan Gun (2011-09) | 63,364 B | **0xF784 of 0xF784** | **11 of 11** |
 | Perilous Hearts (2011-11) | 299,967 B | **0x493BF of 0x493BF** | **16** |
 
+Antony (2012-02) reaches 91.1% and names all six of its own, which is one
+record short of the same claim -- see below.
+
 and every section parses: 5 and 9 class declarations, one funcdef each, the
 class property lists, 60 and 25 global properties, 54 and 46 module
 functions, 48 and 36 global functions, 17 and 22 `usedTypes`, 148 and 187
@@ -12320,26 +12323,92 @@ E:\Perilous Hearts\demo\    perilous_hearts  globals  saveload  preloads
                             computer_character  environment_sound
 ```
 
-##### Two early titles still stop, each on its own field
+##### Namespaces arrived in EVERY record at once, which is ONE field
 
-The reader says where rather than guessing, which is the point of a walk
-that reports its landing:
+Antony (2012-02) produced a separate puzzle per record, and each one had the
+same shape -- *this record needs one byte more than that one*:
+
+| what it looked like | what it is |
+|---|---|
+| the signature gains a string after its name | its **namespace** |
+| a token-5 DataType gains a byte | the **namespace** of the type it names |
+| a non-null owner takes two traits bytes | the first is the owner type-info's **namespace** |
+| an object variable's entry gains a field | the **namespace** inside its type-info |
+| a global property's init flag reads 8 | its **namespace**, read as the flag |
+
+So it is one per-build field gating four places -- a type declaration, a
+type-info, a function signature and a global property -- rather than four
+fields that happen to move together. An AngelScript that gained namespaces
+gained them everywhere, which is what the bytes say, and the 2011 builds
+have none of them.
+
+The exception is the **template form**: its name runs straight into the
+subtype tag even in the build that namespaces everything else. That is read
+off `array<T>` as an object variable's declared type -- `61 72 18 73 73 6e
+01 54 6f`, which is `'a'`, the name, `'s'`, the subtype's own type-info for
+the placeholder `T`, and the handle byte -- where a namespace between the
+name and the `'s'` would have to be a string tag and is not.
+
+**Four of the five readings fitted locally and were wrong**, which is why
+this took as long as it did: each one explains the record in front of it,
+and only reading the *next* record refuses it. The arithmetic is what
+settles such a question -- a record's span is fixed by the next record's own
+tag, so the fields have to add up to it exactly.
+
+##### Where Antony gets to, and the one record that still refuses
+
+| | |
+|---|---|
+| walked | **0xC7D3 of 0xDB73 -- 91.1%** |
+| source files named | **6 of 6** |
+| sections that parse | the classes, their properties, the typedefs, 36 global properties, 32 module functions, 24 global functions, 18 `usedTypes`, 7 `usedTypeIds` |
+| per-build answers | namespace, one behaviour, a byte after the line numbers |
+
+It stops in `usedFunctions`, and the instrument that localised it is worth
+keeping: **every entry of that table opens with a one-byte marker** saying
+where the function comes from -- `'a'` for the application's own, `'m'` for
+the module's, 0 for none -- so walking the table entry by entry and printing
+the markers shows the first entry that was misread, where the exception
+lands several entries later. Four entries read cleanly and the fifth does
+not:
+
+```
+   0 0x00C752  'a' application _beh_4_        owner _builtin_object_
+   1 0x00C77B  'm' module      reset          owner creature
+   2 0x00C78D  'm' module      creature       owner creature
+   3 0x00C79F  'm' module      destroy_sound  owner sound_pool
+   4 0x00C7B4  'a' application resize         owner array<T>  <- refuses
+```
+
+That entry is 30 bytes, pinned at both ends by the markers at 0xC7B4 and
+0xC7D2:
+
+```
+61 | 6e 06 "resize" | 00 | 00 03 | 01 | 00 16 | 01 | 00 | 00 00 00 00 |
+61 72 18 73 73 6e 01 54 6f | 00
+```
+
+and the fields -- the marker, the name, the namespace, the return type, one
+parameter, the in/out list, the four funcType bytes, the default-argument
+count, the owner and its traits byte -- add up to **31**. One byte too many,
+on the first entry whose owner is a template, so the suspect is the owner's
+own shape rather than anything before it.
+
+**One guess was tried and rejected**, and it is recorded because it is the
+tempting one: gating the in/out list on the marker, so that a registered
+callee writes none. It takes the walk from 0xC7D3 to 0xC8AF and then fails
+again -- and this file's own rule is that *a shape that merely consumes is
+not right*. It is also refuted by the engine: `ReadUsedFunctions` reads one
+signature per entry whatever the marker says.
+
+##### Palace Punch-up, the 2010 beta
 
 | title | reaches | stops on |
 |---|---|---|
-| Antony (2012-02) | 0xA8 | a string tag of 0x01 inside the funcdef record, with a namespace present |
-| Palace Punch-up (a 2010 beta) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
+| Palace Punch-up (2010-07) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
 
-Antony is a **debug** build -- its module names six source files, found by
-scanning for the records -- so the section count is a usable discriminator
-there as well as the EOF landing. What has been ruled out on it: the
-signature does not simply gain a namespace after its name, and a DataType
-does not simply gain a byte; all four combinations of those two were tried
-and none reaches a single section. Its own binary is the next step, and it
-is less tractable than the 2011 ones because the compiler merged the reader
-and the writer of each record into one function with no padding between
-them, which is the trap this file already records about finding a function's
-bounds from `int3` padding.
+It is the one **release** build of the five, so it names no source files at
+all and the EOF landing is the only measure available for it.
 
 **And the evidence this file gave for Antony's encoded integer was the wrong
 example.** It read *"Antony separates the last: February 2012, and it writes
