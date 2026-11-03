@@ -352,3 +352,38 @@ def test_a_template_name_is_followed_by_its_subtype_not_a_namespace():
     assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
     assert got["name"] == "array"
     assert got["subtype"]["type"]["name"] == "T"
+
+def test_a_subtype_placeholder_is_a_name_and_nothing_else():
+    """`array<T>`, where T is the placeholder rather than a real type.
+
+    The 's' form carries no namespace in any build -- only 'o' does -- and
+    reading one here eats the handle byte that closes the template, which
+    is what kept Antony 9% short of EOF.
+    """
+    raw = b"\x61\x6e\x05array\x73\x73\x6e\x01T\x6f"
+    d = Early(raw)
+    d.namespace = True
+    got = d.type_info()
+    assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
+    assert got["subtype"]["type"] == {"kind": "subtype", "name": "T"}
+
+
+#: The `usedGlobalProps` table carries a namespace per entry in the build
+#: that namespaces everything else -- the last record Antony needed.
+USED_GLOBAL_PROPS = (b"\x00\x00\x00\x00"   # enums, classes, funcdefs, typedefs
+                     b"\x00"               # no global properties
+                     b"\x00\x00\x00"       # module, global, bind
+                     b"\x00\x00\x00"       # usedTypes, value types, typeIds
+                     b"\x00"               # usedFunctions
+                     b"\x01"               # ONE usedGlobalProps entry
+                     b"\x6e\x01g"          # its name
+                     b"\x00"               # its namespace
+                     b"\x44\x00\x00"       # its data type
+                     b"\x00"               # its flags byte
+                     b"\x00\x00")          # usedStringConstants, objectProps
+
+
+def test_a_used_global_prop_carries_a_namespace_too():
+    out = as_early.summarize(USED_GLOBAL_PROPS)
+    assert out["eof"] is True, out["error"]
+    assert out["namespace"] is True

@@ -12122,9 +12122,7 @@ the landing validates every field width above it.
 | Ljudfarmen (2011-02) | 61,591 B | **0xF097 of 0xF097** | **9 of 9** |
 | Grodan Gun (2011-09) | 63,364 B | **0xF784 of 0xF784** | **11 of 11** |
 | Perilous Hearts (2011-11) | 299,967 B | **0x493BF of 0x493BF** | **16** |
-
-Antony (2012-02) reaches 91.1% and names all six of its own, which is one
-record short of the same claim -- see below.
+| Antony (2012-02) | 56,179 B | **0xDB73 of 0xDB73** | **6 of 6** |
 
 and every section parses: 5 and 9 class declarations, one funcdef each, the
 class property lists, 60 and 25 global properties, 54 and 46 module
@@ -12355,51 +12353,67 @@ and only reading the *next* record refuses it. The arithmetic is what
 settles such a question -- a record's span is fixed by the next record's own
 tag, so the fields have to add up to it exactly.
 
-##### Where Antony gets to, and the one record that still refuses
+##### What finished Antony: a SUBTYPE placeholder has no namespace
 
-| | |
-|---|---|
-| walked | **0xC7D3 of 0xDB73 -- 91.1%** |
-| source files named | **6 of 6** |
-| sections that parse | the classes, their properties, the typedefs, 36 global properties, 32 module functions, 24 global functions, 18 `usedTypes`, 7 `usedTypeIds` |
-| per-build answers | namespace, one behaviour, a byte after the line numbers |
+It stopped 9% short, in `usedFunctions`, on the first entry whose owner is a
+template -- `array<T>::resize`. And the namespace rule above is right in a
+narrower sense than it was first applied: only the `o` form carries one.
+`asCWriter::WriteTypeInfo`'s three branches say so --
 
-It stops in `usedFunctions`, and the instrument that localised it is worth
-keeping: **every entry of that table opens with a one-byte marker** saying
-where the function comes from -- `'a'` for the application's own, `'m'` for
-the module's, 0 for none -- so walking the table entry by entry and printing
-the markers shows the first entry that was misread, where the exception
-lands several entries later. Four entries read cleanly and the fifth does
-not:
+```
+templateSubTypes       -> 'a' ; name ; the subtype
+asOBJ_TEMPLATE_SUBTYPE -> 's' ; name                   <- the name alone
+otherwise              -> 'o' ; name ; NAMESPACE
+```
+
+-- so reading a namespace after the `s` form eats the handle byte that
+closes the template, and `array<T>` is where that first happens in a
+module. One line, and the walk went from 0xC7D3 to 0xD53D.
+
+The last record was `usedGlobalProps`, which carries a namespace per entry
+like every other global property. With that, **Antony lands exactly on
+EOF**: 7 classes, their property lists, 36 global properties, 32 module
+functions, 24 global functions, 18 `usedTypes`, 141 `usedFunctions`, 50
+`usedGlobalProps`, 49 `usedStringConstants`, 64 `usedObjectProps`, and all
+six source files.
+
+##### The arithmetic was right and the hex dump was misread
+
+Worth recording, because it cost an hour and the mistake is embarrassingly
+simple: the entry that refused was measured as 30 bytes between two markers
+when it is **32**, because a row label in a hex dump was read as the
+address of the row's *second* byte. The fields added up to 32 all along.
+
+Two readings were argued from that wrong span -- that the in/out list must
+be absent for a registered callee, and that a template owner must carry no
+traits byte -- and the first was even implemented and measured, where it
+took the walk from 0xC7D3 to 0xC8AF and stopped again. That looked like
+progress and was not: it is this file's own rule that *a shape that merely
+consumes is not right*, and the engine refuses it outright, since
+`ReadUsedFunctions` reads one signature per entry whatever the marker says.
+
+**What found the real cause was reading the bytes with the offsets computed
+rather than counted off a dump.** The arithmetic of a record is only
+evidence when both ends are right.
+
+##### The instrument, which is worth keeping
+
+Every `usedFunctions` entry opens with a one-byte marker saying where the
+function comes from -- `'a'` for the application's own, `'m'` for the
+module's, 0 for none -- so walking the table entry by entry and printing the
+markers names the first entry that was misread, where the exception lands
+several entries later:
 
 ```
    0 0x00C752  'a' application _beh_4_        owner _builtin_object_
    1 0x00C77B  'm' module      reset          owner creature
    2 0x00C78D  'm' module      creature       owner creature
    3 0x00C79F  'm' module      destroy_sound  owner sound_pool
-   4 0x00C7B4  'a' application resize         owner array<T>  <- refuses
+   4 0x00C7B4  'a' application resize         owner array<T>  <- the first bad one
 ```
 
-That entry is 30 bytes, pinned at both ends by the markers at 0xC7B4 and
-0xC7D2:
-
-```
-61 | 6e 06 "resize" | 00 | 00 03 | 01 | 00 16 | 01 | 00 | 00 00 00 00 |
-61 72 18 73 73 6e 01 54 6f | 00
-```
-
-and the fields -- the marker, the name, the namespace, the return type, one
-parameter, the in/out list, the four funcType bytes, the default-argument
-count, the owner and its traits byte -- add up to **31**. One byte too many,
-on the first entry whose owner is a template, so the suspect is the owner's
-own shape rather than anything before it.
-
-**One guess was tried and rejected**, and it is recorded because it is the
-tempting one: gating the in/out list on the marker, so that a registered
-callee writes none. It takes the walk from 0xC7D3 to 0xC8AF and then fails
-again -- and this file's own rule is that *a shape that merely consumes is
-not right*. It is also refuted by the engine: `ReadUsedFunctions` reads one
-signature per entry whatever the marker says.
+That is the same shape as every other localiser in this file: a record
+whose own content validates it, walked until one fails.
 
 ##### Palace Punch-up, the 2010 beta
 
@@ -12407,8 +12421,13 @@ signature per entry whatever the marker says.
 |---|---|---|
 | Palace Punch-up (2010-07) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
 
-It is the one **release** build of the five, so it names no source files at
-all and the EOF landing is the only measure available for it.
+**It is the last one, and the one with the least to go on.** It is the only
+**release** build of the five, so it names no source files, and the EOF
+landing is the only measure available for it. Its runtime predates BGT 1.0
+by five months, which is already known to differ in the key derivation (MD5
+rather than SHA-256) and in having no edition field, so a saved-type-info
+back-reference where the later builds write the type again is exactly the
+kind of thing to expect.
 
 **And the evidence this file gave for Antony's encoded integer was the wrong
 example.** It read *"Antony separates the last: February 2012, and it writes

@@ -171,9 +171,10 @@ class Early:
             ns = self.string() if self.namespace else ""
             return {"kind": "named", "name": name, "namespace": ns}
         if tag == 0x73:                               # 's'
-            name = self.string()
-            ns = self.string() if self.namespace else ""
-            return {"kind": "subtype", "name": name, "namespace": ns}
+            # A template SUBTYPE placeholder is a name and nothing else, in
+            # every build: only the 'o' form carries a namespace. Reading one
+            # here eats the handle byte that follows a template's subtype.
+            return {"kind": "subtype", "name": self.string()}
         if tag == 0x61:                               # 'a' -- a template
             # ONE subtype, with no count: this AngelScript has no multi-subtype
             # template, so the subtype's own tag follows the name directly.
@@ -442,6 +443,8 @@ class Early:
         used_props = []
         for _ in range(d.eu()):
             used_props.append(d.string())
+            if d.namespace:
+                d.string()
             d.data_type()
             d.byte()
         d.notes.append("%d usedGlobalProps, to 0x%X" % (len(used_props), d.p))
