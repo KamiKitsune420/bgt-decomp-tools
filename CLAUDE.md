@@ -12121,6 +12121,56 @@ The prototype is still not wired into `as_module`, for the reason the earlier
 note gives -- nothing lands on EOF, so a per-build flag could never be
 selected -- and the measure to adopt it by is unchanged.
 
+#### Found on the way: two games' real SOURCE FILE LISTS
+
+Chasing the body's trailing fields turned up what the missing one is, and it
+is the most useful thing in this section. A function body in these builds
+carries its own **script section** -- the path of the file it was compiled
+from, on the author's machine -- as an ordinary string record, so each name is
+written once and every later function back-references it.
+
+Grodan Gun, eleven files:
+
+```
+E:\C++ tests\Bgt\Games\Grodan Gun\groda.bgt           event.bgt
+                                  globals.bgt         player.bgt
+                                  saveload.bgt        object.bgt
+                                  preloads.bgt        sound_pool.bgt
+                                  dynamic_menu.bgt    sound_positioning.bgt
+E:\C++ tests\Bgt\include\number_speaker.bgt
+```
+
+Ljudfarmen, nine: `ljudfarmen.bgt`, `activity_bull.bgt`,
+`activity_dog.bgt`, `activity_donkey.bgt`, `activity_mouse.bgt`,
+`activity_sheep.bgt`, `dynamic_menu_special.bgt`, and the stock
+`include\sound_pool.bgt` and `include\sound_positioning.bgt`.
+
+**That is ground truth for `bgt files`**, which this document introduces with
+*"the game's own file names are not recoverable, and nothing will change
+that"* -- true of a release build, and these are not. What `bgt files`
+reconstructs for every other title is the *structure*: where one file ends and
+the next begins, from declaration order, with library files named by matching
+BGT's shipped source. Here the names and the split are both written down, so
+that reconstruction can be **scored** rather than argued, the same way NVGT's
+debug corpus scores it at 439 of 439.
+
+Two things it already corroborates for free:
+
+- **The library attribution is right about these.** `number_speaker.bgt`,
+  `sound_pool.bgt` and `sound_positioning.bgt` are named from
+  `Bgt\include\`, which is what the matcher claims for a run that declares
+  what a shipped file declares -- and Grodan Gun's own `sound_pool.bgt` and
+  `dynamic_menu.bgt` sit in the GAME folder instead, which is this file's
+  "games edit this library constantly" rule written in the author's own
+  directory layout.
+- **The split is real.** Eleven files for a 9-class game, nine for a 5-class
+  one, each name appearing exactly once.
+
+Reading them needs nothing from the prototype: they are string records in the
+module, so `bgt files` could report them today for a debug build. Not wired
+in -- it wants the per-function mapping, not just the list, and that is the
+field this walk is still placing.
+
 # A whole game WITH its source, which is the strongest oracle yet
 
 `bgt libcheck` scores a recovery against BGT's shipped `include/*.bgt` --
