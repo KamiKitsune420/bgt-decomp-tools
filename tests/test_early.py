@@ -165,8 +165,10 @@ def test_a_template_type_info_carries_one_subtype_and_no_count():
     got = d.type_info()
     assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
     assert got["kind"] == "template" and got["name"] == "array"
-    assert got["subtype"]["type"]["name"] == "string"
-    assert got["subtype"]["handle"] is False
+    # One argument, shaped as a data type: that is what the IR reads.
+    sub, = got["subtypes"]
+    assert sub["token"] == 5 and sub["type"]["name"] == "string"
+    assert sub["handle"] is False
 
 
 def test_a_primitive_template_subtype_is_four_raw_bytes():
@@ -174,7 +176,9 @@ def test_a_primitive_template_subtype_is_four_raw_bytes():
     d = Early(raw)
     got = d.type_info()
     assert d.p == len(raw)
-    assert got["subtype"] == {"token": 0x44}
+    # A primitive argument is a TOKEN, not a type id -- and big-endian like
+    # every other multi-byte field in the format.
+    assert got["subtypes"] == [{"typeid": 0x44000000}]
 
 
 def test_a_template_subtype_tag_that_is_neither_is_refused():
@@ -351,7 +355,8 @@ def test_a_template_name_is_followed_by_its_subtype_not_a_namespace():
     got = d.type_info()
     assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
     assert got["name"] == "array"
-    assert got["subtype"]["type"]["name"] == "T"
+    sub, = got["subtypes"]
+    assert sub["type"]["name"] == "T"
 
 def test_a_subtype_placeholder_is_a_name_and_nothing_else():
     """`array<T>`, where T is the placeholder rather than a real type.
@@ -365,7 +370,8 @@ def test_a_subtype_placeholder_is_a_name_and_nothing_else():
     d.namespace = True
     got = d.type_info()
     assert d.p == len(raw), "consumed %d of %d" % (d.p, len(raw))
-    assert got["subtype"]["type"] == {"kind": "subtype", "name": "T"}
+    sub, = got["subtypes"]
+    assert sub["type"] == {"kind": "subtype", "name": "T"}
 
 
 #: The `usedGlobalProps` table carries a namespace per entry in the build
@@ -429,3 +435,117 @@ def test_the_2010_beta_profile_differs_in_what_the_binary_says():
 def test_the_fallback_still_tries_the_verified_answers_first():
     first = as_early._fallback()[0]
     assert first == as_early.VERIFIED
+
+# ---- the path into the decompiler ---------------------------------------
+
+def _asreader():
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import asreader
+    return asreader
+
+
+#: Every type token these five modules use, with the type it is. The right
+#: column is read off BGT's own shipped source rather than guessed:
+#: `int play_extended_1d(string, int, int, int, int, bool, double, float,
+#: float, float, bool)` in `include/sound_pool.bgt` reads as
+#: `66 (string, 66, 66, 66, 66, 63, 90, 77, 77, 77, 63)`, and
+#: `void position_sound_custom_1d(sound@, int, int, float, float, float,
+#: float)` agrees independently.
+OBSERVED_TOKENS = {63: "bool", 66: "int", 68: "int16", 73: "uint",
+                   74: "uint8", 77: "float", 78: "void", 90: "double"}
+
+
+def test_every_token_these_modules_use_names_a_type():
+    names = _asreader().PRIMITIVE_NAMES
+    for stored, want in OBSERVED_TOKENS.items():
+        got = names.get(as_early.token(stored))
+        assert got == want, "%d -> %r, not %r" % (stored, got, want)
+
+
+def test_an_identifier_token_is_not_shifted():
+    # 5 is `ttIdentifier`, and 5 + 4 is the newer reader's string constant
+    # -- a shift applied by threshold rather than by target would take it.
+    assert as_early.token(5) == 5
+    assert as_early.token(0) == 0
+
+
+def test_the_shift_is_two_more_than_bgt_1_3s():
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    # 1.3 is two below the newer numbering and this generation is four:
+    # two keywords went into `eTokenType` between 2.19 and 1.3's
+    # AngelScript, and two more after it.
+    assert as_early.TOKEN_SHIFT == 4
+    assert bgt_asir._token(68) == as_early.token(66) == 70
+
+
+def test_the_behaviour_map_lands_on_names_the_decompiler_knows():
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import decompile
+
+    m = bgt_asir.EARLY_BEHAVIOURS
+    assert m[0] in decompile.CTORS, "0 is the constructor"
+    assert m[1] in decompile.DTORS, "1 is the destructor, 2 later"
+    assert m[2] in decompile.DTORS or m[2] == "$beh3", "2 is the factory"
+    assert m[10] == "opAssign", "assignment became a method"
+    assert m[4] in decompile.BOOKKEEPING, "4 is the engine's own AddRef"
+
+
+def test_the_addref_is_droppable_in_both_halves():
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import decompile
+    import purity
+    # One says do not print it; the other says do not report it as lost.
+    # Either alone leaves the call in the output or in the census.
+    name, = decompile.BOOKKEEPING
+    assert name in purity.ENGINE_PURE
+
+
+def test_the_prologue_opcode_is_skipped_rather_than_unhandled():
+    nvgt = os.path.join(TOOLS, "nvgt")
+    if nvgt not in sys.path:
+        sys.path.insert(0, nvgt)
+    import decompile
+    assert "PUSH" in decompile.SKIP_OPS
+    # ...and no engine the newer reader models has an opcode of that name,
+    # which is what makes skipping it unreachable for an NVGT module.
+    assert "PUSH" not in {n for n, _b, _s, _i in _asreader().OPCODES.values()}
+
+
+def test_the_dropped_opcodes_are_this_generations_alone():
+    # RDS4, RDS8 and POP were renamed or absorbed by the engine itself, so
+    # the newer set has none of them -- which is why mapping them cannot
+    # reach a module of the newer generation.
+    newer = {n for n, _b, _s, _i in _asreader().OPCODES.values()}
+    for name in ("RDS4", "RDS8", "POP"):
+        assert name not in newer, name
+    assert "RDSPtr" in newer and "PopPtr" in newer
+
+
+def test_every_bytecode_type_has_a_name_and_a_read():
+    # The field layout comes from the numeric type, because the opcode
+    # NUMBERING moved: 0x01 is `PUSH` here and `PshGPtr` there.
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    for kind, name in as_early.BC_TYPE_NAMES.items():
+        if kind == 0:                       # asBCTYPE_INFO: no instruction
+            continue
+        assert kind in as_early.BC_READS, kind
+        assert name in bgt_asir.BC_FIELDS, name
+        assert len(bgt_asir.BC_FIELDS[name]) == len(as_early.BC_READS[kind]), \
+            "%s: %d fields, %d reads" % (name, len(bgt_asir.BC_FIELDS[name]),
+                                         len(as_early.BC_READS[kind]))

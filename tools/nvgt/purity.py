@@ -184,6 +184,13 @@ UNKNOWN_TARGET_OPS = frozenset({"CALLINTF", "CALLBND", "CallPtr"})
 #: set does not hold is simply impure -- which is the safe default, so the
 #: set needs no NVGT half to be correct, only to be useful there.
 ENGINE_PURE = frozenset({
+    # The 2010-2012 AngelScript held a reference to `this` for the length
+    # of every method call and released it on return -- an AddRef at the
+    # top of each body and the matching release in the epilogue. The source
+    # wrote neither and no later engine emits either, so the call is
+    # droppable. `bgt_asir` renames it to this; no engine registers the
+    # name, so nothing else can reach it.
+    "$addref",
     # -- maths. Documented, every one `double f(double...)`.
     "absolute", "arc_cosine", "arc_sine", "arc_tangent", "ceiling",
     "cosine", "exponent", "floor", "log", "log10", "power", "round",

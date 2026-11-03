@@ -1467,7 +1467,7 @@ class DiscardedCallTests(unittest.TestCase):
         import inspect
         from decompile import FuncDecompiler
         source = inspect.getsource(FuncDecompiler)
-        branch = source[source.index("if meth in DTORS or meth.startswith"):]
+        branch = source[source.index("if (meth in DTORS or meth in BOOKKEEPING"):]
         branch = branch[:branch.index("# A base-class constructor")]
         self.assertIn("self._discarded_call(off)", branch)
         self.assertNotIn("consumed_temps.discard", branch)

@@ -12477,6 +12477,113 @@ stays only as the fallback for a build that matches none:
 `bgt early` names the release it read a module with, and every one of the
 five lands exactly on EOF.
 
+#### ...and all five RECOVER now, which is a different claim from reading
+
+Reading a module end to end is the format; a recovery is the decompiler, and
+the two are joined by `bgt_asir`, which presents a BGT module as the IR the
+NVGT decompiler reads. That adapter was written for the `tagged`/`len2`
+generation, so pointing it at the early reader needed four things, and three
+of them were a NUMBERING rather than a layout:
+
+| title | lines | files | calls read back | gotos | unbalanced |
+|---|---|---|---|---|---|
+| Palace Punch-up | 3,778 | 10 | 801 | 42 | 3 |
+| Ljudfarmen | 3,633 | 10 | 669 | 27 | 4 |
+| Grodan Gun | 3,325 | 10 | 704 | 20 | 4 |
+| Perilous Hearts | 18,513 | 24 | 3,191 | 547 | 9 |
+| Antony | 3,291 | 10 | 507 | 54 | 5 |
+
+**0 unmodelled opcodes, 0 bodies given up on and a verified split on every
+one**, with the calls read back against each build's own declarations. They
+do not compile yet -- see the goto and unbalanced columns -- so this is a
+readable recovery rather than a runnable one, and the two columns say which.
+
+##### The TOKEN shift is four here and two in BGT 1.3
+
+This file already records the newer engine's token ids being recovered from
+BGT 1.3's with `t + (t>=36) + (t>=64)`, which is a shift of two: two
+keywords went into `eTokenType` between 1.3's AngelScript and the newer one.
+The 2010-2012 engine is **four** below, and the extra two went in between
+2.19 and 1.3. Checked against a known answer rather than fitted:
+`int play_extended_1d(string, int, int, int, int, bool, double, float,
+float, float, bool)` is BGT's own shipped source, and it reads as
+`66 (string, 66, 66, 66, 66, 63, 90, 77, 77, 77, 63)` -- so 66 is `int`, 63
+is `bool`, 90 is `double` and 77 is `float`, every one of them four below the
+newer numbering.
+
+The shift is applied by TARGET and not by threshold, which matters because 5
+is `ttIdentifier` here and 5 plus four is the newer reader's string
+constant: a shift applied to everything would take it.
+
+##### The BEHAVIOUR numbering moved, and one behaviour became a method
+
+A behaviour is serialised as `_beh_N_`, and this file records the newer
+generation's N -- 0 the constructor, 2 the destructor, 3 the factory. This
+engine numbers them differently, and what each one IS was read off its owner
+and its signature rather than assumed:
+
+| | what it is registered as | what it is |
+|---|---|---|
+| `_beh_0_` | on `string`, 0 or 1 parameters, void | the constructor, 0 later too |
+| `_beh_1_` | on `string`, no parameters, void | the **destructor**, 2 later |
+| `_beh_2_` | **no owner**, returns an object | the **factory**, 3 later |
+| `_beh_4_` | on `_builtin_object_`, no parameters, void | **AddRef** |
+| `_beh_10_` | on `string` and `_builtin_array_`, one parameter, returns an object | the **assignment** |
+
+Two of those matter beyond naming. The assignment became the **method**
+`opAssign` in every later engine, and the decompiler recognises the string
+and array copy idioms by that name -- so it is renamed to the method rather
+than to a behaviour, or every copy in these titles reads as a call to
+`$beh10`.
+
+And the AddRef was in the first line of every recovered method:
+
+```
+bool add_item(string arg0) {
+    this.$beh4();
+```
+
+because this AngelScript held a reference to `this` for the length of a
+method call and released it on the way out -- the matching `FREE 0`, on the
+slot `this` lives in, which was already handled. The source never wrote
+either half and no later engine emits either, so it is renamed `$addref` and
+declared droppable. **Droppable takes two places**, which is the shape this
+file keeps recording: `decompile.BOOKKEEPING` so it is not printed, and
+`purity.ENGINE_PURE` so the lost-call census does not report it. Either
+alone leaves the call in the output or in the census, and a test pins that
+the one name is in both.
+
+`$addref` is a name no engine registers, which is what keeps the rename
+unreachable from the other half of this toolkit.
+
+##### The OPCODE numbering moved too, so the field layout comes from the TYPE
+
+`0x01` is `PUSH` in this generation and `PshGPtr` in the newer one, so an
+operand layout keyed on the opcode's name or number would read the wrong
+fields for the whole instruction set. It is keyed on the numeric
+`asEBCType` from the build's own `asBCInfo[]` instead -- which is where
+every other reading in this file comes from -- and a test requires each
+type's read count to equal the field count the IR declares for its name.
+
+Three opcodes are renamed to what the newer engine calls them, and all three
+are absent from its set, which is what makes the rename unreachable for an
+NVGT module: `RDS4` and `RDS8` are `RDSPtr`, and `POP 1` is `PopPtr`.
+`PUSH` is skipped rather than passed through: it is the prologue's stack
+reservation, which the newer engine stopped emitting, and a passthrough
+comment at the top of every body would be noise rather than information.
+
+##### A missing nicety must not stop a recovery
+
+`bgt recover` attributes a run of declarations to a shipped `include/*.bgt`
+to give library files their real names, and that attribution reads the
+module through `as_module` -- which cannot read this generation at all. So
+the whole recovery died on a step whose only product is a better file name.
+
+It reports a problem and carries on now. The irony is worth recording: a
+**debug** build of this generation records its real source file per function
+anyway (see **Found on the way**), so these are the five titles that least
+need the attribution and the only ones it stopped.
+
 #### Found on the way: two games' real SOURCE FILE LISTS
 
 Chasing the body's trailing fields turned up what the missing one is, and it

@@ -53,10 +53,11 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 try:                      # installed as a package
-    from . import as_module, as_opcodes, bgt_api
+    from . import as_early, as_module, as_opcodes, bgt_api
     from .nvgt import asreader
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvgt"))
+    import as_early
     import as_module
     import as_opcodes
     import asreader
@@ -257,6 +258,21 @@ LEGACY_BC_TYPE = {"ALLOC": "asBCTYPE_QW_DW_ARG",
                   "CALLSYS": "asBCTYPE_DW_ARG",
                   "CallPtr": "asBCTYPE_rW_ARG"}
 
+#: What each behaviour of the 2010-2012 engine is, in the name the newer
+#: reader uses. Read off what each one is registered on and what it looks
+#: like: `_beh_1_` on `string` taking nothing and returning nothing is the
+#: destructor, which is 2 later; `_beh_2_` with no owner returning an object
+#: is the factory, which is 3; `_beh_10_` taking one argument and returning
+#: an object is the assignment, which became the METHOD `opAssign` and is
+#: how the decompiler recognises a string or array copy.
+#:
+#: `_beh_4_` on `_builtin_object_` is ADDREF, which this engine called on
+#: `this` at the top of every method and released on the way out. Source
+#: never wrote it and no later engine emits it, so it is named for what it
+#: is and declared droppable in `purity.ENGINE_PURE`.
+EARLY_BEHAVIOURS = {0: "$beh0", 1: "$beh2", 2: "$beh3", 4: "$addref",
+                    10: "opAssign"}
+
 # The opcodes whose operand is a global pointer: a global property, or (for the
 # two that can carry one) a string constant.
 GLOBAL_PTR_OPS = ("PGA", "PshGPtr", "LDG", "PshG4", "LdGRdR4",
@@ -447,7 +463,15 @@ class Builder:
         self.sign_agnostic = _sign_agnostic_int_ops(
             {entry["name"] for entry in opcodes.values()})
         self.m = Module(debug_info=False)
-        self.m.bytecode_profile = "bgt_%s" % info["dialect"]
+        self.m.bytecode_profile = (info.get("profile")
+                                   or "bgt_%s" % info["dialect"])
+        #: How a stored `eTokenType` becomes the one the IR uses: this
+        #: generation is four lower, BGT 1.3 two.
+        self.token = as_early.token if info.get("early") else _token
+        #: Whether the operands are stored this generation's way -- a word
+        #: as two raw bytes, a dword as a plain encoded integer, a quadword
+        #: as eight raw bytes -- rather than as the newer varints.
+        self.early = bool(info.get("early"))
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}
@@ -457,9 +481,13 @@ class Builder:
         self._builtin_functions: List[Tuple[DataType, Dict[str, Any]]] = []
         # The funcdefs this module declares, for the placeholder above.
         self._funcdefs: List[TypeInfo] = []
-        self._script_object = (as_module.ASOBJ_SCRIPT_OBJECT_TAGGED
-                               if info["dialect"] == as_module.TAGGED
-                               else as_module.ASOBJ_SCRIPT_OBJECT)
+        # Which bit marks a script class moved three times across the
+        # 2010-2012 releases, so the reader derives it and passes it on.
+        self._script_object = (
+            info.get("script_object_flag")
+            or (as_module.ASOBJ_SCRIPT_OBJECT_TAGGED
+                if info["dialect"] == as_module.TAGGED
+                else as_module.ASOBJ_SCRIPT_OBJECT))
 
     # -- types -------------------------------------------------------------
 
@@ -524,7 +552,7 @@ class Builder:
         cached = self._dts.get(id(d))
         if cached is not None:
             return cached
-        out = DataType(token_type=_token(d["token"]),
+        out = DataType(token_type=self.token(d["token"]),
                        is_object_handle=d["handle"],
                        is_handle_to_const=d["const"],
                        is_reference=d["reference"],
@@ -553,7 +581,8 @@ class Builder:
             if "token" in sub:
                 out.append(self.dt(sub))
             else:
-                out.append(DataType(token_type=_token(sub.get("typeid", 0))))
+                out.append(DataType(
+                    token_type=self.token(sub.get("typeid", 0))))
         return out
 
     def dt_of_type(self, ref: Optional[Dict[str, Any]],
@@ -620,7 +649,8 @@ class Builder:
         f.obj_variable_info = list(rec.get("objInfo", []))
         f.try_catch_info = [(t, c, 0) for t, c in rec.get("tryCatch", [])]
         if rec.get("body"):
-            f.bytecode = self.decode(rec["body"], rec["instructions"], rec["name"])
+            decode = self.decode_early if self.early else self.decode
+            f.bytecode = decode(rec["body"], rec["instructions"], rec["name"])
             self.slot_types(f, rec)
         return f
 
@@ -846,6 +876,72 @@ class Builder:
                                % (where, p, end))
         return out
 
+    def decode_early(self, span: Tuple[int, int], dwords: int,
+                     where: str) -> List[Instr]:
+        """Decode a 2010-2012 body, whose operands are not varints.
+
+        A word is two raw bytes big-endian, a dword is a plain encoded
+        integer and a quadword is eight raw bytes -- read out of
+        `ReadByteCode`'s own switch, and the reason `as_opcodes.disassemble`
+        cannot step these bodies at all. The field each operand lands in is
+        the same as for the newer generation, so the one table that assigns
+        them stays the one table.
+
+        The declared length is a count of DWORDS here, not of instructions,
+        so the loop spends a budget rather than counting.
+        """
+        start, end = span
+        p, pos = start, 0
+        out: List[Instr] = []
+        remaining = dwords
+        while remaining > 0:
+            op = self.data[p]
+            p += 1
+            bgt = self.opcodes.get(op)
+            if bgt is None:
+                raise AdapterError("%s: unknown opcode 0x%02X" % (where, op))
+            # The opcode NUMBERING moved between this AngelScript and the one
+            # `asreader` models -- 0x01 is `PUSH` here and `PshGPtr` there --
+            # so both the name and the field layout come from the build's own
+            # table, which is the only authority for it.
+            name = bgt["name"]
+            bc_type = as_early.BC_TYPE_NAMES.get(bgt["type"])
+            if bc_type is None:
+                raise AdapterError("%s: %s has bytecode type %d, which is not "
+                                   "an asEBCType" % (where, name, bgt["type"]))
+            bc_type = LEGACY_BC_TYPE.get(name, bc_type)
+            fields = BC_FIELDS[bc_type]
+            reads = as_early.BC_READS.get(bgt["type"])
+            if reads is None:
+                raise AdapterError("%s: %s has bytecode type %d, whose "
+                                   "operand reads are not known"
+                                   % (where, name, bgt["type"]))
+            if len(fields) != bgt["operands"] or len(fields) != len(reads):
+                raise AdapterError(
+                    "%s: %s takes %d operands here, %s implies %d and the "
+                    "stored form %d"
+                    % (where, name, bgt["operands"], bc_type, len(fields),
+                       len(reads)))
+            ins = Instr(pos=pos, op=op, name=name, bc_type=bc_type,
+                        size=bgt["dwords"])
+            for field, width in zip(fields, reads):
+                if width is None:
+                    value, p = as_early.read_plain_uint(self.data, p)
+                else:
+                    value = int.from_bytes(self.data[p:p + width], "big")
+                    p += width
+                setattr(ins, field, value & MASK[field])
+            out.append(ins)
+            pos += ins.size
+            remaining -= ins.size
+        if remaining < 0:
+            raise AdapterError("%s: the bytecode overran its declared length "
+                               "by %d dword(s)" % (where, -remaining))
+        if p != end:
+            raise AdapterError("%s: body decoded to 0x%X, record ends at 0x%X"
+                               % (where, p, end))
+        return out
+
     # -- the module --------------------------------------------------------
 
     def build(self) -> Module:
@@ -858,7 +954,7 @@ class Builder:
                                          enum_values=list(e["members"])))
         for t in tail.get("typedefs", []):
             ti = self.declared("typedef", t["name"], t["namespace"], flags=0)
-            ti.typedef_target = DataType(token_type=_token(t.get("token", 0)))
+            ti.typedef_target = DataType(token_type=self.token(t.get("token", 0)))
             m.typedefs.append(ti)
 
         # Class declarations come before anything that can refer to them, so a
@@ -1033,7 +1129,10 @@ class Builder:
                 digits = f.name[5:-1]
                 if digits.isdigit():
                     f.original_name = f.name
-                    f.name = "$beh" + digits
+                    f.name = EARLY_BEHAVIOURS.get(int(digits)) if self.early \
+                        else None
+                    if f.name is None:
+                        f.name = "$beh" + digits
             for ins in f.bytecode:
                 if ins.name == "CallPtr":
                     # One operand here, two there, and the variable holding
@@ -1043,6 +1142,17 @@ class Builder:
                     # slot number as the argument count: `this(local_8, <?>,
                     # <?>, ...)` nine times over, in 20 of Paladin's errors.
                     ins.w_arg2, ins.w_arg = ins.w_arg, 0
+                elif self.early and ins.name in ("RDS4", "RDS8"):
+                    # A pointer dereference, under the name this
+                    # AngelScript gave it. Antony declares `RDSPtr` and
+                    # neither of these; every build before it declares
+                    # these and no `RDSPtr`.
+                    ins.name = "RDSPtr"
+                elif self.early and ins.name == "POP" and ins.w_arg == 1:
+                    # One dword is one value on a 32-bit build. Every POP
+                    # in all five titles has this operand; another one
+                    # would be left unhandled rather than guessed at.
+                    ins.name = "PopPtr"
                 elif ins.name == "STR":
                     # STR's string index is a word operand here and a dword one
                     # there. Left in the word field it resolves to whichever
@@ -1075,10 +1185,25 @@ def load(module_path: str, exe_path: Optional[str] = None,
         opcodes = as_opcodes.extract(exe_path)["table"]
     with open(module_path, "rb") as fh:
         data = fh.read()
-    info = as_module.summarize(module_path, opcodes=opcodes)
-    if not info.get("tail"):
-        raise AdapterError("module tail did not land on EOF: %s"
-                           % (info.get("tail_error") or "unknown"))
+    info = None
+    try:
+        info = as_module.summarize(module_path, opcodes=opcodes)
+    except Exception:                              # noqa: BLE001
+        info = None
+    if info is None or not info.get("tail"):
+        # The 2010-2012 generation is a different format, not a third
+        # dialect, so it has its own reader -- and the claim that makes it
+        # safe to use is the same one: the walk lands exactly on EOF.
+        early = as_early.summarize(data, opcodes)
+        if early is not None and early.get("eof"):
+            info = early
+        elif info is None:
+            raise AdapterError(
+                "neither reader could parse this module: %s"
+                % ((early or {}).get("error") or "unknown"))
+        else:
+            raise AdapterError("module tail did not land on EOF: %s"
+                               % (info.get("tail_error") or "unknown"))
     m = Builder(data, info, opcodes).build()
     # The engine names the funcdefs the module records only as
     # `_builtin_function_` -- from its documentation where BGT is installed,

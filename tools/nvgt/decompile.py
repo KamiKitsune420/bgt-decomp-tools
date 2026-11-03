@@ -318,6 +318,12 @@ ASSIGN_OPS = {"opAddAssign": "+=", "opSubAssign": "-=", "opMulAssign": "*=",
               "opShrAssign": ">>=", "opUShrAssign": ">>>="}
 SKIP_OPS = {"CHKREF", "ChkRefS", "ChkNullS", "ChkNullV", "SUSPEND", "ClrHi",
             "JitEntry",
+            # The 2010-2012 AngelScript's prologue, reserving the frame:
+            # about one per body, with the frame size as its operand, where
+            # the newer generation declares `variable_space` instead. No
+            # engine this reader models has an opcode of that name, so
+            # skipping it cannot reach an NVGT module.
+            "PUSH",
             "LINE", "LABEL", "ObjInfo", "Block", "VarDecl", "TryBlock",
             "SetListSize", "SetListType", "PshListElmnt", "AllocMem"}
 CTORS = {"$beh0", "$beh1"}     # default ctor / copy ctor
@@ -329,6 +335,13 @@ _ASSIGN_OPS = frozenset((
     "opModAssign", "opPowAssign", "opAndAssign", "opOrAssign", "opXorAssign",
     "opShlAssign", "opShrAssign", "opUShrAssign"))
 DTORS = {"$beh2", "$beh3"}
+#: Calls the ENGINE made and the source never wrote. The 2010-2012
+#: AngelScript held a reference to `this` for the length of every method
+#: call, so each body opens with an AddRef on it and releases it in the
+#: epilogue; `bgt_asir` names that `$addref`. Like a destructor call, it
+#: consumes its receiver and prints nothing. No engine registers the name,
+#: so this is unreachable for a module of the newer generation.
+BOOKKEEPING = {"$addref"}
 #: the same two, in the spelling the disassembler prints -- the delegate
 #: factory's `%delegate_factory`/`$dlgte` lesson is that a behaviour has
 #: more than one name, and matching only one matches silently.
@@ -4962,7 +4975,8 @@ class FuncDecompiler:
             self.pending_value_call = calltxt
             self.pending_value_call_pos = self._pos()
             return
-        if meth in DTORS or meth.startswith("$list") or meth.startswith("$dlgte"):
+        if (meth in DTORS or meth in BOOKKEEPING
+                or meth.startswith("$list") or meth.startswith("$dlgte")):
             # Destructing a value is not reading it. A temporary built by a
             # call and then thrown away is exactly the discarded-result case
             # -- `get_characters()` in `audio_form::create_window` -- and

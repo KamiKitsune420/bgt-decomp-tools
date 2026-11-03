@@ -1425,7 +1425,17 @@ def _origins(module_path: str, exe_path: str,
     library = _library(include_dirs)
     if not library:
         return {}, ["no BGT include folder found: library files are unnamed"]
-    entities, _ = script_files.load_entities(module_path, exe_path, nvgt=False)
+    try:
+        entities, _ = script_files.load_entities(module_path, exe_path,
+                                                 nvgt=False)
+    except Exception as exc:                 # noqa: BLE001
+        # The 2010-2012 generation is a different format, and the library
+        # attribution reads a module through `as_module`. A debug build of
+        # that generation records its real source file per function anyway
+        # -- see `bgt files` -- so this is a missing nicety rather than a
+        # missing recovery, and it says so instead of stopping.
+        return {}, ["the library attribution could not read this module: %s"
+                    % exc]
     attribution = script_files.attribute(entities, library)
     # The runs carry the declarations; `file_order`'s segments carry the order
     # and the notes, and are consulted only for problems here.
