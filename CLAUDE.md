@@ -11954,6 +11954,85 @@ What has changed is that the next step is no longer a search. It is
 remaining sections from `0x0044B7C6`, both of which this method reads in a
 few minutes each.
 
+#### The map, so the next step is mechanical
+
+Every address is in **Grodan Gun's own runtime** (2011-09), which is the
+build this was read from. The same functions are findable in any of the five
+by the three tricks above.
+
+| what | where | note |
+|---|---|---|
+| `WriteEncodedUInt` | `0x004477D0` | one byte under 128 |
+| `WriteData(ptr, n)` | `0x00447770` | and the 4-byte fields go through it |
+| `ReadEncodedUInt` | `0x004478F0` | 87 call sites in 1.3; the same role here |
+| `ReadData(ptr, n)` | `0x004477A0` | |
+| `WriteString` | `0x00448B20` | |
+| `WriteTypeInfo` | `0x00448CF0` | recursive, for the nested forms |
+| `ReadTypeInfo` | `0x00448E20` | |
+| `WriteDataType` | `0x0044A420` | |
+| `ReadDataType` | `0x0044A570` | |
+| `WriteFunctionSignature` | `0x00449A90` | the record decoded above |
+| `WriteFunction` | `0x00449DC0` | `0` / `'r'` / `'f'` |
+| `WriteByteCode` | `0x004492D0` | |
+| `WriteTypeDeclaration` | `0x0044ADE0` | phase 1 at the top, phase 2 from `0x0044AE1A` |
+| `WriteInner` | `0x0044B6E0` | the section order |
+
+`WriteInner`'s sections, in order:
+
+```
+eu(enumTypes.length)
+  per enum:     str(name) ; 4 bytes flags ; eu(size) ; phase 2
+eu(classTypes.length)
+  per class:    str(name) ; 4 bytes flags ; eu(size)          <- phase 1 only
+eu(funcDefs.length)
+  per funcdef:  a function record
+  per interface:  phase 2
+  per class:      phase 2
+  per class:    eu(propertyCount) ; per property { str, DataType, 4 bytes }
+...then the globals, the module and global functions, and the used-* tables
+```
+
+which is the newer reader's own order -- *"header, enums, class
+declarations, funcdefs, the three class passes, typedefs, global
+properties, module functions, global functions, bind info, usedTypes..."* --
+with the class declarations' phase 1 inlined.
+
+`WriteTypeDeclaration`'s phase 2 branches on the type's own flags first:
+
+```
+flags & 0x10000000  -- an ENUM:    eu(valueCount) ; per value { str ; 4 bytes }
+flags & 0x40000000  -- a TYPEDEF:  4 bytes, the aliased token
+otherwise:          WriteTypeInfo(derivedFrom)
+                    eu(interfaceCount) ; that many x WriteTypeInfo
+                    stop here if it is an interface
+                    then the behaviours, the methods, the virtual table
+```
+
+**The flag BITS move with the version**, which is worth knowing before
+reading a constant across generations: the script-object flag is
+`0x00010000` in the 2011 builds, `0x00080000` in the 2012 one and
+`0x00100000` in 1.3, and the enum bit this writer tests as `0x10000000`
+reads as `0x04000000` in the beta's own enum. A bit marching leftwards as
+AngelScript inserted flags ahead of it -- so the right constant is the one
+the build in hand uses, exactly as this file already says about the
+script-object flag for the two known dialects.
+
+#### Two traps in the method itself
+
+**The `int3` bounds trick spans two functions when they are adjacent.**
+`WriteInner` and the function after it have no padding between them, so a
+4,438-byte "function" came out holding the writer *and* a reader -- which
+shows up as calls to `ReadEncodedUInt` in the middle of something that had
+been writing. Read a call sequence for what it is rather than trusting the
+byte count, and look for the `ret`.
+
+**And the known answer is what makes any of it safe.** BGT ships
+`dynamic_menu.bgt`, so `funcdef int menu_callback(dynamic_menu@, string);`
+is the record's content before a byte is read. Every layout above was
+checked against it, and the one field that could not be checked that way --
+the four funcType bytes -- came out as `0x00000004`, which is the funcdef
+value.
+
 # A whole game WITH its source, which is the strongest oracle yet
 
 `bgt libcheck` scores a recovery against BGT's shipped `include/*.bgt` --
