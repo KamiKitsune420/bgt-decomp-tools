@@ -3261,3 +3261,43 @@ def test_bringing_the_game_files_keeps_their_FOLDERS():
             assert fh.read() == b"trade records"
         assert any("data file(s) copied" in n for n in notes)
         assert any("helper.exe" in n for n in notes)
+
+
+def test_a_debug_module_names_its_own_source_files():
+    """A function body in a DEBUG build carries the path it was compiled from,
+    as an ordinary string record -- so there is nothing to reconstruct.
+
+    Grodan Gun (2011) names eleven files and Ljudfarmen nine; a release build
+    names none, which is the case every other title in this project is.
+    """
+    import re
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tools"))
+    import script_files
+
+    def rec(name):
+        return bytes([0x6E, len(name)]) + name
+
+    module = (b"\x00\x02" + rec(b"somewhere") + b"junk"
+              + rec(b"E:\\C++ tests\\Bgt\\Games\\Grodan Gun\\groda.bgt")
+              + b"\x00" * 4
+              + rec(b"E:\\C++ tests\\Bgt\\include\\number_speaker.bgt")
+              + rec(b"E:\\C++ tests\\Bgt\\Games\\Grodan Gun\\groda.bgt"))
+    got = script_files.script_sections(module)
+    # each path once, in the order the module names them
+    assert got == ["E:\\C++ tests\\Bgt\\Games\\Grodan Gun\\groda.bgt",
+                   "E:\\C++ tests\\Bgt\\include\\number_speaker.bgt"], got
+
+
+def test_a_release_module_names_none_so_nothing_is_claimed():
+    """The release case is the normal one, and a false positive here would
+    print somebody else's directory layout as this game's."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tools"))
+    import script_files
+
+    # A name that ends in .bgt but whose length byte disagrees is not a record.
+    assert script_files.script_sections(
+        bytes([0x6E, 0x63]) + b"game.bgt" + b"\x00" * 8) == []
+    # ...and nothing that is not a string record at all.
+    assert script_files.script_sections(b"\x01\x05" + bytes(range(60))) == []

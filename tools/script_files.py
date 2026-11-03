@@ -73,6 +73,44 @@ METHOD_AGREEMENT = 0.5
 # library sources
 # --------------------------------------------------------------------------
 
+
+#: A `tagged` new-string record: the tag, a length and the bytes. Lengths
+#: above 127 take a second byte in every generation, and no source path here
+#: is that long, so one byte is enough for this one job.
+_SECTION_RE = re.compile(rb"\x6e(.)", re.S)
+
+
+def script_sections(module: bytes,
+                    suffixes: Sequence[str] = (".bgt", ".nvgt")) -> List[str]:
+    """The source paths a DEBUG module names, in the order it names them.
+
+    A release build keeps none, so an empty list is the normal answer and the
+    caller falls back to reconstructing the file order. A debug build keeps
+    one per function body, written once and back-referenced after -- so this
+    is the real file list, not an inference from it.
+
+    Grodan Gun names eleven (`E:\\C++ tests\\Bgt\\Games\\Grodan Gun\\groda.bgt`
+    and its siblings, plus `number_speaker.bgt` out of BGT's own include
+    folder) and Ljudfarmen nine.
+    """
+    seen: List[str] = []
+    known = set()
+    for m in _SECTION_RE.finditer(module):
+        n = m.group(1)[0]
+        if not 8 < n < 128:
+            continue
+        at = m.end()
+        raw = module[at:at + n]
+        if len(raw) < n or not all(32 <= c < 127 for c in raw):
+            continue
+        text = raw.decode("latin1")
+        if not text.lower().endswith(tuple(suffixes)):
+            continue
+        if text not in known:
+            known.add(text)
+            seen.append(text)
+    return seen
+
 @dataclass
 class SourceFile:
     """What one library source file declares at namespace level."""
@@ -742,6 +780,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     result = attribute(entities, library)
     print("%s module, %d declarations; library sources from %s\n"
           % (engine_name.upper(), len(entities), ", ".join(dirs)))
+
+    # A debug build names its own files, so there is nothing to reconstruct.
+    with open(args.module, "rb") as fh:
+        named = script_sections(fh.read())
+    if named:
+        print("This module is a DEBUG build and NAMES its source files, so the\n"
+              "order below is a reconstruction of something the module already\n"
+              "states. The %d file(s) it names, in the order it names them:\n"
+              % len(named))
+        for path in named:
+            print("   %s" % path)
+        print()
     print(report(result, library))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

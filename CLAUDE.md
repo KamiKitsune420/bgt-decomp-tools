@@ -12166,10 +12166,20 @@ Two things it already corroborates for free:
 - **The split is real.** Eleven files for a 9-class game, nine for a 5-class
   one, each name appearing exactly once.
 
-Reading them needs nothing from the prototype: they are string records in the
-module, so `bgt files` could report them today for a debug build. Not wired
-in -- it wants the per-function mapping, not just the list, and that is the
-field this walk is still placing.
+**And `bgt files` reports them now.** `script_files.script_sections` reads
+them as records rather than scanning for text -- the length byte is what says
+where a name starts -- and the tool prints them ahead of its own
+reconstruction, saying plainly that the order below is a reconstruction of
+something the module already states. It fires on nothing else: Super Egg Hunt
+and Manamon 1 name **zero**, which is the release case every other title here
+is, and a false positive would print somebody else's directory layout as the
+game's own.
+
+That it works at all on these titles is worth noting, because their modules
+still do not parse: the names are string records, so the list comes out
+whether or not the reader can walk the file. What is still missing is the
+mapping -- which function came from which file -- and that needs the body
+field this walk is placing.
 
 # A whole game WITH its source, which is the strongest oracle yet
 
