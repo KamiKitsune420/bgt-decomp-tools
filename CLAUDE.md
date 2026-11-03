@@ -12526,14 +12526,39 @@ header this writes used to say "BGT strips debug information", which is
 what this whole section is about being false, so it now says a release
 build does.
 
-**Crazy Party is the sixth and its run did not finish**, which this file
-has recorded happening three times before. Its baseline alone had been
-decompiling for fifty minutes when everything else was done, so the row
-is not quoted rather than guessed at. What stands in its place is the
-argument above plus five titles and 1,061 files, and the narrower reason
-it cannot move: its module's first byte is 1, so the reader's debug branch
-reads no bytes at all, and nothing in `var_names` for a release build is a
-name the old pattern missed.
+**Crazy Party's run did not finish, so the gating was read instead** --
+and that is the stronger check anyway, because it asks the question the
+diff would only have answered indirectly. Its baseline alone had been
+decompiling for seventy CPU-minutes on the *committed* tree when
+everything else was done, which is this title's own speed and not a
+regression; a tree diff would have cost another hour on top. Asked of
+its module directly:
+
+| | Crazy Party |
+|---|---|
+| the module's first byte | **1** |
+| `Reader.debug_info` at its own start | **False** |
+| bodies | 4,601 |
+| any with `has_debug_info` | **no** |
+| any with a script section | **no** |
+| any named variable | **no** |
+| any parameter name | **no** |
+
+So the reader's debug branch reads no bytes, `debug_names` returns at
+once, `Entity.truth` is None for every declaration, `assign_paths` gets an
+empty map and `reorder_by_file` returns False. What is left on the shared
+path is the declaration net, and with no named variable its `frame` is
+exactly the `local_N` entries of `var_names` -- which is the set the old
+pattern found, since `name_of` returns `tmp<n>` for any slot that is not
+in `var_names` and the text therefore never says `local_N` for one. Five
+titles and 1,061 files are the measurement; this is why the sixth cannot
+differ.
+
+**That is a cheaper instrument and worth keeping.** A tree diff of a
+174,000-line recovery costs two hours; asking the module whether a debug
+path can fire at all costs seconds, and for a change gated on
+`noDebugInfo` it is the question. The diff is still what catches a change
+that is *not* gated -- which is why the other five were run.
 
 **And Manamon 1's row corrects the standings**, which said 82,156 lines
 and 26,510 calls. Both runs that measured it here say 82,157 and 26,509 --
