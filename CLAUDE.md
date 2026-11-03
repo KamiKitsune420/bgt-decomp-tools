@@ -473,7 +473,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
-| `as_early.py` | `bgt early`: the 2010 to 2012 module format, which is a different format rather than a third dialect -- five engine releases, all five titles read end to end, and the debug ones name their own source files |
+| `as_early.py` | `bgt early`: the 2010 to 2012 module format, which is a different format rather than a third dialect -- five engine releases, all five titles read end to end AND recover, and the debug ones name their own source files |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
 | `as_disasm.py` | readable disassembly — resolves calls, literals, globals and members to names, and labels jumps |
 | `as_lift.py` | lifts disassembly to pseudo-source — a symbolic stack machine plus control flow |
@@ -2463,18 +2463,34 @@ Every title that parses recovers with **0 unmodelled opcodes and 0 bodies
 that failed to decompile**. What the compiler says, and what the project's own
 checks say:
 
+**The five 2010-2012 titles are in this table for the first time**, and
+every one of them has 0 residual gotos, 0 dangling gotos, 0 unbalanced
+files and a verified split -- so all fifteen rows are structurally
+compilable. None of the five has been *asked* to compile: BGT 1.3 is the
+only engine installed here and a whole-title compile puts its modal
+report on somebody's screen, so that is a deliberate spend and these are
+not yet worth it. The two figures that moved for the older rows are the
+`cs` server's 9,713 (it was 9,712, measured before a fold change the
+frozen commit reproduces) and Crazy Party's 174,139, which is 27 fewer
+for the `for` headers it now writes.
+
 | title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
+| Antony (2012-02) | 2,874 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
+| Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
+| Grodan Gun (2011-09) | 3,208 | 0 | 0 | yes | 734 | not asked |
+| Palace Punch-up (2010 beta) | 3,214 | 0 | 0 | yes | 823 | not asked |
 | constant velocity | 3,805 | 0 | 0 | yes | 1,767 | **yes** |
 | Battle of the Hunter | 4,269 | 0 | 0 | yes | 1,334 | **yes** |
 | Super Egg Hunt | 5,239 | 0 | 0 | yes | 1,623 | **yes** |
 | Field Wars | 7,942 | 0 | 0 | yes | 3,005 | **yes** |
 | cs client | 7,963 | 0 | 0 | yes | 2,858 | **yes** |
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
-| cs server | 9,712 | 0 | 0 | yes | 3,060 | **yes** |
+| cs server | 9,713 | 0 | 0 | yes | 3,060 | **yes** |
+| Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
 | The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
 | Manamon 1 | 82,156 | 0 | 0 | yes | 26,510 | not asked -- **wrong engine**, see below |
-| Crazy Party | 174,166 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
+| Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
 | Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
 | Psycho Strike | -- | -- | -- | -- | -- | **not on this machine any more** |
 | Manamon 2 | -- | -- | -- | -- | -- | **not on this machine any more** |
@@ -14226,6 +14242,37 @@ the entry tags in one AES block, and `Entry.decrypt(key)` returns the plaintext 
 Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
+**Three defects are DIAGNOSED and not fixed, and all three are one
+question: a slot's NAME against its pushed values.**
+
+- **`cs`'s mouse-mode toggle can be switched on and never off.** It
+  recovers as `if (mousemode == 1) { } else { } mousemode = 1;` -- both
+  arms empty and the mode always 1. Confirmed against that game's own
+  source (`mousemode = mousemode==1 ? 0 : 1;`).
+- **Perilous Hearts' computer characters act on a level that changed
+  under them.** `think` snapshots the global `level`, calls `run_state`
+  -- which is where it changes -- and the guard comes out
+  `if (level != level)`. Three sites.
+- **A recovered Crazy Party never flips a `DeRetournable` tile.**
+  `bouge` snapshots `x` and `y`, something moves the object, and
+  `if (x != oldx || y != oldy)` comes out comparing each with itself.
+
+The first two are the condition-call witness, which fixed them and was
+**reverted** for collapsing the `cs` server's three sound axes into one.
+The third is the folded-call witness, which fixed it and was **rejected**
+for undoing the first. Both failures are the same mechanism:
+`_snapshot_pushed` protects a value already on the stack by substituting
+it when its slot is rewritten, and a slot that has been PROMOTED has a
+name rather than a value, so there is nothing to substitute. Promoting a
+slot to keep one saved value honest destroys every pushed value that
+reads it.
+
+So the next attempt is not another staleness rule. It is to give a
+pushed value its own text at the push, before anything can promote the
+slot it came from -- after which both witnesses are cheap. The two
+rejections are written up above with their numbers so that attempt
+starts from the measurements.
+
 **Stack balance is complete on the four titles** -- 14,300 / 14,300 bodies --
 so it no longer points at anything. The open work was readability, and
 `as_lift.fold_temporaries` now does it: it folds a compiler-materialised
@@ -14298,9 +14345,10 @@ rendered output**, not just their counts: this fix leaves Super Egg Hunt,
 Paladin and Psycho Strike byte-identical, which is what a correctly scoped
 structurer change looks like.
 
-**Nothing is left on any title that can be measured here.** All five are
-at 0 residual gotos and 0 dangling gotos, Crazy Party's fourteen
-included -- that row was owed twice and is paid above. Manamon 2
+**Nothing is left on any title that can be measured here.** All fifteen
+are at 0 residual gotos and 0 dangling gotos -- Crazy Party's fourteen
+included, that row having been owed twice, and the five 2010-2012 titles
+as well. Manamon 2
 reported 4 at the commit it was last measured and cannot be
 re-measured here, because its own runtime is gone from this machine
 and BGT 1.3 does not parse its fork.
