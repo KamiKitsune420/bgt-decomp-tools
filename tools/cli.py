@@ -62,7 +62,7 @@ import sys
 from typing import List, Optional
 
 try:                      # installed as a package
-    from . import (as_disasm, as_lift, as_module, as_opcodes, as_write,
+    from . import (as_disasm, as_early, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
                    bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
                    bgt_ghidra, bgt_oracle, bgt_drive,
@@ -71,6 +71,7 @@ try:                      # installed as a package
                    bgtlib, engine, script_files)
 except ImportError:       # run directly from a checkout
     import as_disasm
+    import as_early
     import as_lift
     import as_module
     import as_opcodes
@@ -536,6 +537,59 @@ def cmd_files(args: argparse.Namespace) -> int:
     return _run(script_files.main, args.rest, prog="bgt files")
 
 
+def cmd_early(args: argparse.Namespace) -> int:
+    """Read a module of the 2010 or 2011 generation, which `as_module` cannot.
+
+    Those builds are a different format rather than a different string
+    encoding, so this is a second reader rather than another dialect -- see
+    `as_early`. The claim worth printing is the landing: a walk that ends
+    exactly on EOF has validated every field width above it.
+    """
+    path = args.module
+    table = None
+    exe = args.exe
+    try:
+        data = open(path, "rb").read()
+    except OSError as exc:
+        return _fail(str(exc))
+
+    # Handed an executable rather than a module, unpack it -- and that
+    # executable is also the one carrying the opcode table.
+    if bgtlib.read_trailer(data) is not None:
+        try:
+            unpacked = bgtlib.unpack(data)
+        except bgtlib.BgtError as exc:
+            return _fail(str(exc))
+        data, exe = unpacked.bytecode, exe or path
+
+    if exe:
+        try:
+            table = as_opcodes.extract(exe)["table"]
+        except Exception as exc:                       # noqa: BLE001
+            print("could not read the opcode table from %s: %s" % (exe, exc))
+    else:
+        print("no executable given, so function bodies cannot be stepped "
+              "-- pass the game's own exe")
+
+    out = as_early.summarize(data, table)
+    if out is None:
+        return _fail("nothing to read")
+    print("per-build fields   namespace=%s defaults=%s objvar_three=%s "
+          "objinfo_fields=%d line_numbers=%s"
+          % (out["namespace"], out["defaults"], out["objvar_three"],
+             out["objinfo_fields"], out["line_numbers"]))
+    print("walked             0x%X of 0x%X (%.1f%%)%s"
+          % (out["at"], out["size"], 100.0 * out["at"] / max(1, out["size"]),
+             "  -- EXACTLY ON EOF" if out["eof"] else ""))
+    if out["error"]:
+        print("stopped            %s" % out["error"])
+    for note in out["notes"]:
+        print("   %s" % note)
+    for name in out["sections"]:
+        print("source file        %s" % name)
+    return 0 if out["eof"] else 1
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     forwarded = list(args.exe)
     if args.deep:
@@ -985,6 +1039,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("rest", nargs=argparse.REMAINDER,
                    help="module [exe] [--nvgt] [--include DIR] [--json FILE]")
     p.set_defaults(func=cmd_files)
+
+    p = sub.add_parser("early",
+                       help="read a 2010 or 2011 module, which the newer "
+                            "reader cannot")
+    p.add_argument("module", help="a decoded module, or the game's exe")
+    p.add_argument("exe", nargs="?",
+                   help="the game's exe, for its own opcode table")
+    p.set_defaults(func=cmd_early)
 
     p = sub.add_parser("validate", help="run the pipeline over several titles")
     p.add_argument("exe", nargs="+")

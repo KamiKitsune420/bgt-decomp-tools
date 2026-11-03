@@ -473,6 +473,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
+| `as_early.py` | `bgt early`: the 2010 and 2011 module format, which is a different format rather than a third dialect -- two debug titles read end to end and name their own source files |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
 | `as_disasm.py` | readable disassembly — resolves calls, literals, globals and members to names, and labels jumps |
 | `as_lift.py` | lifts disassembly to pseudo-source — a symbolic stack machine plus control flow |
@@ -12064,10 +12065,11 @@ no amount of byte-fitting will separate them. The answer is in
 what differs is a condition rather than a field order -- and that is a known
 address away by the method above.
 
-So the prototype is not wired in, and the honest summary of this whole section
-is: five record layouts read from the engine and checked against a known
-answer, a module head that walks on five titles, and one conditional byte
-still unread.
+So the honest summary at that point was: five record layouts read from the
+engine and checked against a known answer, a module head that walks on five
+titles, and one conditional byte still unread. That byte is the next section,
+and the four fields after it are the one after that -- both are read now, and
+the reader is `tools/as_early.py`.
 
 #### ...and the byte was a whole FIELD, read out of the other runtime
 
@@ -12088,131 +12090,196 @@ compiler.
 With that field made per-build and trialled like the others, and the bodies
 stepped with each build's own `asBCInfo[]`:
 
-| title | per-build answers | walks to |
+| title | per-build answers | walked to, then |
 |---|---|---|
 | Grodan Gun | no namespace, **defaults** | 0x24A -- several function bodies in |
 | Ljudfarmen | no namespace, **no defaults** | 0xEA |
 | Palace Punch-up | no namespace, no defaults, and `funcType` reads **5** where later builds write 4 | 0xF8 |
 | Antony | **namespace**, defaults | 0xA8 |
 
+(Those four figures are from the commit this section was written at. The two
+debug titles reach EOF now -- see below -- and the other two still stop
+where they did, which is what says the four fixes below were about the
+BODY and the tail rather than about these fields.)
+
 Every per-build answer is chosen by how far the walk gets, which is the same
 discipline as the exact-EOF landing one layer up -- a wrong answer here fails
 within about 0x30 bytes rather than drifting.
 
-#### What is left, named
+#### It reads END TO END now, and `bgt early` is the command
 
-Three things, each one disassembly away rather than a search:
+Both debug 2011 titles land **exactly on EOF**, which is this document's own
+measure for a reader: nothing follows the last table to absorb a mistake, so
+the landing validates every field width above it.
 
-- **The body's tail fields.** Two of the three things that were wrong here are
-  now read out of `ReadByteCode` (`0x00447A30`) and are worth having
-  separately, because both contradict what the newer path assumes.
+| title | module | walked | source files named |
+|---|---|---|---|
+| Ljudfarmen (2011-02) | 61,591 B | **0xF097 of 0xF097** | **9 of 9** |
+| Grodan Gun (2011-09) | 63,364 B | **0xF784 of 0xF784** | **11 of 11** |
 
-  **A bytecode operand is FIXED-WIDTH, not a varint.** The reader takes the
-  opcode byte, looks up `asBCInfo[op].type`, and switches on it; each case
-  reads its operands with `ReadData` at a set width -- `push 2` for a word,
-  `push 4` for a dword, `push 8` for a quadword -- where `as_opcodes.
-  disassemble` reads one varint per operand. The stored size per type was
-  extracted from that switch (the jump table at `0x00447D7C`, indexed through
-  the byte table at `0x00447DA8`): thirteen of the nineteen came out directly,
-  and every one of those thirteen agrees with the layout its type name implies,
-  so the rest follow the same rule.
+and every section parses: 5 and 9 class declarations, one funcdef each, the
+class property lists, 60 and 25 global properties, 54 and 46 module
+functions, 48 and 36 global functions, 17 and 22 `usedTypes`, 148 and 187
+`usedFunctions`, 124 and 94 `usedStringConstants`, 43 and 67
+`usedObjectProps`. **158 of 158 of Ljudfarmen's function bodies agree with
+their declared length to the dword**, each ending on its own `RET`.
 
-  | stored | types |
-  |---|---|
-  | 1 -- no operand | 1 |
-  | 3 -- one word | 2, 3, 11 |
-  | 5 -- a dword, or two words | 4, 5, 10, 12, 14, 15, 18 |
-  | 7 -- three words | 8 |
-  | 9 -- a quadword, two dwords, or two words and a dword | 6, 7, 13, 19 |
-  | 11 -- a word and a quadword | 9, 17 |
-  | 13 -- a quadword and a dword | 16 |
-
-  **And the length field counts DWORDS of expanded instruction, not
-  instructions.** The loop's tail says so in five instructions:
-
-  ```
-  movzx edx, [opcode] ; shl edx, 4
-  mov eax, [edx + 0x4C547C]     ; asBCInfo[op].type
-  mov ecx, [eax*4 + 0x4C5428]   ; asBCTypeSize[type]
-  sub [esp+0x58], ecx           ; remaining -= dwords
-  jne ...                       ; while it is not zero
-  ```
-
-  This document's own rule is that *"the bytecode length field counts
-  instructions, not dwords"*, which is what it is for the build that rule was
-  read from -- so the unit is per generation like everything else here, and a
-  body of one `RET` reads 1 either way, which is why the smallest body cannot
-  tell them apart.
-
-  `asBCTypeSize` at `0x004C5428` is
-  `[0,1,1,1,2,2,3,3,2,3,2,1,2,3,2,2,4,3,2,3]`, which is **the same table** this
-  file records for BGT 1.3. Only the unit of the length field moved.
-
-  **And the widths were the wrong question.** Six of the nineteen types did not
-  yield to the width extractor, and those six are the interesting ones: their
-  cases do not call `ReadData` at all, they call **ReadEncodedUInt**. So the
-  stored form is mixed, and the rule is simple once seen:
-
-  > A **word** operand is two raw bytes, a **quadword** is eight, and a
-  > **dword** is an encoded integer.
-
-  Eleven distinct cases serve the nineteen types, and **the sharing is the
-  check on the transcription** -- types that jump to the same case must read
-  the same way, and every group does:
-
-  | case | types | reads |
-  |---|---|---|
-  | `0x00447A82` | 1 | -- |
-  | `0x00447A8C` | 2, 3, 11 | word |
-  | `0x00447AE6` | 4 | eu |
-  | `0x00447AAD` | 5, 12, 18 | word, eu |
-  | `0x00447BFA` | 6 | quadword |
-  | `0x00447AFC` | 7 | eu, eu |
-  | `0x00447B1E` | 8 | word, word, word |
-  | `0x00447C61` | 9, 17 | word, quadword |
-  | `0x00447B6F` | 10, 14, 15 | word, word |
-  | `0x00447BA9` | 13, 19 | word, word, eu |
-  | `0x00447C22` | 16 | quadword, eu |
-
-#### What the walk reads now, and the instrument that says so
-
-Counting how far a walk gets is the wrong measure, and the body-shape trial
-showed why: the shape that swallowed a script-section string as data got
-**further** than the right one. The right measure is how many script sections
-a walk reaches *as sections* -- they are findable independently, so each one is
-an anchor a correct walk has to land on exactly.
-
-By that measure, Ljudfarmen's walk now reads its funcdef, two constructors and
-their factories, and then ten consecutive virtual methods **by name**:
-
-```
-menu_callback                 funcdef
-dynamic_menu_item             29 instructions, and its factory
-dynamic_menu                  21 instructions, and its factory
-add_item  add_item_tts  get_item_count  get_position  set_tts_object
-set_sound_object  set_callback  run  run_extended  reset
+```bash
+bgt early game.exe                  # unpack, read, and name the source files
+bgt early module.bin game.exe       # ...or a module, with its own exe for the
+                                    #    opcode table
 ```
 
-That list is BGT's own `dynamic_menu` interface, in order, out of a module
-nothing could read this morning. Grodan Gun reaches two of its eleven sections
-and Ljudfarmen one of nine, and both then stop on an encoded integer whose
-lead byte says five bytes -- which no real field in a 60 KB module is, so it is
-a desync further in rather than a new field.
+`tools/as_early.py` is the reader, and it is a **second reader rather than a
+third dialect**, deliberately. This file's rule that *one reader stays one
+reader* is about not keeping two models of ONE format; this is a different
+format -- no `noDebugInfo` byte, no namespace in a type declaration, a plain
+encoded integer, a one-subtype template, a gated global initialiser -- so
+bolting it into `as_module` would be the drift that rule warns about. What
+the two share is the opcode table, which comes from the game's own runtime
+either way.
 
-Still not wired into `as_module`: the measure for adopting it is the exact-EOF
-landing, and 2% of one module is not that. What has changed is that the format
-is no longer guesswork -- every rule above came out of the engine, and the two
-that were guessed at (the body's trailing counts) are the only ones left.
-- **The beta's `ReadTypeDeclaration`.** Its phase 2 needs two bytes where only
-  one is there, so something in it is absent as well -- the interface count is
-  the candidate, since its `funcType` numbering is already one generation
-  older.
-- **Antony's funcdef record**, which fails on its own: a 2012 field this has
-  not met.
+##### The four fields that were still wrong, and how each one hid
 
-The prototype is still not wired into `as_module`, for the reason the earlier
-note gives -- nothing lands on EOF, so a per-build flag could never be
-selected -- and the measure to adopt it by is unchanged.
+Every one produced a plausible answer rather than an error, which is the only
+reason they took as long as they did.
+
+**A template type-info carries ONE subtype and no count.** `WriteTypeInfo` at
+0x00448CF0, in full:
+
+```
+ti is null             -> one 0 byte
+a template instance    -> 'a' ; string(name) ; then ONE subtype:
+                            an object or an enum: 's' ; TypeInfo ; one byte,
+                                'h' for a handle and 'o' for a value
+                            anything else:        't' ; FOUR RAW BYTES, the
+                                token type -- not an encoded integer
+asOBJ_TEMPLATE_SUBTYPE -> 's' ; string(name)
+otherwise              -> 'o' ; string(name)
+```
+
+Multiple template subtypes arrived in a later AngelScript, so there is no
+count at all -- and reading one took the subtype's own `s` tag (0x73) for a
+count of **115**. What it cost: `array<string>`, as the declared type of a
+local, sits three bytes after a body that had decoded perfectly and ended on
+its `RET`.
+
+**The widest encoded integer has NO free bits in its lead byte.** The whole
+ladder, from `ReadEncodedUInt` at 0x004478F0 and `WriteEncodedUInt` at
+0x004477D0:
+
+| lead | form |
+|---|---|
+| 0x00-0x7F | one byte, the value |
+| 0x80-0xBF | two bytes, `(b & 0x3F) << 8` plus the next |
+| 0xC0-0xDF | three bytes, `(b & 0x1F) << 16` plus two more |
+| 0xE0-0xEF | four bytes, `(b & 0x0F) << 24` plus three more |
+| **0xF0** | **five bytes: the constant 0xF0, then all four bytes** |
+
+Every other width hides the value's top bits in the lead, so the obvious
+guess is that 0xF0-0xF7 is a five-byte form with three free bits. It is not:
+a 32-bit value that needs five bytes has no bits to spare. A reader that
+guessed otherwise would accept 0xF1 and shift a real value by three.
+
+Where it turns up is the useful part: a **float or a negative** constant.
+`SetV4 v, -23` is the dword 0xFFFFFFE9 and a backward `JMP` is a negative
+offset, so a body of 1,480 dwords reaches this form and the small ones never
+do.
+
+**Two dword operands are four RAW bytes**, read case by case out of
+`ReadByteCode`'s switch rather than from a rule:
+
+| case | types | reads |
+|---|---|---|
+| `0x00447BA9` | 13, 19 | word, word, **four raw bytes** |
+| `0x00447C22` | 16 | quadword, **four raw bytes** |
+
+Every other dword operand really is an encoded integer, which is why 2,928
+type-4 instructions decoded correctly while this was wrong -- and the split
+is the same one as the five-byte form above: the dword of an `ADDIi` may be
+a float, and a float does not compress.
+
+**How it hid is the part worth keeping.** A type-13 instruction's four stored
+bytes read as a varint leave three bytes behind, and in Ljudfarmen's
+`fade_out_sounds` those three are `00 00 01`, which decodes as a perfectly
+valid `POP 1`. So the stream re-synchronised at the very next instruction and
+the body still ended on its `RET`. The whole cost was one dword of the
+declared length, once per type-13 instruction.
+
+**And the consistency check that found it was answering the wrong question.**
+Of 158 bodies, every one whose declared length disagreed with the walk
+disagreed by precisely its count of type-13 instructions, and nothing else
+came close: changing that type's dword size by one reconciled **158 of 158**
+where the next best candidate reconciled 131. That is the shape of evidence
+this file trusts -- a forced answer rather than a fitted one -- and it said
+`asBCTypeSize[13]` is 2, which the binary flatly refuses: the table is
+`[0,1,1,1,2,2,3,3,2,3,2,1,2,3,2,2,4,3,2,3]` in this runtime and in BGT 1.3
+alike. Reading the case settled it. **A check with one forced answer can
+still be answering the wrong question**, and the way to tell was that its
+answer contradicted the engine.
+
+**And a global property's initialiser is gated on a byte.** `WriteInner`
+writes the name, the data type, one byte, and a function record **only when
+that byte is 1** -- where the newer reader always writes one. A reader that
+always expects a function eats the next record.
+
+##### The rest of the section order, read out of `WriteInner`
+
+```
+eu(enums)      per: string, 4 bytes of flags, eu(size), phase 2
+eu(classes)    per: string, 4 bytes of flags, eu(size)        -- phase 1 only
+eu(funcdefs)   per: a function record
+the interfaces, phase 2                      0x0044B800, filtered
+the classes, phase 2                         0x0044B840
+the classes, phase 3 -- the property list    0x0044B880
+eu(typedefs)   per: string, 4 bytes, eu(size), one 4-byte token
+eu(globals)    per: string, DataType, one byte, and a function record only
+                    when that byte is 1
+eu(module functions)   per: a function record
+eu(global functions)   per: a function record
+eu(bind info)          per: a function record and a string
+eu(usedTypes)          per: a type-info
+eu(the VALUE types among them)   per: eu(its index), eu(its size)
+eu(usedTypeIds)        per: a DataType
+usedFunctions          0x0044AAF0: eu(count), per: one byte then a function
+                       SIGNATURE -- no 'f' tag and no body
+usedGlobalProps        0x0044A860: eu(count), per: string, DataType, one byte
+usedStringConstants    eu(count), per: a string
+usedObjectProps        0x004498A0: eu(count), per: a type-info and the
+                       property's NAME
+```
+
+Three of those are worth a sentence. The **properties are a third pass** over
+the classes rather than the tail of phase 2, so a reader that puts them
+inside the class block desynchronises on the first class that has any.
+`IsInterface` is `sub_00440FA0` and it is `(flags & 0x10000) && size == 0`,
+which confirms this generation's script-object flag from the code that uses
+it. And the **value-type sizes** exist so the engine can refuse a module
+built against a differently-sized value type rather than mis-read it.
+
+**That last string table is `usedStringConstants`, not the script sections**,
+which reading the strings settles outright: Ljudfarmen's 124 entries are
+`coffee`, `hen_house`, `mud` -- the game's own literals. Taking them for file
+names cost nothing but a count, 132 "source files" on a nine-file game, and
+that count is exactly what showed it, because the walk landed on EOF either
+way.
+
+##### Three early titles still stop, each on its own field
+
+The reader says where rather than guessing, which is the point of a walk that
+reports its landing:
+
+| title | reaches | stops on |
+|---|---|---|
+| Palace Punch-up (a 2010 beta) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
+| Perilous Hearts (2011-11) | 0x142 | a function tag of 0x01 at the top of class phase 2 |
+| Antony (2012-02) | 0xA8 | a string tag of 0x01 inside the funcdef record, with a namespace present |
+
+Each is one disassembly of that title's own runtime away, by the method
+above: find the writer, read its call sequence, check it against a known
+answer. Perilous Hearts is the interesting one, because it is the
+transitional build -- it already multiplies, compresses and writes a pack
+field while writing no namespace.
 
 #### Found on the way: two games' real SOURCE FILE LISTS
 
