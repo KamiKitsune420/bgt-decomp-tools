@@ -171,6 +171,11 @@ class TypeInfo:
     is_shared: bool = False
     is_external: bool = False
     is_interface: bool = False
+    #: {byte offset: property name}, where the module records one. Only
+    #: the 2010-2012 BGT beta does: its `ADDSi` names a property by its
+    #: offset rather than by an index into `usedObjectProperties`, which
+    #: that build has no table for. Empty everywhere else.
+    property_offsets: dict = field(default_factory=dict)
     return_via_object_register: bool = False  # inferred registered REF type
     return_via_value_register: bool = False   # inferred registered enum
 

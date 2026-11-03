@@ -277,8 +277,22 @@ NEWER_BC_TYPE = {name: bc_type
 #: `this` at the top of every method and released on the way out. Source
 #: never wrote it and no later engine emits it, so it is named for what it
 #: is and declared droppable in `purity.ENGINE_PURE`.
+#:
+#: **`_beh_10_` is the INDEX, and this map said assignment.** The
+#: parameter is what refutes that: it is a `uint`, where an assignment
+#: takes `const T&`. Asked of every behaviour both generations record,
+#: with its owner and its signature, `_beh_10_` is always `(uint) -> T&`
+#: -- `asBEHAVE_INDEX`, which is how an AngelScript of this vintage
+#: registered subscripting, `opIndex` having arrived with the operator
+#: rework in 2.22. `string::opAssign` is in the beta's own
+#: `usedFunctions` under that name, so it was never a behaviour.
+#:
+#: Named wrongly, every indexed member write in the beta came out as an
+#: assignment to the array itself: `this.items = local_1;
+#: this.items = arg0;` where `sound_pool::play_stationary_extended` is
+#: filling in the fields of `items[slot]`.
 EARLY_BEHAVIOURS = {0: "$beh0", 1: "$beh2", 2: "$beh3", 4: "$addref",
-                    10: "opAssign"}
+                    10: "opIndex"}
 
 # The opcodes whose operand is a global pointer: a global property, or (for the
 # two that can carry one) a string constant.
@@ -595,6 +609,45 @@ class Builder:
                 out.append(DataType(
                     token_type=self.token(sub.get("typeid", 0))))
         return out
+
+    #: How many bytes a property of each primitive type occupies, which
+    #: is what makes the offset reading self-verifying. Read off the
+    #: beta's own layout: a `bool` takes one byte (`dynamic_menu`'s two
+    #: flags are at 16 and 17), a `double` eight (`sound_pool_item`'s six
+    #: run 36, 44, 52, 60, 68, 76) and a pointer, a handle, a reference
+    #: and every four-byte primitive take four.
+    PROPERTY_WIDTHS = {"bool": 1, "int8": 1, "uint8": 1,
+                       "int16": 2, "uint16": 2,
+                       "int64": 8, "uint64": 8, "double": 8}
+
+    def property_offsets(self, ti) -> Dict[int, str]:
+        """{byte offset: name}, where the record really holds offsets.
+
+        The third field of a property record is one byte. The 2010 beta
+        puts the property's **byte offset** there -- its `ADDSi` names a
+        property that way, having no `usedObjectProperties` table -- and
+        the 2011 and 2012 builds put the flags there, which is 0 for every
+        property of every class in all four of them.
+
+        Both readings parse, so this is not trialled against the EOF
+        landing: it is **checked**. The offsets must not decrease, and the
+        last one plus its own property's width must equal the class's
+        declared size. Five of the beta's five classes land exactly --
+        104 + 8 = 112, 36 + 4 = 40, 24 + 4 = 28, 72 + 4 = 76, 52 + 4 = 56
+        -- and the later builds fail at the first class, 0 + 1 against 89.
+        """
+        props = ti.properties or []
+        if not props or not ti.size:
+            return {}
+        offsets = [flags for _n, _dt, flags in props]
+        if offsets != sorted(offsets) or len(set(offsets)) != len(offsets):
+            return {}
+        name, dt, last = props[-1]
+        width = self.PROPERTY_WIDTHS.get(
+            dt.format().replace("const ", "").replace("&", "").strip(), 4)
+        if last + width != ti.size:
+            return {}
+        return {flags: n for n, _dt, flags in props}
 
     def dt_of_type(self, ref: Optional[Dict[str, Any]],
                    handle: bool = False) -> DataType:
@@ -954,9 +1007,21 @@ class Builder:
             # where the newer takes two.
             newer = LEGACY_BC_TYPE.get(name, NEWER_BC_TYPE.get(name))
             fields = BC_FIELDS[bc_type]
-            if newer is not None and len(BC_FIELDS[newer]) == len(fields):
-                fields = BC_FIELDS[newer]
-                bc_type = newer
+            if newer is not None and len(BC_FIELDS[newer]) >= len(fields):
+                #: **...and where the counts disagree the earlier engine's
+                #: operands are the LEADING ones**, because what a later
+                #: AngelScript did to these two instructions was append a
+                #: type id. The 2010 beta is the only build here where any
+                #: count disagrees: its `COPY` is the size alone and its
+                #: `ADDSi` the member offset alone, where the newer form is
+                #: `(offset, typeid)`. `COPY` was right by luck -- both
+                #: name their first operand `w_arg` -- and `ADDSi` was not:
+                #: its offset landed in `dw_arg` where every resolver reads
+                #: `w_arg`, so every member access in that whole game
+                #: resolved to offset 0, which is `this`.
+                fields = BC_FIELDS[newer][:len(fields)]
+                if len(fields) == len(BC_FIELDS[newer]):
+                    bc_type = newer
             if reads is None:
                 raise AdapterError("%s: %s has bytecode type %d, whose "
                                    "operand reads are not known"
@@ -1040,6 +1105,7 @@ class Builder:
             ti.vft = [f for f in (self.fn(x) for x in block["virtuals"]) if f]
             ti.properties = [(p["name"], self.dt(p["type"]), p["flags"])
                              for p in block.get("properties", [])]
+            ti.property_offsets = self.property_offsets(ti)
             for f in ti.constructors + ti.factories + ti.methods + ti.vft:
                 if f.object_type is None:
                     f.object_type = ti

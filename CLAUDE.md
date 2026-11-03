@@ -12487,7 +12487,7 @@ of them were a NUMBERING rather than a layout:
 
 | title | lines | files | calls read back | gotos | unbalanced |
 |---|---|---|---|---|---|
-| Palace Punch-up | 3,537 | 10 | 824 | 0 | 0 |
+| Palace Punch-up | 3,214 | 10 | 823 | 0 | 0 |
 | Ljudfarmen | 3,304 | 9 | 704 | 0 | 0 |
 | Grodan Gun | 3,208 | 12 | 734 | 0 | 0 |
 | Perilous Hearts | 14,876 | 19 | 3,314 | 0 | 0 |
@@ -12498,9 +12498,10 @@ gotos, 0 unbalanced files and a verified split on every one**, with the
 calls read back against each build's own declarations -- so all five are
 structurally compilable, five engine releases from a 2010 beta to 2012.
 
-Those figures are after the six fixes below, which are what made them --
+Those figures are after the ten fixes below, which are what made them --
 the row this table carried when it was first written was 42, 27, 20, 547
-and 54 gotos, with every string literal in all five games lost.
+and 54 gotos, with every string literal in all five games lost and every
+member access in the beta rendering as its own base pointer.
 
 ##### Five things the adapter had wrong, and four of them were QUIET
 
@@ -12871,6 +12872,132 @@ change, and the earlier sentence had not been re-derived. The `cs`
 server's 9,713 lines likewise supersede the standings' 9,712, and it too
 is byte-identical to the frozen commit.)
 
+###### Three more, and all three are the 2010 BETA's alone
+
+`bgt signatures` is what found them: that title reported **6
+self-identical lines and 16 double assignments** where the other four
+have none between them, and the rows were all one body --
+`sound_pool::play_stationary_extended`, whose source BGT ships:
+
+```
+items[slot].filename = filename;
+items[slot].looping = looping;
+items[slot].stationary = true;
+items[slot].start_offset = offset;
+```
+
+recovered as
+
+```
+this = local_1;
+this = arg0;
+this = local_1;
+this = arg1;
+this.seek(this);
+```
+
+Three separate readings had to be wrong at once to produce that, and
+each is a thing this generation does that no later one does.
+
+**`ADDSi` names a property by its BYTE OFFSET, not by an index.** It is
+an index into `usedObjectProperties` in every engine `asreader` models,
+and **the beta has no such table** -- its tail is usedTypes,
+usedTypeIds, usedFunctions, usedGlobalProps and usedStringConstants, and
+nothing else. So nothing resolved the operand and every member access in
+that whole game came out as its base pointer.
+
+**What resolves it was in the module already**: the property record's
+third field is one byte, and in the beta it holds the offset.
+
+```
+sound_pool_item   16 20 24 28 32 | 36 44 52 60 68 76 | 84 88 92 96
+                  100 101 102 | 104                       size 112
+dynamic_menu      16 17 | 20 24 28 32 36                  size  40
+```
+
+-- a `bool` taking one byte, a `double` eight, a pointer four, aligned.
+In the 2011 and 2012 builds the same byte is **0 for every property of
+every class**, which is the flags field those versions write.
+
+Both readings parse, so this is not trialled against the EOF landing; it
+is **checked**. The offsets must not decrease, and the last one plus its
+own property's width must equal the class's declared size. Six of the
+beta's six classes land exactly -- 104 + 8 = 112, 36 + 4 = 40,
+20 + 1 = 21, 24 + 4 = 28, 72 + 4 = 76, 52 + 4 = 56 -- and the later
+builds fail at the first class, 0 + 1 against 89.
+
+**The base of a member access is usually `this`, which has no slot
+type.** The offset lookup needs the class the offset belongs to, and
+slot 0 is not in `objVariableTypes`, so it has no declared type and the
+lookup never ran at all. `this` is the enclosing class.
+
+**And behaviour 10 is the INDEX, which this file had as the
+assignment.** It records `_beh_10_` as *"on `string` and
+`_builtin_array_`, one parameter, returns an object -- the assignment,
+which became the METHOD `opAssign` in every later engine"*. The
+parameter refutes it: a `uint`. An assignment takes `const T&`; a `uint`
+is a subscript. Asked of every behaviour both generations record, with
+its owner and its signature, `_beh_10_` is **always** `(uint) -> T&`:
+
+```
+_beh_10_  _builtin_array_  ret=sound_pool_item&   params=(uint,)
+_beh_10_  _builtin_array_  ret=dynamic_menu_item& params=(uint,)
+_beh_10_  string           ret=string             params=(uint,)
+```
+
+-- `asBEHAVE_INDEX`, which is how an AngelScript of that vintage
+registered subscripting; `opIndex` arrived with the operator rework in
+2.22. And `string::opAssign` is in the beta's own `usedFunctions` under
+that name, so it was never a behaviour at all.
+
+**A fourth reading was already right and had been doing nothing.**
+`decode_early` takes the field names from the newer reader where the two
+agree on how many operands there are, and from the build's own table
+where they disagree. In both instructions that disagree the later engine
+**appended** a type id, so the earlier one's operand is the *first* of
+the newer form's: the beta's `COPY` is the size alone and its `ADDSi`
+the member offset alone, where the newer form is `(offset, typeid)`.
+`COPY` was right by luck -- both name their first operand `w_arg` -- and
+`ADDSi`'s offset landed in `dw_arg` where every resolver reads `w_arg`.
+Fixing it changed nothing visible on its own, because the two readings
+above were still wrong downstream; it is the precondition for them.
+
+What it comes to, with all four:
+
+```
+int play_stationary_extended(string arg0, bool arg1, double arg2,
+                             double arg3, double arg4, double arg5)
+{
+    this.clean_unused();
+    local_2 = arg0;
+    local_1 = this.reserve_slot(local_2);
+    if (local_1 == -1) { return -1; }
+    this.items[local_1].filename = arg0;
+    this.items[local_1].looping = arg1;
+    this.items[local_1].stationary = true;
+    this.items[local_1].start_offset = arg2;
+    this.items[local_1].start_pan = arg3;
+    this.items[local_1].start_volume = arg4;
+    this.items[local_1].start_pitch = arg5;
+    local_2 = this.items[local_1].filename;
+    this.items[local_1].handle.load(local_2);
+    if (!this.items[local_1].handle.get_active()) {
+        this.items[local_1].reset();
+        return -1;
+    }
+```
+
+which is BGT's own source. **Palace Punch-up: 3,537 -> 3,214 lines, and
+`bgt signatures` all zeros** where it had 6 and 16. The 323 lines are the
+dead assignments going.
+
+And the scope is exactly one title, which is what the other nine runs
+say: Grodan Gun, Ljudfarmen, Antony, Perilous Hearts, Battle of the
+Hunter, constant velocity, the `cs` client and the `cs` server all render
+**byte-identical**. The beta's call count falls by one, which is
+`bgt apicheck` reading `opIndex` as the subscript syntax it now is
+rather than as a name a paren opens against.
+
 ##### The TOKEN shift is four here and two in BGT 1.3
 
 This file already records the newer engine's token ids being recovered from
@@ -12901,13 +13028,19 @@ and its signature rather than assumed:
 | `_beh_1_` | on `string`, no parameters, void | the **destructor**, 2 later |
 | `_beh_2_` | **no owner**, returns an object | the **factory**, 3 later |
 | `_beh_4_` | on `_builtin_object_`, no parameters, void | **AddRef** |
-| `_beh_10_` | on `string` and `_builtin_array_`, one parameter, returns an object | the **assignment** |
+| `_beh_10_` | on `string` and `_builtin_array_`, one parameter -- a `uint` -- returning a reference | the **index** |
 
-Two of those matter beyond naming. The assignment became the **method**
-`opAssign` in every later engine, and the decompiler recognises the string
-and array copy idioms by that name -- so it is renamed to the method rather
-than to a behaviour, or every copy in these titles reads as a call to
-`$beh10`.
+Two of those matter beyond naming. Subscripting became the **method**
+`opIndex` in every later engine -- `asBEHAVE_INDEX` is how an AngelScript
+of this vintage registered it -- and the decompiler renders that name as
+the subscript it is, so it is renamed to the method rather than to a
+behaviour.
+
+(**This said "the assignment" and it is the index**, which the parameter
+settles: a `uint` is a subscript where an assignment takes `const T&`.
+See **Three more, and all three are the 2010 BETA's alone** for what the
+wrong name cost, and for the fact that `string::opAssign` is in that
+module's own `usedFunctions` under its own name.)
 
 And the AddRef was in the first line of every recovered method:
 

@@ -497,7 +497,13 @@ def test_the_behaviour_map_lands_on_names_the_decompiler_knows():
     assert m[0] in decompile.CTORS, "0 is the constructor"
     assert m[1] in decompile.DTORS, "1 is the destructor, 2 later"
     assert m[2] in decompile.DTORS or m[2] == "$beh3", "2 is the factory"
-    assert m[10] == "opAssign", "assignment became a method"
+    #: **The INDEX, which this map first had as the assignment.** The
+    #: parameter refutes that: `(uint) -> T&` is a subscript, where an
+    #: assignment takes `const T&` -- and `string::opAssign` is in the
+    #: beta's own `usedFunctions` under that name, so it was never a
+    #: behaviour. `opIndex` arrived with AngelScript's operator rework in
+    #: 2.22; before it, subscripting was `asBEHAVE_INDEX`.
+    assert m[10] == "opIndex", "subscripting was a behaviour"
     assert m[4] in decompile.BOOKKEEPING, "4 is the engine's own AddRef"
 
 
@@ -691,3 +697,79 @@ def test_the_string_factory_is_named_in_one_place():
     import inspect
     src = inspect.getsource(decompile.FuncDecompiler)
     assert src.count("_is_string_factory(") == 2
+
+# ---- a property's own byte offset ----------------------------------------
+
+class _FakeDT:
+    def __init__(self, text):
+        self.text = text
+
+    def format(self):
+        return self.text
+
+
+class _FakeTI:
+    def __init__(self, size, properties):
+        self.size = size
+        self.properties = properties
+        self.property_offsets = {}
+
+
+def _offsets(size, properties):
+    try:
+        from tools import bgt_asir
+    except ImportError:
+        import bgt_asir
+    builder = bgt_asir.Builder.__new__(bgt_asir.Builder)
+    return bgt_asir.Builder.property_offsets(
+        builder, _FakeTI(size, [(n, _FakeDT(t), o) for n, t, o in properties]))
+
+
+def test_a_property_offset_is_checked_against_the_class_size():
+    """The 2010 beta puts a property's BYTE OFFSET in the record's third
+    field where the 2011 and 2012 builds put its flags, and both readings
+    parse -- so this is checked rather than trialled against the EOF
+    landing: the last offset plus its own property's width must equal the
+    class's declared size.
+
+    The numbers are `sound_pool_item`'s, read out of the beta: five
+    four-byte fields, six doubles, four more ints, three bools taking ONE
+    byte each, and a double, against a declared size of 112.
+    """
+    item = [("handle", "sound@", 16), ("filename", "string&", 20),
+            ("x", "int", 24), ("y", "int", 28), ("looping", "bool", 32),
+            ("pan_step", "double", 36), ("volume_step", "double", 44),
+            ("behind_pitch_decrease", "double", 52),
+            ("start_pan", "double", 60), ("start_volume", "double", 68),
+            ("start_pitch", "double", 76), ("left_range", "int", 84),
+            ("right_range", "int", 88), ("backward_range", "int", 92),
+            ("forward_range", "int", 96), ("is_3d", "bool", 100),
+            ("paused", "bool", 101), ("stationary", "bool", 102),
+            ("start_offset", "double", 104)]
+    got = _offsets(112, item)
+    assert got[16] == "handle" and got[104] == "start_offset"
+    assert got[101] == "paused", "a bool takes one byte"
+    assert len(got) == 19
+    # `dynamic_menu`: two bools at 16 and 17, then a pointer aligned to 20.
+    menu = [("wrap", "bool", 16), ("allow_escape", "bool", 17),
+            ("tts_handle", "tts_voice@", 20),
+            ("callback_handle", "menu_callback@", 24),
+            ("callback_data", "string&", 28), ("running", "bool", 32),
+            ("item_list", "dynamic_menu_item[]&", 36)]
+    assert _offsets(40, menu)[36] == "item_list"
+
+
+def test_a_flags_field_is_not_read_as_an_offset():
+    """The 2011 and 2012 builds write the flags there, which is 0 for
+    every property of every class in all four of them -- and 0 plus one
+    byte is not a class size, so the check refuses them at the first
+    class. `sound_pool_item` is 89 bytes in Grodan Gun.
+    """
+    flags = [("handle", "sound@", 0), ("filename", "string&", 0),
+             ("x", "int", 0), ("persistent", "bool", 0)]
+    assert _offsets(89, flags) == {}
+    # ...and a descending or repeated run is not a layout either.
+    assert _offsets(28, [("a", "int", 20), ("b", "int", 16)]) == {}
+    assert _offsets(24, [("a", "int", 16), ("b", "int", 16)]) == {}
+    # A class with no declared size says nothing.
+    assert _offsets(0, [("a", "int", 16)]) == {}

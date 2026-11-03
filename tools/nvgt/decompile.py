@@ -3023,6 +3023,30 @@ class FuncDecompiler:
             return
         if name == "ADDSi":
             # add a member offset to the pointer on top of the stack
+            if self.stack and not ins.prop_name:
+                #: **...and the 2010-2012 BGT beta names the property by
+                #: its OFFSET**, having no `usedObjectProperties` table
+                #: for an index to point into. The base pointer's own type
+                #: says which class, and that class's property record
+                #: carries each offset -- see
+                #: `bgt_asir.Builder.property_offsets`, which only answers
+                #: for a module whose offsets check out against the class
+                #: size. Unresolved, every member access in that whole
+                #: game rendered as the base pointer: `this = this;`.
+                base = self._deref(self.stack[-1])
+                base_dt = base.data_type
+                owner = base_dt.obj_type if base_dt is not None else None
+                if owner is None and base.text == "this":
+                    #: Slot 0 is `this` and is not in `objVariableTypes`,
+                    #: so it has no declared type -- and `this` is the
+                    #: commonest base there is, which is why the lookup
+                    #: never ran at all. The enclosing class is what it is.
+                    owner = self.fn.object_type if self.fn is not None else None
+                here = getattr(owner, "property_offsets", None)
+                if here:
+                    found = here.get(ins.w_arg)
+                    if found is not None:
+                        ins.prop_name = "%s.%s" % (owner.name, found)
             if self.stack and ins.prop_name:
                 pname = self._short_prop(ins.prop_name, ins.w_arg)
                 base = self._deref(self.stack[-1]).text
