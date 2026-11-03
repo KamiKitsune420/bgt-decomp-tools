@@ -12148,13 +12148,61 @@ Three things, each one disassembly away rather than a search:
   `[0,1,1,1,2,2,3,3,2,3,2,1,2,3,2,2,4,3,2,3]`, which is **the same table** this
   file records for BGT 1.3. Only the unit of the length field moved.
 
-  What is still wrong is in the second body of the first class, and the useful
-  instrument for it is already in hand: the script sections are findable
-  independently, so a correct walk has to land on each one exactly at a record
-  boundary. Counting the sections a walk reaches is a far better measure than
-  how far it gets -- which is the same lesson as the body-shape trial, where
-  the shape that swallowed a string as data got **further** than the right
-  one.
+  **And the widths were the wrong question.** Six of the nineteen types did not
+  yield to the width extractor, and those six are the interesting ones: their
+  cases do not call `ReadData` at all, they call **ReadEncodedUInt**. So the
+  stored form is mixed, and the rule is simple once seen:
+
+  > A **word** operand is two raw bytes, a **quadword** is eight, and a
+  > **dword** is an encoded integer.
+
+  Eleven distinct cases serve the nineteen types, and **the sharing is the
+  check on the transcription** -- types that jump to the same case must read
+  the same way, and every group does:
+
+  | case | types | reads |
+  |---|---|---|
+  | `0x00447A82` | 1 | -- |
+  | `0x00447A8C` | 2, 3, 11 | word |
+  | `0x00447AE6` | 4 | eu |
+  | `0x00447AAD` | 5, 12, 18 | word, eu |
+  | `0x00447BFA` | 6 | quadword |
+  | `0x00447AFC` | 7 | eu, eu |
+  | `0x00447B1E` | 8 | word, word, word |
+  | `0x00447C61` | 9, 17 | word, quadword |
+  | `0x00447B6F` | 10, 14, 15 | word, word |
+  | `0x00447BA9` | 13, 19 | word, word, eu |
+  | `0x00447C22` | 16 | quadword, eu |
+
+#### What the walk reads now, and the instrument that says so
+
+Counting how far a walk gets is the wrong measure, and the body-shape trial
+showed why: the shape that swallowed a script-section string as data got
+**further** than the right one. The right measure is how many script sections
+a walk reaches *as sections* -- they are findable independently, so each one is
+an anchor a correct walk has to land on exactly.
+
+By that measure, Ljudfarmen's walk now reads its funcdef, two constructors and
+their factories, and then ten consecutive virtual methods **by name**:
+
+```
+menu_callback                 funcdef
+dynamic_menu_item             29 instructions, and its factory
+dynamic_menu                  21 instructions, and its factory
+add_item  add_item_tts  get_item_count  get_position  set_tts_object
+set_sound_object  set_callback  run  run_extended  reset
+```
+
+That list is BGT's own `dynamic_menu` interface, in order, out of a module
+nothing could read this morning. Grodan Gun reaches two of its eleven sections
+and Ljudfarmen one of nine, and both then stop on an encoded integer whose
+lead byte says five bytes -- which no real field in a 60 KB module is, so it is
+a desync further in rather than a new field.
+
+Still not wired into `as_module`: the measure for adopting it is the exact-EOF
+landing, and 2% of one module is not that. What has changed is that the format
+is no longer guesswork -- every rule above came out of the engine, and the two
+that were guessed at (the body's trailing counts) are the only ones left.
 - **The beta's `ReadTypeDeclaration`.** Its phase 2 needs two bytes where only
   one is there, so something in it is absent as well -- the interface count is
   the candidate, since its `funcType` numbering is already one generation
