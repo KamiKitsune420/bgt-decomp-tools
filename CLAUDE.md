@@ -12864,6 +12864,20 @@ author's source score exactly as this file records: constant velocity 94
 of 95, the `cs` server 194 of 196 and its client 216 of 218, each with
 the same known rows.
 
+**Crazy Party is the canary and it is paid**: 0 residual gotos, 0
+dangling, 0 unbalanced, a verified split and **90,194 calls read back**,
+which is the standings' figure to the digit. That is the title every
+over-broad structurer and fold change in this file was caught by --
+14 -> 30 for a call-text threshold, -> 44 for dropping the declaration
+order rule, -> 90 for forcing on the copy idiom -- and it does not move.
+Its 174,139 lines are 27 fewer than the standings' 174,166, which is
+this change turning `while (true) { if (!c) break; ... i++; }` back into
+`for (; c; i++)` wherever the compiler left one: three lines out and one
+in, per loop. That is the second thing this buys, and it is worth as
+much as the gotos for anybody reading the output -- Antony's
+`creature.bgt` goes from an endless loop with a break and a trailing
+increment to the `for` with two guard `continue`s its author wrote.
+
 (That client figure supersedes the **218 of 218** this file records under
 the reserved-word fix. It is 216 at the commit before this session as
 well, with `position_sound_custom_2d` and `_3d` as the two rows -- which
