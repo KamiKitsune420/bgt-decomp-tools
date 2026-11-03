@@ -3388,8 +3388,13 @@ Perilous Hearts, splits them:
 
 Perilous Hearts is what separates the first two: November 2011, and it
 multiplies, compresses and writes `"0 "` while writing no namespace. Antony
-separates the last: February 2012, and it writes a namespace while still
-reading 0x59 as 89 rather than as a two-byte value.
+separates the last: February 2012, and it writes a namespace while its
+encoded integer still has no sign flag -- read off a class size of **0x48**,
+which is 72 under the plain form and a two-byte value under the newer one,
+and confirmed in the binary, where all four early runtimes carry the plain
+reader's `cmp al,0x80 / 0xc0 / 0xe0 / 0xf0` ladder and none carries the
+sign-flag reader's `test al,0x7c / 0x7e`. (This said 0x59, which is one byte
+under both forms and therefore distinguishes nothing.)
 
 Which is worth the correction twice over: the claim came from three titles and
 the refutation came from reading the third one properly rather than assuming it
@@ -12116,6 +12121,7 @@ the landing validates every field width above it.
 |---|---|---|---|
 | Ljudfarmen (2011-02) | 61,591 B | **0xF097 of 0xF097** | **9 of 9** |
 | Grodan Gun (2011-09) | 63,364 B | **0xF784 of 0xF784** | **11 of 11** |
+| Perilous Hearts (2011-11) | 299,967 B | **0x493BF of 0x493BF** | **16** |
 
 and every section parses: 5 and 9 class declarations, one funcdef each, the
 class property lists, 60 and 25 global properties, 54 and 46 module
@@ -12264,22 +12270,89 @@ names cost nothing but a count, 132 "source files" on a nine-file game, and
 that count is exactly what showed it, because the walk landed on EOF either
 way.
 
-##### Three early titles still stop, each on its own field
+##### The BEHAVIOUR count is per build, and Perilous Hearts is why
 
-The reader says where rather than guessing, which is the point of a walk that
-reports its landing:
+That title stopped at 0x142, three bytes into its first class block, and the
+difference is one field: **it opens a class block with ONE behaviour record
+where Grodan Gun opens it with three.**
+
+```
+Grodan Gun      00 00 | 66 72 00 4e ...     derivedFrom, interfaces, then a
+                                            function straight away
+Perilous Hearts 00 00 | 00 | 01 | 66 72 ... ...one NULL behaviour, then the
+                                            constructor/factory count
+```
+
+**The call-site count says it before any disassembly does.** Grodan Gun's
+`WriteTypeDeclaration` has **seven** `WriteFunction` sites -- three
+behaviours, the constructor and factory pair, the methods and the virtual
+table -- and Perilous Hearts' (at 0x0044E3A0, found by chasing callers from
+`WriteDataType`) has **five**. Reading it confirms the two missing ones are
+the behaviours: exactly one `WriteFunction` sits between the interface list
+and the pair loop.
+
+So this is one more field in that nine-week window, alongside the key
+generator, the compression, the pack-size field and the script-object flag.
+It is trialled like every other per-build field, with the verified answer
+(three) first, and the measure is the exact-EOF landing -- which on a
+300 KB module is satisfied by exactly one of the eight combinations tried.
+
+##### ...and the script-object flag is DERIVED, not trialled
+
+`IsInterface` is `(flags & X) && size == 0`, and X moved with the
+generation: 0x00010000 up to September 2011, 0x00080000 from November 2011,
+0x00100000 by BGT 1.3. Every class in one module comes from one build, so X
+is whichever of those three is set in **every** class's flags -- a reading
+rather than a guess. Where that is not unique, which includes a module with
+no classes at all, the reader declines and keeps its default, because no
+evidence is the honest answer there.
+
+##### What Perilous Hearts gives back
+
+Sixteen source files, and the split between the library and the game is the
+author's own directory layout:
+
+```
+E:\C++ tests\Bgt\include\   dynamic_menu  number_speaker  sound_pool
+                            sound_positioning
+E:\Perilous Hearts\demo\    perilous_hearts  globals  saveload  preloads
+                            player  object  event  surface  vine  weapon
+                            computer_character  environment_sound
+```
+
+##### Two early titles still stop, each on its own field
+
+The reader says where rather than guessing, which is the point of a walk
+that reports its landing:
 
 | title | reaches | stops on |
 |---|---|---|
-| Palace Punch-up (a 2010 beta) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
-| Perilous Hearts (2011-11) | 0x142 | a function tag of 0x01 at the top of class phase 2 |
 | Antony (2012-02) | 0xA8 | a string tag of 0x01 inside the funcdef record, with a namespace present |
+| Palace Punch-up (a 2010 beta) | 0xF8 | a type-info tag of `r` in class phase 2 -- an older AngelScript saved its type infos, by the look of it |
 
-Each is one disassembly of that title's own runtime away, by the method
-above: find the writer, read its call sequence, check it against a known
-answer. Perilous Hearts is the interesting one, because it is the
-transitional build -- it already multiplies, compresses and writes a pack
-field while writing no namespace.
+Antony is a **debug** build -- its module names six source files, found by
+scanning for the records -- so the section count is a usable discriminator
+there as well as the EOF landing. What has been ruled out on it: the
+signature does not simply gain a namespace after its name, and a DataType
+does not simply gain a byte; all four combinations of those two were tried
+and none reaches a single section. Its own binary is the next step, and it
+is less tractable than the 2011 ones because the compiler merged the reader
+and the writer of each record into one function with no padding between
+them, which is the trap this file already records about finding a function's
+bounds from `int3` padding.
+
+**And the evidence this file gave for Antony's encoded integer was the wrong
+example.** It read *"Antony separates the last: February 2012, and it writes
+a namespace while still reading 0x59 as 89 rather than as a two-byte
+value"* -- and 0x59 is one byte under **both** encodings, so it distinguishes
+nothing. What does: the plain form's one-byte range is 0..127 and the newer
+sign-flag form's is 0..63, so a value in between is the test.
+`creature`'s size is **0x48 = 72** and the six classes after it read
+coherently, which the newer reading could not produce. Confirmed from the
+binaries as well: all four early runtimes carry the plain reader's
+`cmp al,0x80 / 0xc0 / 0xe0 / 0xf0` ladder and **none** carries the sign-flag
+reader's `test al,0x7c / 0x7e`. The conclusion stands; the reason is
+different.
 
 #### Found on the way: two games' real SOURCE FILE LISTS
 

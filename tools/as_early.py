@@ -75,6 +75,10 @@ class Early:
         # default arg` is a literal in Grodan Gun's runtime and in neither
         # BGT 1.0's nor Ljudfarmen's.
         self.defaults = defaults
+        #: How many behaviour records open a class block. Grodan Gun
+        #: (2011-09) writes three and Perilous Hearts (2011-11) writes one,
+        #: read out of each one's own `WriteTypeDeclaration`.
+        self.behaviours = 3
         #: Three candidate body fields, each offered rather than assumed.
         #: `objvar_three` is this document's own per-build field one
         #: generation earlier; the other two are what five bytes can hold.
@@ -341,6 +345,10 @@ class Early:
             classes.append({"name": name, "flags": flags, "size": size,
                             "namespace": ns})
         d.notes.append("%d class declarations, to 0x%X" % (len(classes), d.p))
+        flag = d.script_object_flag(classes)
+        if flag is not None:
+            d.SCRIPT_OBJECT = flag
+            d.notes.append("script-object flag 0x%08X" % flag)
 
         funcdefs = []
         for _ in range(d.eu()):
@@ -438,8 +446,28 @@ class Early:
                        % (d.p, len(d.d)))
         return classes, funcdefs
 
-    #: This generation's script-object flag, from sub_00440FA0.
+    #: Every script-object flag these generations use, from the
+    #: `IsInterface` each runtime carries: 0x00010000 up to September 2011,
+    #: 0x00080000 from November 2011, 0x00100000 by BGT 1.3.
+    SCRIPT_OBJECT_FLAGS = (0x00010000, 0x00080000, 0x00100000)
     SCRIPT_OBJECT = 0x00010000
+
+    def script_object_flag(self, classes):
+        """Which flag this build marks a script class with.
+
+        Derived rather than trialled: every class in one module comes from
+        one build, so the bit is whichever of the three is set in all of
+        them. Where that is not unique -- a module with no classes, say --
+        this declines and the caller keeps its default, because no evidence
+        is the honest answer there.
+        """
+        if not classes:
+            return None
+        common = classes[0]["flags"]
+        for decl in classes[1:]:
+            common &= decl["flags"]
+        found = [f for f in self.SCRIPT_OBJECT_FLAGS if common & f]
+        return found[0] if len(found) == 1 else None
 
     def is_interface(self, decl):
         """IsInterface: the script-object flag set AND a size of zero."""
@@ -457,9 +485,8 @@ class Early:
         self.type_info()                     # derivedFrom
         for _ in range(self.eu()):           # interfaces
             self.type_info()
-        self.function()                      # three behaviours
-        self.function()
-        self.function()
+        for _ in range(self.behaviours):     # the opening behaviours
+            self.function()
         for _ in range(self.eu()):           # constructors and factories
             self.function()
             self.function()
@@ -473,7 +500,7 @@ class Early:
 #: adding a trial cannot silently re-describe a module that already landed
 #: on EOF -- the same rule every per-build field in this project follows.
 VERIFIED = {"namespace": False, "defaults": True, "objvar_three": True,
-            "objinfo_fields": 3, "line_numbers": True}
+            "objinfo_fields": 3, "line_numbers": True, "behaviours": 3}
 
 
 def _candidates():
@@ -484,11 +511,13 @@ def _candidates():
             for three in (True, False):
                 for fields in (3, 2, 1):
                     for lines in (True, False):
-                        seen.append({"namespace": namespace,
-                                     "defaults": defaults,
-                                     "objvar_three": three,
-                                     "objinfo_fields": fields,
-                                     "line_numbers": lines})
+                        for beh in (3, 1):
+                            seen.append({"namespace": namespace,
+                                         "defaults": defaults,
+                                         "objvar_three": three,
+                                         "objinfo_fields": fields,
+                                         "line_numbers": lines,
+                                         "behaviours": beh})
     seen.sort(key=lambda c: c != VERIFIED)
     return seen
 
@@ -509,6 +538,7 @@ def summarize(data, table=None):
         d.objvar_three = combo["objvar_three"]
         d.objinfo_fields = combo["objinfo_fields"]
         d.line_numbers = combo["line_numbers"]
+        d.behaviours = combo["behaviours"]
         try:
             d.walk()
             stop = None
@@ -545,9 +575,10 @@ def main():
         print("== %s  %d bytes" % (os.path.basename(path), len(data)))
         out = summarize(data, table)
         print("   namespace=%-5s defaults=%-5s objvar3=%-5s objinfo=%d "
-              "lines=%-5s"
+              "lines=%-5s behaviours=%d"
               % (out["namespace"], out["defaults"], out["objvar_three"],
-                 out["objinfo_fields"], out["line_numbers"]))
+                 out["objinfo_fields"], out["line_numbers"],
+                 out["behaviours"]))
         print("   reached 0x%X of 0x%X (%.1f%%)%s"
               % (out["at"], out["size"], 100.0 * out["at"] / out["size"],
                  "  -- EXACTLY ON EOF" if out["eof"] else ""))

@@ -238,3 +238,56 @@ def test_a_module_of_the_newer_generation_is_refused():
     # have -- so the walk must fail rather than invent sections.
     out = as_early.summarize(b"\x01\x02\x1cphone_callback" + b"\x00" * 40)
     assert out["eof"] is False
+
+# ---- the per-build fields that vary across 2011 -------------------------
+
+#: One class with ONE opening behaviour and a constructor/factory pair.
+#: The pair's count is what discriminates: read with three behaviours, the
+#: 0x01 lands where a function tag belongs and the parse fails loudly.
+ONE_BEHAVIOUR = (b"\x00"               # enums
+                 b"\x01"               # one class
+                 b"\x6e\x01C"          # its name
+                 b"\x00\x08\x00\x05"   # the November 2011 script-object bit
+                 b"\x04"               # size 4: a class, not an interface
+                 b"\x00"               # funcdefs
+                 b"\x00\x00"           # phase 2: derivedFrom, interfaces
+                 b"\x00"               # ONE behaviour, null
+                 b"\x01\x00\x00"       # one constructor/factory pair
+                 b"\x00\x00"           # methods, virtual table
+                 b"\x00"               # phase 3: no properties
+                 + b"\x00" * 12)       # the tail, every table empty
+
+
+def test_the_behaviour_count_is_per_build():
+    # Perilous Hearts (2011-11) opens a class block with one behaviour where
+    # Grodan Gun (2011-09) opens it with three, which is read out of each
+    # one of their own WriteTypeDeclaration.
+    out = as_early.summarize(ONE_BEHAVIOUR)
+    assert out["eof"] is True, out["error"]
+    assert out["behaviours"] == 1
+
+
+def test_three_behaviours_fails_loudly_on_a_one_behaviour_module():
+    d = Early(ONE_BEHAVIOUR)
+    d.behaviours = 3
+    d.SCRIPT_OBJECT = 0x00080000
+    with pytest.raises(Stop):
+        d.walk()
+
+
+def test_the_script_object_flag_is_derived_from_the_classes():
+    d = Early(b"")
+    classes = [{"flags": 0x00080001, "size": 24},
+               {"flags": 0x00080005, "size": 89}]
+    assert d.script_object_flag(classes) == 0x00080000
+    assert d.script_object_flag(
+        [{"flags": 0x00010001, "size": 32}]) == 0x00010000
+
+
+def test_an_ambiguous_script_object_flag_declines():
+    # Two candidate bits set in every class, or none at all, is no evidence
+    # -- and the caller then keeps the default rather than picking one.
+    d = Early(b"")
+    assert d.script_object_flag([]) is None
+    assert d.script_object_flag([{"flags": 0x00090001, "size": 1}]) is None
+    assert d.script_object_flag([{"flags": 0x00000001, "size": 1}]) is None
