@@ -12033,6 +12033,42 @@ checked against it, and the one field that could not be checked that way --
 the four funcType bytes -- came out as `0x00000004`, which is the funcdef
 value.
 
+#### Where the prototype gets to, and the one byte that stops it
+
+A prototype reader built from the layouts above walks, on all five titles:
+the enum section, every class declaration, the funcdef record, and into the
+first class body -- Grodan Gun reaches a funcType-1 body and its declared
+instruction count, which is as far as a walk can go without stepping the
+bytecode.
+
+Then it stops on something worth writing down, because it is the shape this
+document warns about from a new direction. Between the funcdef record and the
+first `'f'` of the class bodies there are **two** spare bytes in Grodan Gun
+and **one** in Ljudfarmen:
+
+```
+Grodan Gun     ... 00 00 00 | 00 00 | 66 'f'      funcdef tail, then two
+Ljudfarmen     ... 00 00 00 | 00    | 66 'f'      ...then one
+```
+
+Every candidate byte is `0x00`, so the bytes cannot say which field is which:
+the funcdef's own namespace, a null `derivedFrom` and an interface count of
+zero all look identical. Two readings fit Grodan Gun and only one fits
+Ljudfarmen, and nothing in the stream chooses between them.
+
+**That is the `elemental_node` lesson again**, which this file states as *"a
+known target BOTH readings satisfy is not a discriminator"*. Here it is worse,
+because the candidates are zeros rather than coincidentally equal values, so
+no amount of byte-fitting will separate them. The answer is in
+`asCReader::ReadFunction`'s own branch -- the reader, not the writer, because
+what differs is a condition rather than a field order -- and that is a known
+address away by the method above.
+
+So the prototype is not wired in, and the honest summary of this whole section
+is: five record layouts read from the engine and checked against a known
+answer, a module head that walks on five titles, and one conditional byte
+still unread.
+
 # A whole game WITH its source, which is the strongest oracle yet
 
 `bgt libcheck` scores a recovery against BGT's shipped `include/*.bgt` --
