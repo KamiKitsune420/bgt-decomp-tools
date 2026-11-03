@@ -1173,7 +1173,7 @@ def test_a_2010_overlay_unpacks_and_says_which_key_opened_it():
     the payload is taken as the module rather than as an LZ77 blob, and the
     bytes come back exactly.
     """
-    module = b"\x01\x02module payload " * 300
+    module = EARLY_HEAD + b"\x02module payload " * 300
     exe = _synthetic_exe(module, variant=bgtlib.ADD)
     info = bgtlib.unpack(exe)
     assert info.bytecode == module
@@ -1194,6 +1194,12 @@ def test_the_2010_search_does_not_re_describe_a_later_overlay():
     assert info.key_variant == bgtlib.MULTIPLY
     assert info.bytecode == module
 
+
+#: Zero enums, one class called `probe`: the smallest payload that reads as an
+#: EARLY module head, which is what the uncompressed-overlay guard now checks.
+#: Those builds write no `noDebugInfo` byte -- the first field is the enum
+#: count -- so a payload that merely starts with 0x00 or 0x01 is not enough.
+EARLY_HEAD = b"\x00\x01\x6e\x05probe"
 
 def _overlay_without_a_pack_field(module, stub_len=512):
     """A 2010-shape overlay: ciphertext at the overlay's first byte.
@@ -1218,7 +1224,7 @@ def _overlay_without_a_pack_field(module, stub_len=512):
 
 
 def test_an_overlay_with_no_pack_field_still_opens():
-    module = b"\x00\x05a module that is stored as it stands " * 40
+    module = EARLY_HEAD + b"a module that is stored as it stands " * 40
     exe = _overlay_without_a_pack_field(module)
     info = bgtlib.unpack(exe)
     assert info.key_variant == bgtlib.ADD
@@ -1261,7 +1267,7 @@ def _beta_overlay(module, stub_len=512):
 
 
 def test_a_beta_overlay_opens_and_says_which_digest_opened_it():
-    module = b"\x01na beta module, stored as it stands " * 40
+    module = EARLY_HEAD + b"a beta module, stored as it stands " * 40
     info = bgtlib.unpack(_beta_overlay(module))
     assert info.key_variant == bgtlib.ADD
     assert info.key_derivation == bgtlib.MD5X2
@@ -1272,7 +1278,9 @@ def test_a_beta_overlay_opens_and_says_which_digest_opened_it():
 def test_the_beta_search_does_not_re_describe_a_later_overlay():
     """The verified digest is tried first, so every title this library already
     opens keeps the answer it had."""
-    module = b"\x01\x02module payload " * 300
+    # The ADD half of this takes the uncompressed path, so the payload has to
+    # read as an early module head rather than merely start with 0x01.
+    module = EARLY_HEAD + b"\x02module payload " * 300
     for variant in (bgtlib.MULTIPLY, bgtlib.ADD):
         info = bgtlib.unpack(_synthetic_exe(module, variant=variant))
         assert info.key_derivation == bgtlib.SHA256, variant
@@ -1300,6 +1308,25 @@ def test_a_header_with_no_edition_needs_its_space_exactly_at_32():
     raise AssertionError("a plaintext with no separator was accepted")
 
 
+def test_the_early_module_head_check_reads_the_RIGHT_field():
+    """The guard this replaced required the first byte to be 0 or 1, because
+    `noDebugInfo` is the module's first byte -- and in these builds it is not
+    there at all. The first field is the enum count, which is 0 or 1 in every
+    early title here, so that guard passed for the wrong reason."""
+    # zero enums, one class: what the five early titles look like
+    assert bgtlib.early_module_head(b"\x00\x01n\x05probe") is None
+    # one enum, named: Palace Punch-up's shape
+    assert bgtlib.early_module_head(b"\x01n\x0fcomputer_states") is None
+    # zero of both is a module that declares nothing, which is still a head
+    assert bgtlib.early_module_head(b"\x00\x00") is None
+    # and the thing the old guard could not tell apart from a module
+    assert bgtlib.early_module_head(b"\x01\x02not a module at all") is not None
+    # ...and "not a module" is a poor refusal case, because it begins with
+    # `n`, which IS the new-string tag. The check is about the byte, so the
+    # fixture has to be about the byte.
+    assert bgtlib.early_module_head(b"\x00\x05xyz, not a module") is not None
+
+
 def test_a_2010_overlay_whose_payload_is_not_a_module_is_refused():
     """`noDebugInfo` is the module's first byte, so it is 0 or 1 and nothing
     else. If a 2010 build turns out to compress after all, this is what says
@@ -1308,7 +1335,7 @@ def test_a_2010_overlay_whose_payload_is_not_a_module_is_refused():
     try:
         bgtlib.unpack(exe)
     except bgtlib.BgtError as exc:
-        assert "noDebugInfo" in str(exc), exc
+        assert "module head" in str(exc), exc
         return
     raise AssertionError("a 2010 payload that is not a module was accepted")
 

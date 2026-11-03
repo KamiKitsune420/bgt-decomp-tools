@@ -3364,22 +3364,31 @@ from 2014-06-01 is stock 1.3 by its own timestamp.
 What that dates is the format break this file had been attributing to "the
 2010 engine":
 
-| | Ljudfarmen | Grodan Gun | Antony | BGT 1.3 |
-|---|---|---|---|---|
-| built | 2011-02 | 2011-09 | 2012-02 | 2014-06 |
-| key generator | add | add | multiply | multiply |
-| module stored | raw | raw | LZ77 | LZ77 |
-| pack-size field | **absent** | **absent** | `"0 "` | `"0 "` |
-| namespace in a type declaration | absent | absent | **present** | present |
-| enum section | absent | absent | absent | **present** |
-| encoded integer | plain base-128 | plain base-128 | plain base-128 | **sign flag** |
+| | Ljudfarmen | Grodan Gun | Perilous Hearts | Antony | BGT 1.3 |
+|---|---|---|---|---|---|
+| built | 2011-02 | 2011-09 | 2011-11 | 2012-02 | 2014-06 |
+| key generator | add | add | **multiply** | multiply | multiply |
+| module stored | raw | raw | **LZ77** | LZ77 | LZ77 |
+| pack-size field | absent | absent | **`"0 "`** | `"0 "` | `"0 "` |
+| script-object flag | `0x00010000` | `0x00010000` | **`0x00080000`** | `0x00080000` | `0x00100000` |
+| namespace in a declaration | absent | absent | absent | **present** | present |
+| `noDebugInfo` byte | absent | absent | absent | absent | **present** |
+| encoded integer | plain base-128 | plain | plain | plain | **sign flag** |
 
-**Two breaks, not one**, and the first draft of this table said otherwise. Four
-things move between September 2011 and February 2012 -- the key generator, the
-compression, the pack-size field and the namespace -- and **the module's own
-integer encoding and its enum section move later**, somewhere between February
-2012 and June 2014. Antony multiplies, compresses, writes `"0 "` and writes a
-namespace, and still reads 0x59 as 89 rather than as a two-byte value.
+**Three breaks, not one**, and the first draft of this table said one and the
+second said two. Reading `asCWriter` out of a 2011 runtime, and adding
+Perilous Hearts, splits them:
+
+| between | what changed |
+|---|---|
+| 2011-09 and 2011-11 | the key generator, the compression, the pack-size field, the script-object flag |
+| 2011-11 and 2012-02 | the namespace in a type declaration |
+| 2012-02 and 2014-06 | the encoded integer's sign flag, and the `noDebugInfo` byte |
+
+Perilous Hearts is what separates the first two: November 2011, and it
+multiplies, compresses and writes `"0 "` while writing no namespace. Antony
+separates the last: February 2012, and it writes a namespace while still
+reading 0x59 as 89 rather than as a two-byte value.
 
 Which is worth the correction twice over: the claim came from three titles and
 the refutation came from reading the third one properly rather than assuming it
@@ -11729,10 +11738,12 @@ Grodan Gun's module, byte for byte from offset 0:
 with **no namespace string**. So two things are true of this generation at
 once:
 
-- **There is no enum section.** The first count after `noDebugInfo` is the
-  class count, not the enum count, and `as_module` reads it as the latter
-  -- so it parses one "enum" named after a class and then declares a
-  class-count mismatch. Antony is the same.
+- **There is no `noDebugInfo` byte**, so the first count is the ENUM count --
+  and these games declare none, which is why the count that follows it reads
+  as a class count. This paragraph first said there was no enum section at
+  all; the writer says otherwise and Palace Punch-up has one. See **There is
+  NO `noDebugInfo` byte** below, which is read from the engine rather than
+  deduced from two titles that happen to declare no enums.
 - **A type declaration carries no namespace.** Antony, ten months later,
   writes an empty one (`00`) after the size, and 1.3 writes one too.
   AngelScript gained namespaces in 2.22, and BGT 1.0's compiler has no
@@ -11779,58 +11790,169 @@ Grodan Gun's nine are `event`, `player`, `object`, `sound_pool_item`,
 `number_speaker` -- a game's own classes and BGT's library ones, with sizes
 of 32, 60, 48, 89, 44, 21, 52, 24 and 40 bytes.
 
-### Where it stops now, and why that is the place to read the binary
+### Read, from the engine's own WRITER -- and Ghidra was not what read it
 
-All three then reach the funcdef section and stop inside the first record.
-Grodan Gun's, from 0x9D:
+Ghidra ran out of heap **twice** on this: at 4G on a 919 KB file, in
+`X86Analyzer`, and again through REA's own Ghidra bridge. This file already
+records 2G dying and 5G failing to commit on a 15.5 GB machine, so that was
+the end of that route for the day.
+
+What read it instead was **capstone and 150 lines of probe**, and the thing
+that made it quick is worth more than the result: ask the **WRITER**, not the
+reader. `asCWriter` has no branching on what it just read, so its call
+sequence *is* the record layout, in order, with no decompiler needed -- which
+is this document's "a record's field order comes off the call sequence" rule
+turned around. Three things found each function with no analysis at all:
+
+- a literal's VA, searched little-endian, gives every push site, because a
+  32-bit build pushes a string's address as an immediate;
+- `E8` plus a signed displacement gives every caller of a known address, so
+  `ReadDataType` leads to `ReadFunctionSignature` leads to `WriteInner`;
+- MSVC's `int3` padding gives each function's bounds.
+
+`_builtin_function_` was the anchor, for the reason this file already gives:
+the older reader recurses into `ReadFunctionSignature` when a value's object
+type is that placeholder, so one of its five push sites is inside the record
+the parse was stopping in.
+
+#### The encoded integer, from the writer
+
+`WriteEncodedUInt` at `0x004477D0` in Grodan Gun's runtime:
 
 ```
-01                 funcdef count = 1
-66                 'f', so ReadFunction
-6e 0d              'n', eu(13)
-"menu_callback"
-42 00 00 02 05     <- and here
-6f 72 06 01 00 00 00 05 6f 6e 06 "string" 00 00 ...
+cmp ebx, 0x80 / jae                 -- under 128, one byte
+  write bl                             = v
+cmp ebx, 0x4000 / jae               -- under 16384, two bytes
+  shr ecx, 8 ; sub cl, 0x80            = 0x80 | (v >> 8)
+  write cl, then bl                    then v & 0xFF
+cmp ebx, 0x200000 / ...
 ```
 
-`42` is where the signature begins, and it is not a string tag -- the reader
-takes it as the start of a return data type and lands on `6f` ('o'), which is
-no tag at all. The newer `ReadFunctionSignature` reads name, the `$dlgte`
-shortcut, a return type, the parameters, the in/out flags, the funcType, the
-defaults, the owner, a traits byte and a namespace, in that order; at least
-the first of those differs here, and the legacy token numbering this file
-records (`t + (t>=36) + (t>=64)`, so BGT's 65/68/79/92 are bool/int/float/
-double) puts 0x42 = 66 squarely in the token range -- which is a reading, not
-a result.
+So one byte covers 0..127 where the newer engines' sign-flag form covers
+0..63. **Settled from the writer, not inferred from a class size.**
 
-**That is where guessing stops being worth it.** Three fields in and already
-one correction to this document's own table, and the next one is a record with
-ten fields. `asCReader::ReadFunctionSignature` is statically linked into each
-of those three executables, the stub is uncompressed in a game, and
-`bgtlib.read_trailer` gives the split so a Ghidra import does not grind
-through the encrypted overlay -- which is what this file's first rule says to
-do and what two earlier attempts in it only reached after inferring something
-confident and wrong first.
+#### There is NO `noDebugInfo` byte, and the guard was reading the enum count
 
-**Nothing is wired into `as_module` for any of this**, deliberately. Both
-findings would be per-build fields trialled against the exact-EOF landing, and
-no 2011 or 2012 module lands on EOF yet -- so wiring them now would add two
-flags that can never be selected, which is dead code dressed as progress.
-They are written down here with the bytes that prove them, which is what the
-next attempt actually needs.
+`asCWriter::WriteInner` is at `0x0044B6E0`, and its first call is
+`WriteEncodedUInt(enumTypes.length)`. Its first loop then writes, per enum:
+the name, **four bytes of flags in one `WriteData` call**, the size, and
+`WriteTypeDeclaration(t, 2)` -- `push 2` is in the instruction stream. Its
+second loop does the same for the classes and makes no phase-2 call.
 
-**Not attempted here, deliberately.** Extending the reader to it is a real
-piece of work (no enum section, no namespaces, probably funcdef and body
-differences, and the debug block present in all three), and the right way
-in is the one this file opens with: `asCReader::ReadInner` is statically
-linked into each of those three executables, so the layout for each build
-is in the binary in front of you. The stub is uncompressed in a game, and
-`bgtlib.read_trailer` gives the split for a Ghidra import that does not
-choke on the encrypted overlay.
+And `WriteTypeDeclaration(t, 1)` is exactly `WriteString(name)`,
+`WriteData(&flags, 4)`, `WriteEncodedUInt(size)` -- so the loops are phase 1
+inlined, and **the module's first field is the enum count.** No
+`noDebugInfo`.
 
-What is already paid for is everything below the module: all three open,
-their opcode tables read, their licence decodes, and the three engines are
-dated. The module is the next layer and it is untouched.
+That matters beyond tidiness, because `bgtlib` had a guard on it: an
+uncompressed overlay's payload *"must begin with `noDebugInfo`, which is 0 or
+1 and nothing else"*. It was reading the **enum count**, and it passed because
+these games declare no enums or one. A check that is right for the wrong
+reason is the most dangerous kind, and this one was introduced as the
+safeguard for a reading taken on a reporter's word.
+
+`bgtlib.early_module_head` replaces it and asks about the fields that are
+there: the enum count, then a string tag if there are enums, else the class
+count and a string tag. It refuses `\x01\x02not a module` where the old guard
+accepted it -- and its own test records that `not a module` is a poor refusal
+case, because it begins with `n`, which IS the new-string tag.
+
+#### The head, on five titles
+
+| title | enums | classes | namespace in a declaration | script-object flag |
+|---|---|---|---|---|
+| Palace Punch-up (beta, 2010-07) | **1** -- `computer_states`, 3 values | 6 | no | `0x00010000` |
+| Ljudfarmen (2011-02) | 0 | 5 | no | `0x00010000` |
+| Grodan Gun (2011-09) | 0 | 9 | no | `0x00010000` |
+| Perilous Hearts (2011-11) | 0 | 15 | no | **`0x00080000`** |
+| Antony (2012-02) | 0 | 7 | **yes** | `0x00080000` |
+
+All five walk from byte 0 to the funcdef section, and all five land on the
+same ten bytes there -- `01 66 6e 0d menu_callback` -- which is BGT's own
+`dynamic_menu.bgt` funcdef, one per game.
+
+**That dates two more changes, and splits a pair this file had lumped
+together.** The script-object flag moves between September and November 2011,
+with the key, the compression and the pack field; the **namespace** moves
+later, between November 2011 and February 2012. Perilous Hearts is what
+separates them: it multiplies, compresses, writes `"0 "` and carries the new
+flag, and writes no namespace.
+
+Palace Punch-up's enum is the nicest confirmation, because its content is
+checkable: `computer_states` with `state_neutral = 0`,
+`state_attacking = 1`, `state_defending = 2`, the values big-endian like
+every other integer in the format.
+
+#### The records, as the writer writes them
+
+```
+WriteDataType:                       -- 0x0044A420
+    if already saved:  eu(0) ; eu(index)        <- ZERO means a back-reference
+    eu(tokenType)
+    if tokenType == 5:  WriteTypeInfo ; byte ; byte
+    byte ; byte
+    if the object type is `_builtin_function_`: WriteFunctionSignature
+
+WriteTypeInfo 'o':                   -- one string, and NO namespace
+
+WriteFunctionSignature:              -- 0x00449A90
+    str(name)
+    DataType(returnType)
+    eu(parameterTypes.length)
+    parameterTypes.length x DataType
+    eu(inOutFlags.length)
+    inOutFlags.length x eu
+    FOUR bytes, written +0x87 down to +0x84        <- funcType, big-endian u32
+    eu(count of non-null default args)
+    that many x str, written DESCENDING
+    TypeInfo(objectType)
+    if objectType: one traits byte  (private | read-only)
+
+WriteFunction:                       -- 0x00449DC0
+    null  -> one 0 byte
+    saved -> 'r' ; eu(index)
+    else  -> 'f' ; WriteFunctionSignature
+             if funcType == 1: eu(bytecode length) ; WriteByteCode ;
+                               eu(nObjVar) ; nObjVar x {TypeInfo, eu, byte} ; ...
+             if funcType == 3: eu(...)
+             then a namespace: a string, or one 0 byte
+```
+
+`menu_callback` fits that byte for byte, against a known answer -- BGT ships
+`funcdef int menu_callback(dynamic_menu@, string);` in both 1.0's and 1.3's
+`dynamic_menu.bgt`:
+
+```
+42 00 00                return type: token 66, two flag bytes
+02                      two parameters
+05 6f 72 06 01 00 00 00     object, named type -> savedStrings[6] = "dynamic_menu",
+                            flags 1 = handle                  -> dynamic_menu@
+05 6f 6e 06 "string" 00 00 00 00   object, new string "string", flags 0 -> string
+02 00 00                two in/out flags
+00 00 04                ...and the four funcType bytes, 0x00000004 = funcdef
+00                      no default arguments
+00                      TypeInfo(objectType) = null
+00                      the namespace: one zero byte
+```
+
+`savedStrings[6]` is `dynamic_menu` because the nine class declarations saved
+their names in order, which is the kind of corroboration a hex dump cannot
+fake.
+
+#### What is still not wired in, and why
+
+`as_module` is untouched. The layouts above are enough to read the head and
+the funcdefs of all five titles, and they are **not** enough to land a whole
+module on EOF: the class bodies, the function bodies' debug block (four of
+the five titles are debug builds), and the tail sections have not been read
+yet. This file's rule for a per-build field is that it is trialled against
+the exact-EOF landing, and nothing lands yet -- so wiring these in would add
+flags that can never be selected.
+
+What has changed is that the next step is no longer a search. It is
+`WriteTypeDeclaration`'s phase-2 branch at `0x0044AE1A` and `WriteInner`'s
+remaining sections from `0x0044B7C6`, both of which this method reads in a
+few minutes each.
 
 # A whole game WITH its source, which is the strongest oracle yet
 

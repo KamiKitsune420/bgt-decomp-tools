@@ -520,6 +520,73 @@ class Unpacked:
                                     self.container_flag, len(self.bytecode)))
 
 
+#: String record tags in the dialect every early build uses: a new string, a
+#: back-reference, and the empty string.
+_STRING_TAGS = (0x6E, 0x72, 0x00)
+
+
+def _plain_eu(buf: bytes, p: int) -> Tuple[int, int]:
+    """The early generations' encoded integer: a plain base-128 varint.
+
+    Read out of `asCWriter::WriteEncodedUInt` in a 2011 runtime: `v < 0x80` is
+    one byte, and otherwise the lead byte is `0x80 | (v >> 8)` and the next is
+    `v & 0xFF`. **The newer engines spend the lead byte's top bit on a SIGN
+    flag**, so they switch to a wide form at 64 where these switch at 128 --
+    which is why `as_module`'s reader stops 63 bytes into one of these modules.
+    """
+    b = buf[p]
+    p += 1
+    if b < 0x80:
+        return b, p
+    for mask, match, keep, extra in ((0xC0, 0x80, 0x3F, 1),
+                                     (0xE0, 0xC0, 0x1F, 2),
+                                     (0xF0, 0xE0, 0x0F, 3)):
+        if (b & mask) == match:
+            v = b & keep
+            for _ in range(extra):
+                v = (v << 8) | buf[p]
+                p += 1
+            return v, p
+    raise BgtError("unreadable encoded integer 0x%02X" % b)
+
+
+def early_module_head(payload: bytes) -> Optional[str]:
+    """None if `payload` opens like an early module, else why it does not.
+
+    **The early generations write no `noDebugInfo` byte.** Their module opens
+    on the enum count -- read off `asCWriter::WriteInner`, whose first call is
+    `WriteEncodedUInt(enumTypes.length)` and whose loop then writes each type's
+    name, a four-byte flags field and a size. Confirmed on five titles, from
+    the 2010 beta to 2012: Palace Punch-up declares one enum
+    (`computer_states`, three values) and six classes, Grodan Gun none and
+    nine, Ljudfarmen none and five, Perilous Hearts none and fifteen, Antony
+    none and seven.
+
+    This replaces a guard that required the first byte to be 0 or 1 "because
+    `noDebugInfo` is the module's first byte". That byte is the **enum count**
+    in these builds, and the guard passed only because these games declare no
+    enums or one -- which is the most dangerous way for a check to be right.
+    """
+    try:
+        enums, p = _plain_eu(payload, 0)
+        if enums > 4096:
+            return "implausible enum count %d" % enums
+        if enums:
+            if payload[p] not in _STRING_TAGS:
+                return ("%d enums but no string tag after the count "
+                        "(0x%02X)" % (enums, payload[p]))
+            return None
+        classes, p = _plain_eu(payload, p)
+        if classes > 1 << 16:
+            return "implausible class count %d" % classes
+        if classes and payload[p] not in _STRING_TAGS:
+            return ("%d classes but no string tag after the count (0x%02X)"
+                    % (classes, payload[p]))
+    except (IndexError, BgtError) as exc:
+        return "%s" % exc
+    return None
+
+
 def unpack(data: bytes, seed: Optional[int] = None) -> Unpacked:
     """Run the full chain over the bytes of a BGT executable.
 
@@ -558,11 +625,11 @@ def _unpack_overlay(reading: Tuple[int, bytes, bytes],
         # Checked below rather than assumed.
         comp = blob
         bytecode = blob
-        if bytecode[:1] not in (b"\x00", b"\x01"):
-            raise BgtError(
-                "an early-key overlay whose payload does not begin with "
-                "noDebugInfo (0x%02X) -- it may be compressed after all"
-                % (bytecode[0] if bytecode else 0))
+        why = early_module_head(blob)
+        if why is not None:
+            raise BgtError("an early-key overlay whose payload does not read "
+                           "as a module head (%s) -- it may be compressed "
+                           "after all" % why)
     else:
         comp, declared = lz77_split(blob)
         bytecode = lz77_decompress(comp, declared)
