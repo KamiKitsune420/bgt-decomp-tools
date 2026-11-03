@@ -12911,6 +12911,57 @@ set_sound_decryption_key` over the project found this one in seconds, where
 the disassembly would have taken an afternoon. Recovering first and cracking
 second is the better order.
 
+### A byte signature cannot say the KDF is ABSENT, and Manamon 1 proves it
+
+`bgt crack` finds no password for any of the five early titles -- 2,597
+candidates on Palace Punch-up, 1,506 on Grodan Gun, 1,214 on Antony, no hits
+-- so the obvious question is whether those engines derive a pack key the way
+`bgt_kdf` does at all. The generator loop has a byte signature that cannot be
+mistaken for anything else:
+
+```
+b3 ee              mov bl, -0x12          ; c == 0 -> -0x12
+0f be c3           movsx eax, bl
+8d 5c 42 08        lea ebx, [edx+eax*2+8]
+99 f7 fb           cdq ; idiv ebx         ; c / (seed + c*2 + 8)
+84 db / 75 03      test bl, bl ; jnz
+8d 59 63           lea ebx, [ecx+0x63]    ; c = highByte + 'c'
+88 1c 37 / 46      store ; i++
+83 fe 62 / 7c da   cmp esi, 98 ; jl       ; 98 bytes
+```
+
+Searched for it across nine runtimes, with BGT 1.3's own `exec.bin`
+decompressed as the positive control:
+
+| runtime | signature |
+|---|---|
+| BGT 1.3's `exec.bin` | **present** |
+| Super Egg Hunt (stock 1.3) | **present** |
+| The Gate (2015 fork) | absent |
+| **Manamon 1 (2017 fork)** | **absent** |
+| Antony, Perilous Hearts, Grodan Gun, Ljudfarmen, Palace Punch-up | absent |
+
+**And Manamon 1's pack opens with `bgt_kdf`** -- 2,007 of 2,007 entries, a key
+this file records as recovered and verified against the pack's own tags. So an
+absent signature does not mean an absent KDF; it means another compiler
+scheduled the same arithmetic into different registers.
+
+Which makes every "absent" row above worth nothing, including the five that
+looked like a finding. The search cost twenty minutes and its only product is
+this paragraph -- and that is the right product, because without the control it
+would have become a confident sentence about the early engines changing their
+key derivation. **A negative result from an instrument that has not been shown
+to detect a positive is not a result**, which is the same lesson this file
+records about `strings` not being installed and about three confident zeroes
+from a pipeline that never ran.
+
+What is actually known is narrower: no candidate the harvesters can reach
+opens those five packs. Whether the derivation differs, or the password is
+computed the way Manamon 1's and The Gate's are, is open -- and the way to
+settle it is the one that worked for those two, which is to read the function
+that computes the password out of the recovered script. For these titles that
+needs the module to parse.
+
 ## If you cannot find the password
 
 Capture the key at runtime instead: hook the AES setup and read the 32-byte key as it
