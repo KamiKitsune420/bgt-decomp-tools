@@ -12069,6 +12069,58 @@ is: five record layouts read from the engine and checked against a known
 answer, a module head that walks on five titles, and one conditional byte
 still unread.
 
+#### ...and the byte was a whole FIELD, read out of the other runtime
+
+The one-byte difference is the **default-argument list**, and nothing in the
+bytes could have said so because every candidate was zero. Ljudfarmen's own
+`WriteFunctionSignature` is **71 bytes shorter** than Grodan Gun's, and the
+missing 71 bytes are exactly that: counting the non-null defaults, writing the
+count, and the descending string loop. February 2011 has no such field; by
+September 2011 it does.
+
+**The compiler's own diagnostics agree, independently.** This file already
+records that a message exists only if the code path that emits it does, and
+`Failed while compiling default arg for parameter %d in function '%s'` is a
+literal in Grodan Gun's runtime and in neither BGT 1.0's nor Ljudfarmen's. So
+the feature's arrival is dated twice over, from the serialiser and from the
+compiler.
+
+With that field made per-build and trialled like the others, and the bodies
+stepped with each build's own `asBCInfo[]`:
+
+| title | per-build answers | walks to |
+|---|---|---|
+| Grodan Gun | no namespace, **defaults** | 0x24A -- several function bodies in |
+| Ljudfarmen | no namespace, **no defaults** | 0xEA |
+| Palace Punch-up | no namespace, no defaults, and `funcType` reads **5** where later builds write 4 | 0xF8 |
+| Antony | **namespace**, defaults | 0xA8 |
+
+Every per-build answer is chosen by how far the walk gets, which is the same
+discipline as the exact-EOF landing one layer up -- a wrong answer here fails
+within about 0x30 bytes rather than drifting.
+
+#### What is left, named
+
+Three things, each one disassembly away rather than a search:
+
+- **The body's tail fields.** The walk gets several functions into Grodan Gun
+  and then desynchronises, so one of the body's trailing counts is wrong. The
+  shape read from `WriteFunction` is the bytecode, the object variables, a
+  stack figure, an `objVariableInfo` list of three encoded values each, and a
+  line-number list -- and `WriteByteCode` at `0x004492D0` turns out to be a
+  **switch on the opcode** rather than a uniform walk, so the per-operand
+  encoding is the first thing to check.
+- **The beta's `ReadTypeDeclaration`.** Its phase 2 needs two bytes where only
+  one is there, so something in it is absent as well -- the interface count is
+  the candidate, since its `funcType` numbering is already one generation
+  older.
+- **Antony's funcdef record**, which fails on its own: a 2012 field this has
+  not met.
+
+The prototype is still not wired into `as_module`, for the reason the earlier
+note gives -- nothing lands on EOF, so a per-build flag could never be
+selected -- and the measure to adopt it by is unchanged.
+
 # A whole game WITH its source, which is the strongest oracle yet
 
 `bgt libcheck` scores a recovery against BGT's shipped `include/*.bgt` --
