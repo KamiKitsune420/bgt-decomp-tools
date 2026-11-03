@@ -7621,6 +7621,62 @@ one Perilous Hearts row left is a different gap again -- a snapshot
 wrapped in a cast is kind `call`, so neither the member nor the global
 clause is asked about it at all, which is rule seven's territory.
 
+#### The third witness was built, measured and REJECTED
+
+The attempt the section above prescribes: a **folded call that reached a
+slot** has run as its own step, and `call_binds` is the record of
+exactly that -- *"only that it WAS bound, which is the census's
+guard"*. A call that merely contributes to the expression being built
+now never reaches a slot, which is what was supposed to keep it narrow.
+
+It is sound as an argument and it **undoes a confirmed fix**, which is
+the one outcome this file refuses. `cs`'s mouse-mode toggle goes back to
+
+```
+if (mousemode == 1) {
+} else {
+}
+mousemode = 1;
+```
+
+-- both arms empty and the mode always 1, which is the defect the
+condition-call witness had just fixed and which that game's own source
+settles. `bgt signatures` says it independently: `empty_arm` 5 -> 6 on
+that title.
+
+**Nothing about the toggle's own bytecode changed**, and a trace says
+where it went instead. In the committed code `_stale_fold(9)` is asked
+once at k=5556 in `game` and answers **True**, from the global clause --
+the value in that slot reads the global `mousemode` and a call has run.
+With the third witness it is asked eleven times in that body and answers
+False every time, and never at k=5556 at all: an earlier decision in the
+same body changed what slot 9 holds there.
+
+That is the fragility this file records about every broad fold change,
+reached from a new direction. A rule can be right about the case it was
+written for and wrong about a body it never looks at, because promotion
+is one name per slot and the decisions interact -- so adding a reason to
+promote can take an earlier one away.
+
+Measured, for the record:
+
+| title | lines | ground truth |
+|---|---|---|
+| the four other old games, constant velocity | byte-identical | -- |
+| Battle of the Hunter | 4,331 -> 4,334 | -- |
+| cs client | 7,970 -> 8,033 | 216 of 218, unchanged |
+| cs server | 10,096 -> 10,103 | 194 of 196, unchanged |
+
+So: safe on every count this file usually measures -- no goto moves, no
+split fails, every ground-truth score holds -- and it costs a defect fix
+that a game's own source had confirmed. The sweep is what caught it, and
+the diff is what explained it.
+
+**Crazy Party's two tautologies are still open**, and the shape is read
+rather than guessed at now (see above). The next attempt has to reach a
+folded call without disturbing what else gets promoted, which is a
+question about promotion rather than about staleness.
+
 ### A call whose result NOTHING READS is dropped, call and all
 
 Diagnosed and **not fixed**, with the sites named, because it is the
