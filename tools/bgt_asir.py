@@ -456,6 +456,13 @@ def _token(t: int) -> int:
     return t + int(t >= 36) + int(t >= 64)
 
 
+def _text(value: Any) -> str:
+    """A reader string as `str`. It comes back as bytes, latin1 on the wire."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("latin1")
+    return value or ""
+
+
 class _Translator:
     """Holds `.module` so asreader's own TranslateFunction port can run on it.
 
@@ -716,7 +723,106 @@ class Builder:
             decode = self.decode_early if self.early else self.decode
             f.bytecode = decode(rec["body"], rec["instructions"], rec["name"])
             self.slot_types(f, rec)
+            self.debug_names(f, rec)
         return f
+
+    def debug_names(self, f: Function, rec: Dict[str, Any]) -> None:
+        """Overlay a DEBUG build's own names on the slots inferred from bytecode.
+
+        `slot_types` above is a whole section of this project's notes: the
+        engine records a declaration only for an *object* local, so a scalar
+        slot has no type at all and no slot has a name, and both have to be
+        guessed from the opcodes that touch them. A `-c` build records the
+        name, the type and the declaration position of every local and every
+        parameter, which is the same information `nvgt/asreader` reads for
+        NVGT's debug builds -- and `FuncDecompiler` already consumes it, from
+        `param_names` for the signature and from `variables` for the body.
+
+        **The two lists are merged rather than swapped**, because they answer
+        different halves. Debug info names what the SOURCE declared and says
+        nothing about the compiler's own scratch slots; `slot_types` types
+        every slot the bytecode touches and cannot tell the two apart. So a
+        slot's own declarations replace its inferred entry and the inferred
+        entries stand for every slot the source never named -- which is what
+        lets a temporary still be folded into its use while a real local
+        keeps its name. A declared local the bytecode never computes with --
+        a `string` the body only passes along -- has no inferred entry at
+        all, so it is appended rather than dropped.
+
+        **Every declaration is kept, not one per slot.** The compiler reuses
+        a slot hard: Air Puck's `netloop` makes twenty-seven declarations in
+        slot 26 and twenty-one in slot 23, mixing `int`, `uint` and `bool`.
+        Keyed by offset, only the last survived -- so `run_extended`'s slot
+        13, which is `int i` and then `bool success`, gave the loop counter
+        the name `success` and the type `bool`:
+
+            for (success = false; (success ? 1 : 0) < item_count; success++)
+            Error: Illegal operation on this datatype
+
+        `FuncDecompiler.redeclare` exists for exactly this and is what the
+        NVGT side relies on for its own debug builds: each declaration takes
+        effect at its own recorded position. It needs all of them, in the
+        order the record lists them.
+        """
+        debug_vars = rec.get("variables")
+        if (debug_vars is None and not rec.get("paramNames")
+                and not rec.get("section")):
+            return
+        f.has_debug_info = True
+        f.param_names = [_text(n) for n in rec.get("paramNames") or ()]
+        # `as_early` calls this field `section`; one question, two keys.
+        f.script_section = _text(rec.get("scriptSection")
+                                 or rec.get("section") or b"")
+        f.declared_at = rec.get("declaredAt") or 0
+        f.line_numbers = list(rec.get("lineNumbers") or ())
+
+        by_slot: Dict[int, List[Any]] = {}
+        for v in debug_vars or ():
+            by_slot.setdefault(v["stack_offset"], []).append(v)
+
+        # **A name belongs to one offset.** The source may declare `i` twice
+        # in one body -- Air Puck's `netloop` has a `string i` in slot 18 and
+        # a `uint i` in slot 16, in different blocks -- and a slot's
+        # declaration is hoisted to the top of the body, so the two collide
+        # and the second assignment is a type error. The first offset to
+        # claim a name keeps it; a name reused at the SAME offset is one
+        # variable in two scopes and keeps it too. Parameters claim theirs
+        # first, because a local may not shadow one.
+        owner: Dict[str, int] = {name: -1 - i
+                                 for i, name in enumerate(f.param_names)}
+
+        def claim(name: str, off: int) -> str:
+            if not name:
+                return name
+            if owner.setdefault(name, off) == off:
+                return name
+            for n in range(2, 1000):
+                alt = "%s_%d" % (name, n)
+                if owner.setdefault(alt, off) == off:
+                    return alt
+            return name
+
+        def declarations(off: int) -> List[Any]:
+            return [asreader.ScriptVariable(
+                declared_at=v["declared_at"],
+                name=claim(_text(v["name"]), off),
+                stack_offset=off, type=self.dt(v["type"]))
+                for v in by_slot[off]]
+
+        # The inferred list keeps its order, because `FuncDecompiler` reads
+        # that order to find where the compiler's own scratch begins.
+        rebuilt: List[Any] = []
+        placed = set()
+        for sv in f.variables:
+            if sv.stack_offset not in by_slot:
+                rebuilt.append(sv)
+            elif sv.stack_offset not in placed:
+                placed.add(sv.stack_offset)
+                rebuilt.extend(declarations(sv.stack_offset))
+        for off in sorted(by_slot):
+            if off > 0 and off not in placed:
+                rebuilt.extend(declarations(off))
+        f.variables = rebuilt
 
     # -- slot types --------------------------------------------------------
 

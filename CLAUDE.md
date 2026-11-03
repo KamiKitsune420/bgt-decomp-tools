@@ -1640,7 +1640,13 @@ recovered.
 **Everything in this section is about a RELEASE build**, which is what
 the rest of this file assumed without saying so. BGT's `-c` keeps the
 debug information and its `-C` strips it, and a shipped game can be
-either -- see **A debug build keeps the names** below, where one is.
+either -- see **A debug build keeps the names** below, where six are.
+
+**And for a debug build this section is simply wrong**: the module records
+the file every body was compiled from, so there is nothing to reconstruct.
+Air Puck's server names fourteen files and its client twenty-one, and
+`bgt recover` lays the project out under those names rather than under
+generated ones.
 
 **The game's own file names are not recoverable, and nothing will change that.**
 They live only in AngelScript's debug information -- each function's script
@@ -2480,16 +2486,18 @@ for the `for` headers it now writes.
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,208 | 0 | 0 | yes | 734 | not asked |
 | Palace Punch-up (2010 beta) | 3,214 | 0 | 0 | yes | 823 | not asked |
+| Air Puck server (**debug**) | 3,717 | 0 | 0 | yes | 995 | **yes** |
 | constant velocity | 3,805 | 0 | 0 | yes | 1,767 | **yes** |
 | Battle of the Hunter | 4,269 | 0 | 0 | yes | 1,334 | **yes** |
 | Super Egg Hunt | 5,239 | 0 | 0 | yes | 1,623 | **yes** |
+| Air Puck client (**debug**) | 5,650 | 0 | 0 | yes | 1,783 | **yes** |
 | Field Wars | 7,942 | 0 | 0 | yes | 3,005 | **yes** |
 | cs client | 7,963 | 0 | 0 | yes | 2,858 | **yes** |
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
 | cs server | 9,713 | 0 | 0 | yes | 3,060 | **yes** |
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
 | The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
-| Manamon 1 | 82,156 | 0 | 0 | yes | 26,510 | not asked -- **wrong engine**, see below |
+| Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
 | Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
 | Psycho Strike | -- | -- | -- | -- | -- | **not on this machine any more** |
@@ -2502,8 +2510,37 @@ global initialiser -- this file records `Failed to initialize global variable
 recovery, holds a key down and reads an answer back, so a **yes** there means
 every global initialised, the module loaded, and the engine answered.
 
-**Seven of the ten titles that can be built here run**, and the biggest of
-those is a 9,692-line networked game server.
+**Nine titles run**, and the biggest of those is a 9,692-line networked
+game server. (This said seven; Air Puck's two halves are the difference,
+and they are the first DEBUG builds in the table.)
+
+**Air Puck's two rows are the first DEBUG builds in this table**, and they
+are the two whose recovered source is nearest its original: real file names,
+real parameter names and real local names, because the module records them
+-- see **Air Puck 2PE is a DEBUG build of stock BGT 1.3**.
+
+**They were asked, and the asking is the whole lesson of that section.**
+Every free check passed on both -- 0 residual gotos, 0 unbalanced files, a
+verified split, and `bgt audit` reporting 0 literals and 0 constants the
+text does not hold -- and the compiler reported **135 errors on the server
+and 41 on the client**, because three rules that read the recovery's own
+text had never seen a slot with a real name. Nothing cheap could have
+found that. Both compile cleanly now and `bgt drive` answers for both.
+
+**And a `yes` here is still only `it runs`.** Asked for an answer it has
+one of -- `ms_to_readable_time(90000)`, which is a minute and a half --
+the server says `"30 seconds"`, because a cascade divides by a value that
+has already been reduced. That is the next thing in **What is still
+open**, and it is what the column cannot promise: every global
+initialised and the engine answered, which is a weaker claim than every
+function being right.
+
+**And Manamon 1's row was one line and one call stale**, which the two runs
+that measured it for the debug work caught: 82,157 and 26,509, not 82,156
+and 26,510. The section on the lost-call census already records that change
+-- *"Manamon 1 | 82,156 -> 82,157 | 26,510 -> 26,509"* -- and this table had
+not been re-derived from it. A number and a claim about that number are two
+places to keep in step, for the umpteenth time.
 
 **Every number is from one run of the committed tree.** That is what this
 table has rarely been able to say: it carried a mixture of rows from
@@ -6739,6 +6776,35 @@ the bytecode. Driven, with the LEFT control held:
 That is the whole of the defect, in one command, with no sound and
 nothing on screen. `k_ctrl(2)` is `key_released` and reads 0 in both,
 which is the control that says the 0 means something.
+
+### ...and a watch with a QUOTE in it answered nothing
+
+Worth its own note because of the direction it fails in: the tool said a
+correct recovery computed nothing.
+
+The table's header is a BGT string literal, so a `"` inside it would close
+the literal -- and `probe_source` REPLACED each one with `'` so it would
+not. The summary then looks each column up by the expression as typed, so
+`get_string_size("hello")` was asked of a column called
+`get_string_size('hello')`, missed, and reported
+
+```
+  get_string_size("hello")   never changed:
+```
+
+with nothing after it. The recovered function is right and answers `5 B`.
+
+**None of the canned scenarios has a quote in it** -- `k_ctrl(1)`,
+`key_down(KEY_DOWN)`, `player.x` -- which is why this sat there: every
+watch the tests and the GUI use is unaffected, and the first expression
+with a string literal in it was typed by hand against a debug build whose
+functions could be called by their real names.
+
+The quote is escaped now rather than replaced, so the header IS the
+expression, and `column` builds the name for the header and for the lookup
+-- one function, because two places answering one question is exactly what
+went wrong. A tab becomes a space on both sides, since the table is
+tab-separated and a column name cannot hold one.
 
 ### Three things it has to get right
 
@@ -11807,7 +11873,7 @@ Two things worth keeping, and the second is the one that generalises:
   a *problem* in `recovery.json` rather than a statistic -- and the
   suite pins that no field name this file reads is absent from `Atom`.
 
-# A debug build keeps the names, and FOUR shipped games are
+# A debug build keeps the names, and SIX shipped games are
 
 This file says in two places that a game's own file names and its local
 variable names are "stripped and unrecoverable", on the grounds that
@@ -11817,11 +11883,18 @@ of `-c`**, and the installer registers both: `compile_release` passes
 
 **And it is not a quirk of one title.** Screaming Strike was the first found;
 Antony, Grodan Gun and Ljudfarmen are all `noDebugInfo = 0` as well, which is
-BGT's own author shipping his own games from the debug build. So four of the
-corpus's titles carry local names, and three of them are the only samples here
-of the 2011 and 2012 engines -- see **The 2011 module is a third reader
-generation** below, which is what has to be read before any of that can be
-used.
+BGT's own author shipping his own games from the debug build, and **Air Puck
+2PE ships both its client and its server that way**. So six of the corpus's
+titles carry local names, and three of them are the only samples here of the
+2011 and 2012 engines -- see **The 2011 module is a third reader generation**
+below, which is what has to be read before any of that can be used.
+
+**Air Puck is the one that pays**, because it is the engine this whole
+document is written against: stock BGT 1.3, so the release half of every
+record was already verified and the debug half was the only unknown. Both of
+its modules read end to end now, and the recovered source carries the
+author's own parameter names, local names and file names -- see **Air Puck
+2PE is a DEBUG build of stock BGT 1.3** below.
 
 Checked by compiling a script of my own both ways -- the module's first
 byte is `noDebugInfo`, and a `-c` build writes 0 there. So the question
@@ -11887,13 +11960,25 @@ Parameters are variables there, which a known-answer fixture shows at
 once: `int add_two(int left, int right)` with locals `total` and
 `doubled` writes **four** names in one list, in that order.
 
-**It is not finished.** Both debug modules get further and neither lands
-on EOF yet:
+**It was not finished, and the missing piece was a PLACEMENT.** The
+traits byte sits in the middle of the debug fields rather than after them,
+which is the whole of why nothing landed -- see **Air Puck 2PE is a DEBUG
+build of stock BGT 1.3** below, where the two stock modules land exactly on
+EOF. What that leaves is one build rather than a format:
 
 | module | stops at | saying |
 |---|---|---|
+| **stock BGT 1.3**, both Air Puck halves | -- | **lands exactly on EOF** |
 | my 744-byte probe | 0x2D5 | `implausible count 33554433` |
-| `screamingStrike_en` | 0x1A | `bad string tag 0x01` |
+| `screamingStrike_en`, a 2013 build | 0x1A | `bad string tag 0x01` |
+
+Screaming Strike's remaining stop is **not the debug block** and the rest of
+this section says where it is: its 0x1A is inside the first GLOBAL PROPERTY's
+record, before any function, and this file's own reading is that the record
+holds one byte more there than the reader expects -- which the 2011
+generation's writer explains, since it gates a global's initialiser on a
+byte. That is a per-build field in a 2013 engine and wants its own reading;
+nothing below depends on it.
 
 The probe is the one to finish on, because its source is known: it reads
 both globals and both functions and stops near the end, so the remaining
@@ -12005,6 +12090,455 @@ records as sufficient for `bgt.exe` -- on a machine that had already
 stopped a measurement for memory that session. What made progress instead
 was the thing this file keeps coming back to: a fixture whose answer is
 known, and the exact-EOF landing to judge it.
+
+## Air Puck 2PE is a DEBUG build of stock BGT 1.3, and it reads end to end
+
+Reported as a crash. `bgt recover` on `airpuck.exe` gave
+
+```
+AdapterError: module tail did not land on EOF: unknown
+```
+
+which is two bugs in one line: the cause was specific and knowable and
+nothing showed it, and the cause was that **this reader had never read a
+debug build of the engine it is written against.**
+
+`airpuck.exe` and `server.exe` (tunmi13, 2023) are stock BGT 1.3 --
+overlay 0xDDC00, the stock seed, edition 3 and the `*` licence mark --
+and both carry `noDebugInfo = 0`. The section above has Screaming Strike
+as its only `-c` sample, and that is a 2013 engine with per-build fields
+of its own. These two are the build every record in this document was
+read from, so the release half was already verified and the debug half
+was the only unknown.
+
+### The traits byte sits in the MIDDLE of the debug fields
+
+`debug_block` read all six debug fields in one run and then the
+private/protected traits byte. The engine writes that byte as the last
+thing in the `funcType == asFUNC_SCRIPT` branch, and the script section,
+the declaration position and the parameter names **after** it, outside
+that branch:
+
+```
+body, variableSpace, objVariables, objVariableInfo
+if debug:  lineNumbers, scriptSections, variables
+traits byte                       <- the end of the funcType-1 branch
+if debug:  scriptSection, declaredAt, parameterNames
+```
+
+Read as one run, every record is one byte SHORT -- so the factory record
+that follows the constructor is one byte out and takes the whole class
+block with it, which is what this file already records about that byte
+from the other direction.
+
+**Two readings of the last three fields, and the format picks between
+them.** The engine writes them outside the branch that tests the
+funcType, so the reading a person takes from the source is that a
+virtual stub and a funcdef carry them too. Only the other one lands:
+
+| the last three fields belong to | the tail |
+|---|---|
+| every funcType | dies at 0x1D7 of 0x1A6E6 |
+| **a script function alone** | **lands exactly on EOF** |
+
+### The stack offset is PLAIN here, and that is where a wrong reading hides
+
+The newer generation stores a variable's stack offset as
+`offset << 1 | onHeap`; this one stores the offset, signed. Read with the
+shift, `server_menu::add(item, id)` comes back with **both parameters at
+-1**, one of them on the heap -- one name for two parameters, which reads
+perfectly. Read plain they are -1 and -2, which is where this file says
+parameters live, so the frame layout it derives from the bytecode is what
+settled the field order.
+
+`add` is the record that settled all of it, because a constructor with no
+parameters and no locals writes three zero bytes where any of these
+counts could go -- ambiguous by construction. A record with two named
+parameters is not.
+
+### What the records gave up
+
+| | server.exe | airpuck.exe |
+|---|---|---|
+| module | 108,262 B | 149,829 B |
+| classes | 5 / 5 | 12 / 12 |
+| parse errors | 0 | 0 |
+| tail | lands exactly on EOF | lands exactly on EOF |
+| source files NAMED | **14** | **21** |
+| recovered | 13 files, 3,717 lines | 25 files, 5,650 lines |
+| calls read back | 995 | 1,783 |
+| the compiler | **compiled cleanly** | **compiled cleanly** |
+
+Per-build fields, both the same and both the ordinary stock-1.3
+combination: `tagged`, `template_namespace` false, `objvar_three` true,
+`legacy_body` true, `unguarded_lists` false. So nothing about the build
+is unusual -- only that it was compiled with `-c`.
+
+### The names reach the output, because the decompiler already read them
+
+`FuncDecompiler` takes a signature's names from `param_names` and a
+body's from `variables`, which is how `bgt nvgt recover` handles NVGT's
+debug builds. The adapter simply never filled them:
+
+```
+before:  void add(string arg0, string arg1)
+after:   void add(string item, string id)
+
+before:  local_4 += ((menuitems[local_5] + "{}") + menuids[local_5]);
+after:   l       += ((menuitems[i]       + "{}") + menuids[i]);
+```
+
+and the client's `key_hold` comes back with the author's own underscore
+convention intact:
+
+```
+key_hold(int _key_code, int _setting_1, int _setting_2) {
+    key_flag = 0;
+    key_code = _key_code;
+```
+
+while `rotation.bgt` recovers three overloads of `move` with their
+default arguments:
+
+```
+vector move(double x, double y, double deg, double dir = 0.0)
+vector move(double x, double y, double z, double deg, double dir)
+vector move(double x, double y, double z, double deg, double zdeg,
+            double dir, double zdir)
+```
+
+**The two variable lists are merged rather than swapped.** Debug info
+names what the SOURCE declared and says nothing about the compiler's own
+scratch slots; `slot_types` types every slot the bytecode touches and
+cannot tell the two apart. So a named declaration wins for its own slot
+and the inferred entries stand for the rest -- which is what lets a
+temporary still fold into its use while a real local keeps its name.
+`server_menu::send` still has `local_12`, `local_13` and `local_14`, and
+those really are temporaries.
+
+#### ...and three rules went blind the moment a slot had a real name
+
+The counts said this was finished: 0 residual gotos, 0 unbalanced files,
+0 bodies given up on, a verified split, and `bgt audit` reporting no
+literal and no constant lost. **The compiler said 135 errors on the
+server and 41 on the client**, and it was right -- reported by the person
+who ran it, from the one check this file keeps saying is the only one that
+counts.
+
+Everything that looks for a frame slot in emitted text looked for the
+names this decompiler *invents*. There was never a reason to look for
+anything else, so three rules were blind at once:
+
+- **`_declare_read_before_written` found slots by a NAME PATTERN.** It
+  exists to declare a slot the body reads and never assigns -- the write
+  that would have declared one may not exist at all -- and it looked for
+  `(?:local|tmp)_?\d+`, which is `local_19` and `tmp3` and nothing a source
+  ever wrote. So `parsed`, `seconds`, `card`, `itm` and sixty more came out
+  assigned and never declared, which is most of those 135 errors. It asks
+  the frame's own names now: any identifier, intersected with `var_names`,
+  which is how `_stale_fold` already asks which slots an expression reads.
+  Parameters are excluded, because the signature declares one and a second
+  declaration shadows it with a blank.
+
+- **A slot's declarations were keyed by offset, so only the last
+  survived.** These slots are reused hard -- `netloop` makes **twenty-seven
+  declarations in slot 26** and twenty-one in slot 23, mixing `int`, `uint`
+  and `bool`. `run_extended`'s slot 13 is `int i` and then `bool success`,
+  so the loop counter took the later name *and the later type*:
+
+  ```
+  for (success = false; (success ? 1 : 0) < item_count; success++)
+  Error: Illegal operation on this datatype
+  ```
+
+  `FuncDecompiler.redeclare` exists for exactly this and is what the NVGT
+  side relies on for its own debug builds: each declaration takes effect at
+  its own recorded position. It needs all of them.
+
+- **Two different slots can carry one source name.** The client declares
+  `i` twice in `netloop` -- a `string i` in slot 18 and a `uint i` in slot
+  16, in separate blocks, which is ordinary AngelScript. A slot's
+  declaration is hoisted to the top of the body, so both wanted one name:
+
+  ```
+  i = string_replace(parsed[1], "[SPCE]", local_19, true);
+  Error: Can't implicitly convert from 'string' to 'uint'.
+  ```
+
+  The second offset to claim a name gets a suffix. A name reused at the
+  **same** offset keeps it, because that is one variable the source
+  declared in two scopes; parameters claim theirs first.
+
+With all three, both halves **compile cleanly and run**:
+
+| | before | after |
+|---|---|---|
+| server | 135 errors | **compiled cleanly, and `bgt drive` answers** |
+| client | 41 errors | **compiled cleanly, and `bgt drive` answers** |
+
+and the three fell in that order, each uncovering the next: 135 -> 18 ->
+0. The 18 were the third rule's shape, visible only once the first two
+were fixed.
+
+**What this cost was the one check that was skipped.** Every free check
+passed and the recovery was broken -- which is the sentence this file
+opens the standings with, and the reason the last column reads *does it
+RUN?* rather than *does it compile?*. A debug build changes what the
+recovery looks like, and nothing that reads the recovery's own text had
+ever seen a real name. The counts could not see it, `bgt audit` could not
+see it (the bytecode holds no names to compare), and `bgt signatures`
+could not see it (an undeclared name is not one of its nine shapes). Only
+the compiler could, and asking it costs a dialog -- so it was not asked.
+
+### `debug_info` was read from byte 0 wherever the reader started
+
+The flag IS byte 0, so only a reader whose own section begins after it
+has a head above it to read. A `Reader` built over a class block on its
+own starts at 0, where the first byte is a null type-info marker -- which
+is 0, so such a reader reported a debug build and, once the debug fields
+were wired in, went looking for fields that are not there.
+`test_toolkit`'s resynchroniser test is one, and it is what caught this.
+
+`detect` never returns 0, because the head is at least the one byte the
+flag occupies, so `pos > 0` is the whole condition.
+
+### The real file names needed the SCAN replaced by the records
+
+`script_files.script_sections` finds a source path by scanning for a
+`0x6E` string tag and reading **one byte** of length. That is right for
+the 2010-2012 generation, whose encoded integer is plain base-128, and
+wrong for every build since: BGT 1.3 gives the lead byte's top bit to a
+sign flag, so 68 is `40 44`, and a 68-character path read as 64
+characters, lost its `.bgt`, and was dropped. **The server names 14 files
+and the scan found one.** Both readings are offered now and the suffix
+accepts one, so the early titles are unaffected.
+
+That is this file's own rule arriving as a bug rather than as advice --
+*the length is what says where a name starts, and a scan has no idea* --
+and the authority is the records. A parsed debug module names each body's
+file, `Entity.truth` is the field for it, and `nvgt_entities` has always
+filled it while `bgt_entities` never did, because until now no BGT debug
+module parsed. `bgt files` scores its own reconstruction against that and
+reports **81 / 81 declarations attributed correctly** on the server.
+
+#### ...and a scan cannot tell a debug build from a string literal
+
+`bgt files` said *"This module is a DEBUG build and NAMES its source
+files"* whenever the scan found anything, and that claim was the scan's
+to make for as long as nothing else could make it. **Crazy Party is a
+release build and the scan reports `ajouteLangue.bgt` for it** -- which
+this file already explains, because that title generates part of its own
+source at run time and carries the name as an ordinary literal. So one
+of the corpus's largest titles has been described as a debug build with
+a one-file source tree.
+
+The records settle it, and the claim is theirs now: a module that records
+a section per function is a debug build, and a scan that finds a name in
+a module which records none has found a string literal. Crazy Party is
+reported as that instead -- *"a lead, not a file list"* -- and the
+wording names the reason.
+
+**The two readers spell the field differently**, which is why the early
+titles were on the scan's side of that line: `as_module` calls it
+`scriptSection` and `as_early` calls it `section`. The early reader has
+read it all along -- it uses "is this a source file?" as the check that
+makes a body shape judgeable -- so `record_section` asks for either, and
+those five titles' names are proved rather than scanned.
+
+**For them that is argued rather than measured**, and the reason is this
+file's own note: the five 2010-2012 titles exist only as carved installer
+output and are not on this machine any more. What follows from the key is
+that four of them are debug builds, so their recoveries will come out under
+`groda.bgt`, `event.bgt` and the rest instead of generated names -- a
+change to the LAYOUT and not to the text, so the columns the standings
+quote for them cannot move: the same declarations, grouped differently,
+with `reorder_by_file` keeping the split check exact. Their file counts
+will change and the standings do not carry one.
+
+### The project comes out under the author's own file names
+
+`assign_paths` already gives a declaration its real file wherever the
+library attribution names one, so a debug build needed only the second
+source of names. The recovered server is `puck.bgt`, `server_menu.bgt`,
+`room.bgt`, `logs.bgt`, `banner.bgt`, `readable_time.bgt` and the rest,
+instead of `classes/puck.bgt` and `functions/part_0.bgt`.
+
+**And that broke the split check, which was right to break.** `verify`
+compares the files, concatenated in include order, against the one-file
+render -- and the render is the sections in MODULE order, which is not
+file order: `ReadInner` makes one pass over the types and another over
+the global functions, so a file's class sits a long way from its
+functions. Grouping by the real name therefore moves declarations, and
+the check said so.
+
+The check is right and the render was the wrong reference.
+`reorder_by_file` makes each file's declarations contiguous and puts them
+in the order they were written -- which the module records, as a line and
+a column per body -- and the one-file source is re-rendered from that
+order, so `verify` keeps its exact meaning: the files concatenate to the
+single source, every declaration exactly once. Relaxing the check instead
+would have made it a tautology on every title, which is the trade this
+file refuses.
+
+Two narrownesses: the library attribution still decides the path where it
+has an answer, because that is the one that licenses substituting the
+engine's own source; and a declaration with no recorded position -- a
+generated initialiser -- keeps its place at the end of its file rather
+than sorting to the front on a position of 0.
+
+### "unknown" was the other bug, and the worse one
+
+`_walk` catches the parse failure and discards it, and `tail_error` is
+set only once the class blocks are complete -- so a module that died in
+its head reached the caller as *"the tail did not land on EOF: unknown"*,
+naming neither the failure nor the place. A probe had to be written to
+find out, and it answered in one run: `bad type-info tag 0x72 at 0x5C5`,
+0x72 being `'r'`, a string back-reference where a type was expected. The
+message says that now, with the offset and how many class blocks it
+managed.
+
+### What the sweep says, and the question a debug build can now ANSWER
+
+`bgt signatures` is clean on the client and reports **five
+`double_assign` rows on the server**, all one shape and all the family
+this file documents at length:
+
+```
+local_11 = "/changes";
+local_11 = "/c";
+if ((parsed[0] == local_11) || (parsed[0] == local_11)) {
+```
+
+The source is `parsed[0] == "/changes" || parsed[0] == "/c"`, so the
+recovered server tests `/c` twice and never answers `/changes` -- a
+command alias that does not work. One scratch slot carries both operands
+of the short-circuit, which is the `use_screen_reader` collapse, and it is
+not the debug work's doing: the title is new, and nothing could sweep it
+before because the module did not parse.
+
+**What is new is that the module can settle it.** `_reused_object_slot`
+refuses to fold a slot the engine re-assigns with `opAssign`, on the
+stated grounds that *"the engine only re-assigns something already
+constructed, so a slot it re-assigns is one the source declared"*. That is
+a proxy for a question this project has never been able to ask, and these
+two lines are `opAssign`es into slot 11 -- so the proxy says "declared"
+and the fold is refused. **The debug record says slot 11 is not named at
+all**, so the source declared nothing there and the proxy is wrong about
+it.
+
+Not acted on: it is a fold rule, it wants the five-title measurement every
+other one in this file got, and a rule that reads debug info helps only
+the two titles that have it. Recorded because it is the first time the
+question *did the source name this slot?* has had a direct answer on code
+nobody here wrote -- which is what makes these two modules worth keeping
+beside the corpus.
+
+### Driving it found a defect a clean compile cannot: a REDUCED divisor
+
+`bgt drive` can call a recovered function and read the answer back, and
+with the real names it can call one by the name the author gave it. The
+server's `ms_to_readable_time` is a known answer -- 90,000 ms is one
+minute and thirty seconds -- and the recovery says:
+
+```
+ms_to_readable_time(90000)    -> "30 seconds"
+ms_to_readable_time(3600000)  -> ""
+```
+
+The original is the ordinary cascade, each quantity divided out of the
+one above it and then reduced:
+
+```
+slot7 = uint(ms / 1000.0)      seconds
+DIVu 4 7 1                     minutes = seconds / 60
+MODu 7 7 1                     seconds %= 60
+DIVu 3 4 1                     hours   = minutes / 60
+MODu 4 4 1                     minutes %= 60
+```
+
+and the recovery re-derives every quantity from the **already reduced**
+`seconds`:
+
+```
+seconds = uint((ms / 1000.0));
+seconds %= 60;
+minutes = ((seconds / 60) % 60);          <- seconds is 0..59 by now
+hours   = (((seconds / 60) / 60) % 24);
+```
+
+so minutes, hours, days, weeks and months are all 0 and the function
+reports only the seconds. Whatever a server built from this recovery says
+about an uptime or a ban length is wrong.
+
+**The mechanism is a web with one definition.** `DIVu 4 7 1` writes slot 4
+and `MODu 4 4 1` reads and rewrites it, so each read sees exactly one
+reaching definition -- and `_web_is_a_variable` is *"more than one
+definition reaching one read"*, which is what a declared local looks like
+once the compiler has laid it out. One definition looks like a temporary,
+so the value folded into the `MODu` and the combined assignment landed
+after `seconds` had changed.
+
+That heuristic exists because the module records nothing about which
+slots the source named -- and **this module records it outright.** The
+declaration is `uint minutes` at a position the record carries, so the
+question `_web_is_a_variable` guesses at has a direct answer here: a web
+whose definitions fall inside a recorded declaration's scope is that
+variable, and a web outside every one of them is the compiler's.
+
+Not done, and the reason is scope rather than doubt. It is a fold rule, so
+it wants the measurement every other one in this file got; and before that
+it wants pinning in `bgt oracle`, because the shape is not
+debug-specific -- a release build would fold the same cascade into the
+same wrong expression under the name `local_4`, and no title in the corpus
+has ever been asked to compute one. A shape there says whether this is a
+general defect or two titles' bad luck, and it costs one fixture.
+
+**What found it is the point.** The recovery compiles cleanly, runs, sweeps
+clean, and `bgt audit` reports nothing lost -- because nothing *was* lost:
+every call, literal and constant the bytecode holds is in the text, in a
+different order. Only running the function and knowing the answer could
+see it, which is what `bgt drive` is for and what the standings' last
+column is about.
+
+### Nothing in the corpus moves
+
+Every read the reader adds is behind `noDebugInfo == 0`, every name the
+adapter fills needs a field a release build does not write, and
+`reorder_by_file` returns at once when nothing names a file. **One change
+is on the shared path** -- the declaration net, which every title goes
+through -- and for a release build it is equivalent by construction: the
+names it now looks for are `var_names`, which such a build fills with
+`local_N` and the parameters, and the parameters are excluded.
+
+Measured rather than argued, against a frozen copy of the committed tree:
+
+| title | lines | goto | split | calls read back | files |
+|---|---|---|---|---|---|
+| Battle of the Hunter | 4,269 | 0 | verified | 1,334 | 16 |
+| Super Egg Hunt | 5,239 | 0 | verified | 1,623 | 17 |
+| Field Wars | 7,942 | 0 | verified | 3,005 | 37 |
+| The Gate | 34,031 | 0 | verified | 8,681 | 182 |
+| Manamon 1 | 82,157 | 0 | verified | 26,509 | 809 |
+
+-- identical before and after, and the trees diffed file by file: **1,061
+files, and the only difference anywhere is one line of a comment.** The
+header this writes used to say "BGT strips debug information", which is
+what this whole section is about being false, so it now says a release
+build does.
+
+**Crazy Party is the sixth and its run did not finish**, which this file
+has recorded happening three times before. Its baseline alone had been
+decompiling for fifty minutes when everything else was done, so the row
+is not quoted rather than guessed at. What stands in its place is the
+argument above plus five titles and 1,061 files, and the narrower reason
+it cannot move: its module's first byte is 1, so the reader's debug branch
+reads no bytes at all, and nothing in `var_names` for a release build is a
+name the old pattern missed.
+
+**And Manamon 1's row corrects the standings**, which said 82,156 lines
+and 26,510 calls. Both runs that measured it here say 82,157 and 26,509 --
+which is the figure the lost-call census section already records, and the
+standings had not been re-derived from it.
 
 ## The 2011 module is a third reader generation, and the HEAD says so
 
@@ -14242,7 +14776,19 @@ the entry tags in one AES block, and `Entry.decrypt(key)` returns the plaintext 
 Everything below is known and characterised, not merely suspected. Nothing here
 blocks reading or rewriting a module.
 
-**Three defects are DIAGNOSED and not fixed, and all three are one
+**A cascade divides by a value that has already been reduced.** Air Puck's
+`ms_to_readable_time(90000)` answers `"30 seconds"` where the answer is one
+minute and thirty seconds, because `minutes = seconds / 60` is folded into
+the `MODu` that reduces it and lands after `seconds %= 60`. The mechanism is
+a web with one reaching definition, which `_web_is_a_variable` reads as a
+temporary -- a heuristic that exists because the module records nothing
+about which slots the source named, and **a debug build records it
+outright**. Diagnosed in full under **Driving it found a defect a clean
+compile cannot**; what it wants first is a `bgt oracle` shape, because the
+same cascade in a release build folds the same way under the name
+`local_4` and no title in the corpus has ever been asked to compute one.
+
+**Three more defects are DIAGNOSED and not fixed, and those three are one
 question: a slot's NAME against its pushed values.**
 
 - **`cs`'s mouse-mode toggle can be switched on and never off.** It

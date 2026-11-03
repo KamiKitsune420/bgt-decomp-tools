@@ -132,10 +132,18 @@ class Reader:
         # module's own first byte: 0 means it did. This file said for a long
         # time that "BGT compiles with noDebugInfo = 1" and that a game's own
         # file names and local variable names are gone for good. That is true
-        # of a RELEASE build (`-C`) and false of a DEBUG one (`-c`) -- and
-        # `screamingStrike_en`, a shipped 2013 game, was built with `-c`. Its
-        # module carries the source path and every parameter and local name.
-        self.debug_info = bool(data) and data[0] == 0
+        # of a RELEASE build (`-C`) and false of a DEBUG one (`-c`) -- and Air
+        # Puck 2PE ships both halves built with `-c`. Their modules carry the
+        # source path and every parameter and local name.
+        #
+        # **`pos > 0` is what makes reading byte 0 meaningful.** The flag IS
+        # byte 0, so only a reader whose own section starts after it has a
+        # head above it to read; `detect` never returns 0, because the head is
+        # at least the one byte the flag occupies. A reader built at 0 is a
+        # FRAGMENT -- a class block on its own in a test, say -- whose first
+        # byte is a null marker and not the flag, and taking that for a debug
+        # build made it look for fields that are not there.
+        self.debug_info = pos > 0 and bool(data) and data[0] == 0
         # Whether ReadTypeInfo's 'a' (template) form carries a namespace string
         # after the name. It does in Psycho Strike and Manamon 2 and does NOT in
         # Paladin of the Sky -- three builds, two answers, so this is a per-build
@@ -589,41 +597,61 @@ class Reader:
         if not 0 <= ninfo <= 1 << 18:
             raise ParseError("implausible object-info count %d" % ninfo)
         rec["objInfo"] = [(self.eu(), self.eu(), self.eu()) for _ in range(ninfo)]
-        self.debug_block(rec)
+        self.debug_head(rec)
 
         # ...and then ONE trailing traits byte (bit 0 read-only, bit 1 private),
-        # read unconditionally and *outside* the debug-info block. The 2/3/4
-        # funcTypes jump straight past it. Missing it leaves the constructor
-        # exactly one byte short, which puts the factory record that follows one
-        # byte out and takes the whole class block with it.
+        # read unconditionally. The 2/3/4 funcTypes jump straight past it.
+        # Missing it leaves the constructor exactly one byte short, which puts
+        # the factory record that follows one byte out and takes the whole
+        # class block with it.
+        #
+        # **It is the last field of the branch, not the last field of the
+        # record.** `debug_head` above and `debug_tail` in `function()` are
+        # one debug block in the source and the traits byte is written
+        # between them -- see `debug_head`.
         rec["traits"] = self.raw(1)[0]
 
-    def debug_block(self, rec: Dict[str, Any]) -> None:
-        """What a DEBUG build writes after a function body, and nothing else.
+    def debug_head(self, rec: Dict[str, Any]) -> None:
+        """The debug fields a DEBUG build writes BEFORE the traits byte.
 
         This reader carried `# debug info follows only when noDebugInfo == 0,
         and BGT always strips it` here, and the second half is wrong: BGT's
-        `-C` strips it and its `-c` does not. `screamingStrike_en` is a
-        shipped 2013 game compiled with `-c`, so its module holds the source
-        path, every parameter name and every local name -- the information
-        this file says is "stripped and unrecoverable", which is true only of
-        a release build.
+        `-C` strips it and its `-c` does not. Air Puck 2PE ships both halves
+        compiled with `-c`, so its modules hold the source path, every
+        parameter name and every local name -- the information this file
+        calls "stripped and unrecoverable", which is true only of a release
+        build.
 
-        The order is the one `nvgt/asreader.py` already reads for the newer
-        generation, which was written from AngelScript's published source, so
-        this is the same reader family rather than a guess -- and the proof it
-        is right is the one this format gives: the tail has to land EXACTLY on
-        EOF, and nothing follows `usedObjectProps` to absorb a mistake.
+        **The traits byte sits in the middle of the debug fields**, which is
+        the whole of why this used to fail. The engine writes the line
+        numbers, the script sections and the variables as the last thing in
+        the `funcType == asFUNC_SCRIPT` branch, then closes that branch with
+        the private/protected byte, and only then writes the script section,
+        the declaration position and the parameter names. Read as one run --
+        six fields and then the traits byte -- every record is one byte short
+        and the class block desynchronises on the factory that follows.
+
+        Two readings of that disagree and the format picks between them: the
+        last three fields could belong to every funcType, since the engine
+        writes them outside the branch that tests it, or to a script function
+        alone. Only the second lands the tail exactly on EOF, and the first
+        dies 0x1D7 bytes in -- see `function`.
 
         Parameters are variables here, which is why a two-parameter function
-        with two locals reports four: `add_two(int left, int right)` with
-        `total` and `doubled` writes all four names in one list.
+        with two locals reports four. Air Puck's `server_menu::add(item, id)`
+        is the record that settled the field order: its two variables come
+        back at stack offsets **-1 and -2**, which is where this file says
+        parameters live, and a name read before the offset makes them 0 and
+        garbage instead.
         """
         if not self.debug_info:
             return
         count = self.eu()
         if not 0 <= count <= 1 << 20:
             raise ParseError("implausible line-number count %d" % count)
+        # Pairs: a program position, then the line packed with its column as
+        # `line | col << 20`. `puck::puck` opens at position 0, line 6,
+        # column 7.
         rec["lineNumbers"] = [self.eu() for _ in range(count)]
 
         count = self.eu()
@@ -640,14 +668,22 @@ class Reader:
         variables = []
         for _ in range(count):
             declared_at = self.eu()
-            name = self.string()
-            raw = self.eu()
-            variables.append({"declared_at": declared_at, "name": name,
-                              "on_heap": bool(raw & 1),
-                              "stack_offset": raw >> 1,
+            # The stack offset is stored PLAIN and signed -- not the newer
+            # generation's `offset << 1 | onHeap`. Read with that shift,
+            # `server_menu::add`'s two parameters both come back at -1 --
+            # one of them on the heap -- instead of at -1 and -2, which is
+            # one name for two parameters and reads perfectly.
+            offset = self.eu()
+            variables.append({"declared_at": declared_at,
+                              "name": self.string(),
+                              "stack_offset": offset,
                               "type": self.data_type()})
         rec["variables"] = variables
 
+    def debug_tail(self, rec: Dict[str, Any]) -> None:
+        """The debug fields that follow the traits byte. See `debug_head`."""
+        if not self.debug_info:
+            return
         rec["scriptSection"] = self.string()
         rec["declaredAt"] = self.eu()
         count = self.eu()
@@ -697,11 +733,25 @@ class Reader:
                 if flags & 0x10:
                     rec["tryCatch"] = [(self.eu(), self.eu())
                                        for _ in range(self.eu())]
-                # debug info follows only when noDebugInfo == 0
+                # The newer shape carries its private/protected bits in the
+                # flags byte at the top, so there is no traits byte here and
+                # the two halves of the debug block are adjacent. **Unverified
+                # against a sample**: every `len2` module in the corpus is a
+                # release build, so this is the order `debug_head` was proved
+                # in rather than a reading of a debug one.
+                self.debug_head(rec)
         elif ft in (2, 3):
             rec["vfTableIdx"] = self.eu()
         elif ft == 4 and self.dialect != TAGGED:
             self.raw(1)                          # funcdef traits byte; newer builds only
+
+        # A script function alone carries the second half. The engine writes
+        # it outside the branch that tests the funcType, so applying it to
+        # every record is the reading a person would take from the source --
+        # and it dies on Air Puck's first virtual stub, where keeping it to
+        # funcType 1 lands the tail exactly on EOF.
+        if ft == 1:
+            self.debug_tail(rec)
         return rec
 
     def _looks_like_function_start(self, p: int) -> bool:
@@ -1310,8 +1360,17 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
                     tail = r.tail()
                 except (ParseError, IndexError, struct.error) as exc:
                     tail_error = "%s: %s" % (type(exc).__name__, exc)
-    except (ParseError, IndexError, struct.error):
-        pass
+    except (ParseError, IndexError, struct.error) as exc:
+        # **Say what went wrong.** This used to be `pass`, and `tail_error`
+        # is set only once the class blocks are complete -- so a module that
+        # died in its head reached the caller as "the tail did not land on
+        # EOF: unknown", which names neither the failure nor the place. Air
+        # Puck's modules died on their first class block with an exact
+        # message, and a probe had to be written to see it.
+        tail_error = ("%s: %s (at 0x%X of 0x%X, after %d of %s class blocks)"
+                      % (type(exc).__name__, exc, r.p, len(data),
+                         len(blocks),
+                         "?" if declared is None else declared))
 
     return {"enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,

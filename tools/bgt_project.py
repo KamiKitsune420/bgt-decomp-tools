@@ -99,6 +99,8 @@ class Section:
     name: str
     text: str
     origin: str = ""               # the library file it belongs to, if known
+    source_file: str = ""          # the file a DEBUG build says it came from
+    declared_at: int = 0           # `line | col << 20`, from a DEBUG build
     path: str = ""                 # its published path in the project
 
 
@@ -200,17 +202,26 @@ class _Splitter(decompile.ModuleDecompiler):
         super().__init__(module)
         self.sections: List[Section] = []
 
-    def _capture(self, kind: str, name: str, render) -> None:
+    def _capture(self, kind: str, name: str, render,
+                 declared_at: int = 0) -> None:
         start = len(self.lines)
         render()
         text = "\n".join(self.lines[start:]).strip("\n")
         del self.lines[start:]
         if text.strip():
-            self.sections.append(Section(kind=kind, name=name, text=text + "\n"))
+            self.sections.append(Section(kind=kind, name=name, text=text + "\n",
+                                         declared_at=declared_at))
 
     def _render_class(self, c):
+        # Where the class was declared, for a DEBUG build: the earliest of its
+        # own bodies. A release build records nothing and this stays 0.
+        bodies = [f for f in (list(c.methods) + list(c.vft)
+                              + list(c.constructors) + list(c.factories))
+                  if f is not None and f.declared_at]
+        first = min((f.declared_at for f in bodies),
+                    key=lambda v: (v & 0xFFFFF, v >> 20), default=0)
         self._capture("class", c.format_name(),
-                      lambda: super(_Splitter, self)._render_class(c))
+                      lambda: super(_Splitter, self)._render_class(c), first)
 
     def _render_globals(self):
         self._capture("globals", "globals",
@@ -226,7 +237,8 @@ class _Splitter(decompile.ModuleDecompiler):
         # and the only thing it was catching.
         name = ("%s::%s" % (f.namespace_, f.name)) if f.namespace_ else f.name
         self._capture("function", name,
-                      lambda: super(_Splitter, self)._render_function(f))
+                      lambda: super(_Splitter, self)._render_function(f),
+                      f.declared_at)
 
     def render(self) -> str:
         super().render()
@@ -1420,11 +1432,16 @@ def _library(include_dirs: Optional[Sequence[str]]):
 
 def _origins(module_path: str, exe_path: str,
              include_dirs: Optional[Sequence[str]] = None
-             ) -> Tuple[Dict[str, str], List[str]]:
-    """Which library file each class and function belongs to, where known."""
+             ) -> Tuple[Dict[str, str], Dict[str, str], List[str]]:
+    """Which file each class and function belongs to, from two sources.
+
+    The first is the library attribution -- a run that declares what a
+    shipped `include/*.bgt` declares IS that file -- and the second is the
+    module's own record, which a DEBUG build keeps and a release build does
+    not. They are returned separately because only the first licenses
+    replacing the decompiled text with the engine's own source.
+    """
     library = _library(include_dirs)
-    if not library:
-        return {}, ["no BGT include folder found: library files are unnamed"]
     try:
         entities, _ = script_files.load_entities(module_path, exe_path,
                                                  nvgt=False)
@@ -1434,8 +1451,14 @@ def _origins(module_path: str, exe_path: str,
         # that generation records its real source file per function anyway
         # -- see `bgt files` -- so this is a missing nicety rather than a
         # missing recovery, and it says so instead of stopping.
-        return {}, ["the library attribution could not read this module: %s"
-                    % exc]
+        return {}, {}, ["the library attribution could not read this module: %s"
+                        % exc]
+    # What the module itself names. A release build names nothing, so this is
+    # empty for every title in this project's notes but Air Puck.
+    named = {e.name: e.truth for e in entities if e.truth}
+    if not library:
+        return ({}, named,
+                ["no BGT include folder found: library files are unnamed"])
     attribution = script_files.attribute(entities, library)
     # The runs carry the declarations; `file_order`'s segments carry the order
     # and the notes, and are consulted only for problems here.
@@ -1446,7 +1469,50 @@ def _origins(module_path: str, exe_path: str,
         for entity in run:
             origins[entity.name] = owner
     _, problems = script_files.file_order(attribution, library)
-    return origins, problems
+    return origins, named, problems
+
+
+def reorder_by_file(sections: List[Section]) -> bool:
+    """Make each file's declarations contiguous, in the order they were written.
+
+    Only for a module that NAMES its files -- a `-c` build. The module's own
+    order is two passes, the types and then the global functions, so a file's
+    class sits a long way from its functions and grouping by file necessarily
+    moves declarations. That is what `verify` reports, correctly: the
+    reference it compares against is the one-file render, and the render was
+    in module order.
+
+    So the order is rebuilt here instead of the check being relaxed. Files
+    keep the order they first appear in, which is the order the engine
+    processed them and so the order they were included; within a file,
+    declarations go in source order, which the module records as a line and a
+    column per body. A declaration whose position is unknown keeps its
+    relative place at the end of its file.
+
+    Returns whether anything moved, so the caller can re-render the one-file
+    source from the result.
+    """
+    if not any(section.source_file for section in sections):
+        return False
+    order: List[str] = []
+    groups: Dict[str, List[Section]] = {}
+    for section in sections:
+        if section.path not in groups:
+            order.append(section.path)
+            groups[section.path] = []
+        groups[section.path].append(section)
+    rebuilt: List[Section] = []
+    for path in order:
+        group = groups[path]
+        # `sorted` is stable, so the sections with no recorded position keep
+        # the module's order among themselves.
+        rebuilt.extend(sorted(
+            group,
+            key=lambda s: (0, s.declared_at & 0xFFFFF, s.declared_at >> 20)
+            if s.declared_at else (1, 0, 0)))
+    moved = rebuilt != sections
+    sections[:] = rebuilt
+    return moved
 
 
 def _safe(name: str) -> str:
@@ -1454,6 +1520,7 @@ def _safe(name: str) -> str:
 
 
 def assign_paths(sections: List[Section], origins: Dict[str, str],
+                 named: Optional[Dict[str, str]] = None,
                  functions_per_file: int = 40) -> None:
     """Give every section its file, keeping the emitted order intact.
 
@@ -1462,30 +1529,39 @@ def assign_paths(sections: List[Section], origins: Dict[str, str],
     grouping is not recoverable, and one class per file is the layout that
     stays readable. The game's own functions are cut into parts along the
     recovered file boundaries, so a part is never a mixture of two files.
+
+    **Except in a DEBUG build**, where `named` holds the file the module says
+    each declaration came from and there is nothing to reconstruct. The
+    library attribution still wins where it has an answer, because that is
+    the one that licenses substituting the engine's own source, and the two
+    agree about the name anyway when both speak.
     """
+    named = named or {}
     part = 0
     in_part = 0
     previous_origin: Optional[str] = None
     for section in sections:
         origin = origins.get(section.name, "")
         section.origin = origin
+        section.source_file = named.get(section.name, "")
+        place = origin or section.source_file
         if section.kind == "types":
             section.path = "includes/types.bgt"
         elif section.kind == "globals":
             section.path = "includes/globals.bgt"
-        elif origin:
-            section.path = "includes/" + origin
+        elif place:
+            section.path = "includes/" + place
         elif section.kind == "class":
             section.path = "includes/classes/%s.bgt" % _safe(section.name)
         else:
             # A change of origin is a real file boundary, so start a new part
             # there as well as every `functions_per_file`.
-            if previous_origin != origin or in_part >= functions_per_file:
+            if previous_origin != place or in_part >= functions_per_file:
                 part += 1
                 in_part = 0
             in_part += 1
             section.path = "includes/functions/part_%d.bgt" % part
-        previous_origin = origin
+        previous_origin = place
 
 
 STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"')
@@ -1805,8 +1881,14 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     sections = splitter.sections
 
     progress("recovering the file structure")
-    origins, problems = _origins(module_path, exe_path, include_dirs)
-    assign_paths(sections, origins)
+    origins, named, problems = _origins(module_path, exe_path, include_dirs)
+    assign_paths(sections, origins, named)
+    if reorder_by_file(sections):
+        # The one-file source is the sections concatenated, so it has to be
+        # re-rendered from the order the files are actually written in --
+        # otherwise `verify` is comparing the project against a render of a
+        # different layout and reports a move that is the layout itself.
+        source = "\n".join(section.text for section in sections)
 
     # Types the module uses that neither the engine nor the module declares
     # come from a plugin; the executable names the DLL.
@@ -1898,12 +1980,21 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         header = ["// %s" % path,
                   "// Recovered from %s. Original file names are not recoverable"
                   % os.path.basename(exe_path),
-                  "// for a game's own code (BGT strips debug information);"]
+                  "// for a game's own code (a release build of BGT strips the"
+                  " debug information);"]
         if group[0].origin:
             header = ["// %s" % path,
                       "// Recovered from %s. This run declares exactly what BGT's"
                       % os.path.basename(exe_path),
                       "// shipped %s declares, so that is its name." % group[0].origin]
+        elif group[0].source_file:
+            # A DEBUG build (`-c`) records it, so this is the real name and
+            # not a reconstruction.
+            header = ["// %s" % path,
+                      "// Recovered from %s, which was built with debug"
+                      % os.path.basename(exe_path),
+                      "// information, so this is the file name the module"
+                      " itself records."]
         else:
             header.append("// this file is named for what it holds.")
         with open(target, "w", encoding="utf-8") as fh:
@@ -2212,6 +2303,13 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
                    "stats": project.stats,
                    "problems": project.problems,
                    "origins": {s.name: s.origin for s in sections if s.origin},
+                   # What a DEBUG build's own records name, which is a
+                   # different claim from `origins`: that one says a run
+                   # declares what a shipped library file declares, and this
+                   # one says where the author kept it. Empty for a release
+                   # build, which records nothing.
+                   "source_files": {s.name: s.source_file
+                                    for s in sections if s.source_file},
                    "compile": (None if project.compile_report is None else
                                {"outcome": project.compile_report.outcome,
                                 # When the check could not run at all, the

@@ -1439,6 +1439,11 @@ def test_a_namespaced_function_is_keyed_apart_from_the_global_one():
     Manamon 2's split, and the only thing `verify` was reporting.
     """
     class Fn:
+        # `declared_at` is what a DEBUG build records for a body, and the real
+        # `Function` always has it -- 0 when the build kept no debug info. A
+        # fake that leaves a field out tests the fake.
+        declared_at = 0
+
         def __init__(self, name, namespace):
             self.name, self.namespace_ = name, namespace
             self.bytecode = []
@@ -1448,7 +1453,7 @@ def test_a_namespaced_function_is_keyed_apart_from_the_global_one():
     class Splitter(bgt_project._Splitter):
         def __init__(self):
             pass                                  # no module needed
-        def _capture(self, kind, name, render):
+        def _capture(self, kind, name, render, declared_at=0):
             captured.append(name)
 
     sp = Splitter()

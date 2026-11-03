@@ -186,6 +186,27 @@ def _tabs(lines: Sequence[str], depth: int) -> str:
     return "\n".join(pad + line for line in lines)
 
 
+def column(expr: str) -> str:
+    """The table's name for one watch -- used for the header AND the lookup.
+
+    One function, because the two used to differ: the header replaced every
+    `"` with `'` so the BGT string literal holding it would close, and the
+    summary looked the column up by the expression as typed. So every watch
+    containing a quote came back blank -- `get_string_size("hello")`
+    reported nothing while the recovered function correctly returns `5 B`,
+    which reads as a defect in the recovery rather than in the tool.
+
+    A tab or a newline is the one thing a column name cannot hold, because
+    the table is tab-separated, so those become spaces on both sides.
+    """
+    return expr.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+def _literal(text: str) -> str:
+    """`text` as the body of a BGT string literal."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def probe_source(entry: str, watch: Sequence[str], call: Sequence[str] = (),
                  hold: Sequence[str] = (), setup: Sequence[str] = (),
                  duration: int = 1000, every: int = 100,
@@ -194,7 +215,7 @@ def probe_source(entry: str, watch: Sequence[str], call: Sequence[str] = (),
     return TEMPLATE.format(
         entry=os.path.basename(entry), p=PREFIX, silent=SILENT,
         results=RESULTS,
-        headers="\\t".join(w.replace('"', "'") for w in watch),
+        headers="\\t".join(_literal(column(w)) for w in watch),
         setup=_tabs([s.rstrip(";") + ";" for s in setup], 1),
         holds=_tabs(["force_key_down(%s);" % k for k in hold], 1),
         calls=_tabs([c.rstrip(";") + ";" for c in call], 2),
@@ -407,7 +428,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print()
     failed = 0
     for col in out["watch"]:
-        seen = [r.get(col, "") for r in out["rows"]]
+        seen = [r.get(column(col), "") for r in out["rows"]]
         want = expect.get(col)
         if want is not None and want not in seen:
             print("  %-26s WRONG: never %s, only %s"

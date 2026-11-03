@@ -8,6 +8,7 @@ restoring the file it had to edit even when the run raises.
 Every case is a synthetic project. No game files, as this repository requires.
 """
 
+import inspect
 import os
 import sys
 import unittest
@@ -268,6 +269,44 @@ class ScenarioTests(unittest.TestCase):
         for name, canned in bgt_drive.SCENARIOS.items():
             for col, want in canned["expect"].items():
                 self.assertIn(want, ("0", "1"), "%s/%s" % (name, col))
+
+
+class WatchNamesTests(unittest.TestCase):
+    """A watch is looked up in the table by the name the header gave it.
+
+    The header is a BGT string literal, and it used to REPLACE every `"`
+    with `'` so the literal would close -- while the summary looked the
+    column up by the expression as typed. So every watch containing a quote
+    reported `never changed:` with nothing after it.
+
+    `get_string_size("hello")` is how it surfaced: the recovered function is
+    correct and answers `5 B`, and the tool said it answered nothing, which
+    reads as a defect in the recovery.
+    """
+
+    def test_a_quote_is_escaped_rather_than_replaced(self):
+        expr = 'get_string_size("hello")'
+        self.assertEqual(bgt_drive.column(expr), expr)
+        self.assertEqual(bgt_drive._literal(bgt_drive.column(expr)),
+                         'get_string_size(\\"hello\\")')
+
+    def test_the_header_and_the_lookup_are_one_function(self):
+        """Two places answering one question is what went wrong, so the
+        source has to call `column` for the header and for the lookup."""
+        source = inspect.getsource(bgt_drive)
+        self.assertIn("_literal(column(w))", source)
+        self.assertIn("r.get(column(col)", source)
+
+    def test_the_probe_emits_the_expression_and_the_header_together(self):
+        source = bgt_drive.probe_source("game.bgt", ['"abc"', "1+1"])
+        header = next(l for l in source.splitlines() if "ms\\t" in l)
+        self.assertIn('\\"abc\\"', header)
+        self.assertIn('string("abc")', source)
+
+    def test_a_tab_cannot_survive_in_a_column_name(self):
+        """The table is tab-separated, so a tab in the name would split the
+        column -- and it has to go on BOTH sides or the lookup misses again."""
+        self.assertEqual(bgt_drive.column('f("a\tb")'), 'f("a b")')
 
 
 def _ok():

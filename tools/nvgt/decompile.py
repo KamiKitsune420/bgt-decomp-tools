@@ -752,7 +752,6 @@ DECL_RE = re.compile(r"^\s*(?!(?:return|break|continue|case|default|else|goto|"
                      r"while|if|for|do|switch|super|new|delete)\b)"
                      r"(?:const\s+)?[A-Za-z_][\w:]*(?:<[^>]*>)?(?:@|\[\])*@?\s+"
                      r"([A-Za-z_]\w*)\s*[;=(]")
-SLOT_NAME_RE = re.compile(r"\b((?:local|tmp)_?\d+)\b")
 #: any bare identifier, for asking which of a frame's own slots an
 #: expression reads. Intersecting with `var_names` is what keeps a
 #: property or method name out of the answer:
@@ -938,7 +937,7 @@ def _lost_calls(fd: "FuncDecompiler", events: list) -> list:
 
 def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
                                  indent: int) -> list[str]:
-    """Declare any slot the body reads but never assigns.
+    r"""Declare any slot the body reads but never assigns.
 
     A frame slot the function reads before writing holds what the frame was
     given: null for a handle, a default-constructed object. The write that
@@ -949,19 +948,46 @@ def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
     The declaration is emitted without an initialiser, which is exactly the
     state the slot was in. A slot whose type cannot be named in source is left
     alone rather than declared as something it is not.
+
+    **The slots are found by NAME, not by a name pattern.** This looked for
+    `(?:local|tmp)_?\d+`, which is every name this decompiler invents and no
+    name a source ever wrote. It cost nothing for
+    as long as no slot had a real one, and a DEBUG build names them all: Air
+    Puck's server came out with `parsed`, `seconds`, `card` and sixty more
+    assigned and never declared, which is most of the 135 errors its
+    compiler reported. Any identifier, intersected with the frame's own
+    names, is the question -- the same way `_stale_fold` asks which slots an
+    expression reads.
+
+    A **parameter** is excluded: the signature declares it, and declaring it
+    again in the body shadows it with an uninitialised copy.
+
+    **A reused slot renders under several names**, one per scope the source
+    declared it in, so `var_names` -- which holds the name the slot ended
+    the walk with -- names only the last. Air Puck's `netloop` writes
+    `index`, `index2`, `rindex`, `r`, `p2` and `pwfind` for one offset, and
+    five of the six were assigned and never declared. Every declaration the
+    module records is taken, each with its own type.
     """
     declared = {match.group(1) for line in lines
                 if (match := DECL_RE.match(line))}
+    frame: dict[str, object] = {}
+    for off in fd.var_names:
+        if off not in fd.parameter_slots:
+            frame.setdefault(fd.name_of(off), fd.var_types.get(off))
+    for variable in fd.fn.variables:
+        if variable.name and variable.stack_offset not in fd.parameter_slots:
+            frame.setdefault(variable.name, variable.type)
     used: dict[str, int] = {}
     for line in lines:
-        for name in SLOT_NAME_RE.findall(_mask_strings(line)):
-            used.setdefault(name, 0)
+        for name in _IDENT.findall(_mask_strings(line)):
+            if name in frame:
+                used.setdefault(name, 0)
     missing = []
     for name in used:
         if name in declared:
             continue
-        off = next((o for o in fd.var_names if fd.name_of(o) == name), None)
-        dt = fd.var_types.get(off) if off is not None else None
+        dt = frame[name]
         if dt is None:
             continue
         text = dt.format().removeprefix("const ").replace("&", "").strip()

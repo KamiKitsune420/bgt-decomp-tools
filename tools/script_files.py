@@ -96,20 +96,44 @@ def script_sections(module: bytes,
     seen: List[str] = []
     known = set()
     for m in _SECTION_RE.finditer(module):
-        n = m.group(1)[0]
-        if not 8 < n < 128:
-            continue
-        at = m.end()
-        raw = module[at:at + n]
-        if len(raw) < n or not all(32 <= c < 127 for c in raw):
-            continue
-        text = raw.decode("latin1")
-        if not text.lower().endswith(tuple(suffixes)):
-            continue
-        if text not in known:
-            known.add(text)
-            seen.append(text)
+        at = m.end() - 1
+        # The length is an ENCODED integer, and the two generations encode it
+        # differently: the 2010-2012 writer's is plain base-128, so one byte
+        # covers 0..127, and every build since gives the lead byte's top bit
+        # to a sign flag, so one byte covers 0..63 and 68 is `40 44`. Reading
+        # one byte either way truncated every path of 64 characters or more
+        # -- which dropped its `.bgt` and then dropped the path, silently.
+        # Both readings are offered and the suffix is what accepts one.
+        for n, start in _section_lengths(module, at):
+            if not 8 < n < 1024:
+                continue
+            raw = module[start:start + n]
+            if len(raw) < n or not all(32 <= c < 127 for c in raw):
+                continue
+            text = raw.decode("latin1")
+            if not text.lower().endswith(tuple(suffixes)):
+                continue
+            if text not in known:
+                known.add(text)
+                seen.append(text)
+            break
     return seen
+
+
+def _section_lengths(module: bytes, at: int) -> List[Tuple[int, int]]:
+    """Every reading of the length at `at`, as (length, where the text starts).
+
+    One per encoding the corpus holds, longest lead first so a wide form is
+    not mistaken for a narrow one whose text happens to fit.
+    """
+    out: List[Tuple[int, int]] = []
+    if at >= len(module):
+        return out
+    lead = module[at]
+    if lead & 0xC0 == 0x40 and at + 1 < len(module):      # the sign-flag form
+        out.append((((lead & 0x3F) << 8) | module[at + 1], at + 2))
+    out.append((lead & 0x7F, at + 1))                     # plain base-128
+    return out
 
 @dataclass
 class SourceFile:
@@ -294,6 +318,30 @@ class Entity:
     container: Optional[Tuple[str, str]] = None
 
 
+def record_section(rec) -> Optional[str]:
+    """The source path one function record names, under either reader's key.
+
+    `as_module` calls it `scriptSection` and `as_early` calls it `section`.
+    Asking for one key meant the 2010-2012 titles' own file names reached
+    `bgt files` only through the string scan below, which cannot prove
+    anything: a release build can carry a `.bgt` name as an ordinary
+    literal, and Crazy Party -- which generates part of its own source --
+    does.
+    """
+    if not isinstance(rec, dict):
+        return None
+    return rec.get("scriptSection") or rec.get("section") or None
+
+
+def _basename(path) -> Optional[str]:
+    """The file part of a recorded source path, or None. Bytes on the wire."""
+    if isinstance(path, (bytes, bytearray)):
+        path = bytes(path).decode("latin1")
+    if not path:
+        return None
+    return os.path.basename(path.replace("\\", "/"))
+
+
 def bgt_entities(mod) -> List[Entity]:
     """Declarations of a BGT module (an `as_disasm.Module`), in module order.
 
@@ -311,11 +359,18 @@ def bgt_entities(mod) -> List[Entity]:
     for f in mod.functions:
         label = as_disasm.function_label(f)
         owner, _, name = label.rpartition("::")
+        # A DEBUG build (`-c`) records the file each body was compiled from,
+        # so there is nothing to reconstruct for it. `Entity.truth` is the
+        # field for that and `nvgt_entities` has always filled it; this side
+        # never did, because until Air Puck no BGT debug module parsed.
+        truth = _basename(record_section(f))
         if owner != "<global>":
             entity = index.get(owner)
             if entity is None:
                 entity = index[owner] = Entity("class", owner)
                 out.append(entity)
+            if entity.truth is None:
+                entity.truth = truth           # the first body that names one
             if name not in (owner.rpartition("::")[2], "~" + owner.rpartition("::")[2]):
                 entity.members.add(name)
         elif name in classes:
@@ -327,7 +382,7 @@ def bgt_entities(mod) -> List[Entity]:
             ns = f.get("namespace") or ""
             qualified = ns + "::" + name if ns else name
             if not any(e.kind == "function" and e.name == qualified for e in out[-1:]):
-                out.append(Entity("function", qualified))  # overloads collapse
+                out.append(Entity("function", qualified, truth=truth))
     for enum in mod.info.get("enums", []):
         out.append(Entity("enum", enum["name"] if isinstance(enum, dict) else str(enum)))
     for g in (mod.tail or {}).get("global_properties", []):
@@ -781,14 +836,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("%s module, %d declarations; library sources from %s\n"
           % (engine_name.upper(), len(entities), ", ".join(dirs)))
 
-    # A debug build names its own files, so there is nothing to reconstruct.
+    # A debug build names its own files, so there is nothing to reconstruct
+    # -- and the RECORDS are what prove that, where the scan only suggests
+    # it. A release build can hold a `.bgt` name as an ordinary string
+    # literal: Crazy Party generates part of its own source and carries
+    # `ajouteLangue.bgt`, which the scan reports and the records do not.
+    recorded = any(e.truth for e in entities)
     with open(args.module, "rb") as fh:
         named = script_sections(fh.read())
-    if named:
+    if recorded:
         print("This module is a DEBUG build and NAMES its source files, so the\n"
               "order below is a reconstruction of something the module already\n"
               "states. The %d file(s) it names, in the order it names them:\n"
-              % len(named))
+              % len(named or sorted({e.truth for e in entities if e.truth})))
+        for path in named or sorted({e.truth for e in entities if e.truth}):
+            print("   %s" % path)
+        print()
+    elif named:
+        print("A scan of this module's strings found %d name(s) that look like\n"
+              "source files. A DEBUG build records one per function and this\n"
+              "module records none, so these are string literals -- a game that\n"
+              "generates part of its own source carries them. A lead, not a\n"
+              "file list:\n" % len(named))
         for path in named:
             print("   %s" % path)
         print()
