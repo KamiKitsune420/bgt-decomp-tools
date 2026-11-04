@@ -1779,6 +1779,13 @@ class FuncDecompiler:
             if pattern is not None:
                 self.sparse_switches[index] = pattern
         self.stored_const_types = self._stored_constant_types()
+        #: instruction index of a dropped list factory -> (member, buffer).
+        #: Keyed by INDEX because one buffer slot serves every member list in
+        #: a constructor, so the only moment it holds a given member's list is
+        #: while the simulation is stepping over that call.
+        self.member_list_slots: dict[int, tuple[str, int]] = {}
+        #: member name -> the braced list, snapshotted at that moment.
+        self.member_list_text: dict[str, str] = {}
         self.generated_member_init = self._generated_member_initialisers()
         for index, (_, cases, default, join, _) in self.sparse_switches.items():
             first_case = min([target for _, target in cases] + [default])
@@ -1922,6 +1929,21 @@ class FuncDecompiler:
         instructions. What settles it is the member being declared *by value*:
         then no source statement can produce this, and the prologue is the
         only explanation.
+
+        **A member declared with an initialiser list is the same idiom with a
+        list factory in front of it**, and dropping the span drops the list:
+
+            AllocMem 7 ; SetListSize 7 0 5 ; <five elements written>
+            PshVPtr 7 ; CALL factstub ; STOREOBJ 8
+            PshVPtr 8 ; PshVPtr 0 ; ADDSi dogbot::text1 ; REFCPY ; FREE 8
+
+        `string[] text1 = {"is here", ...};` at class scope compiles to
+        exactly that, and the engine was asked rather than assumed: a member
+        initialiser list compiles cleanly and keeps its values. So the
+        elements belong on the declaration, where the array length and a
+        by-value member's constructor arguments already go -- and the buffer
+        slot is recorded here, because this is the one place that knows which
+        member the dropped store was for.
         """
         out: set[int] = set()
         if self.fn.object_type is None:
@@ -1944,6 +1966,19 @@ class FuncDecompiler:
             if dt is None or dt.is_object_handle:
                 continue                                  # a real assignment
             out.update(range(k, k + 1 + len(shape)))
+            # A list factory takes the buffer by reference, where the length
+            # factory takes a `uint` by value -- which is what tells the two
+            # apart, and the length already survives on the declaration.
+            ref = self.instrs[k].func_ref
+            params = list(getattr(ref, "param_types", None) or ())
+            if not params or (params[0].obj_type is None
+                              and not params[0].is_reference):
+                continue
+            if k and self.instrs[k - 1].name == "PshVPtr":
+                name = (self.instrs[k + 4].prop_name or "").split(".")[-1]
+                if name:
+                    self.member_list_slots[k] = (
+                        name, _s16(self.instrs[k - 1].w_arg))
         return out
 
     def name_of(self, off: int) -> str:
@@ -2580,6 +2615,10 @@ class FuncDecompiler:
         self.skip_indexes.update(self.merged_switch_guards)
         while self.k < n:
             if self.k in self.skip_indexes:
+                # A dropped list factory: the buffer holds this member's
+                # list now and another member's a few instructions later.
+                if self.k in self.member_list_slots:
+                    self._snapshot_member_list(self.k)
                 self.k += 1
                 continue
             ins = self.instrs[self.k]
@@ -4317,6 +4356,71 @@ class FuncDecompiler:
     PAIR_LISTS = ("dictionary", "name_value_collection",
                   "internet_message_header", "http_request", "http_response")
 
+    def _snapshot_member_list(self, k: int) -> None:
+        """Take the member list the buffer holds at instruction `k`.
+
+        Called as the simulation steps over the dropped factory call, which
+        is the only moment the buffer slot holds this member's elements: the
+        next member's `AllocMem` resets them. `player` declares four member
+        lists through one slot and read after the run all four came out with
+        the last one -- `wepclass`, whose elements are `melee`,
+        `short-range` and `long-range`, got a list of chat lines. No count
+        can see that; the line totals are identical either way.
+        """
+        owner = self.fn.object_type
+        if owner is None:
+            return
+        name, off = self.member_list_slots[k]
+        dt = self.property_types.get(f"{owner.name}.{name}")
+        if dt is None:
+            return
+        text = self.list_text(off, dt)
+        if text is not None:
+            self.member_list_text[name] = text
+
+    def member_lists(self) -> dict[str, str]:
+        """Each member whose dropped initialiser list this body accounted for.
+
+        Only meaningful after `run()` -- the snapshots are taken during it.
+        """
+        return dict(self.member_list_text)
+
+    def list_text(self, off: int, ret) -> str | None:
+        """The buffer in slot `off` as the braced list source writes.
+
+        Split out of `_list_literal` because a **member**'s initialiser list
+        needs the same list and cannot use the same rendering: its store is
+        dropped as generated code, so the list belongs on the property
+        declaration rather than in a statement. Two callers, one reading of
+        the list protocol and one formatter -- the alternative was a second
+        static reader of `AllocMem`/`SetListSize`/`PshListElmnt`, and two
+        models of one format drift.
+
+        **Completely accounted for is the whole check**: the number of element
+        writes seen must equal the size `SetListSize` declared, so a partially
+        understood buffer renders as nothing rather than as a shorter list. A
+        list that is silently one element short is worse than one that is
+        empty.
+        """
+        if ret is None or ret.obj_type is None:
+            return None
+        if ret.obj_type.name not in ("array",) + self.PAIR_LISTS:
+            return None
+        values = self.list_values.get(off, {})
+        size = self.list_sizes.get(off, -1)
+        dictionary = ret.obj_type.name in self.PAIR_LISTS
+        if size < 0 or len(values) != size * (2 if dictionary else 1):
+            return None
+        subtype = (ret.template_subtypes[0]
+                   if ret.obj_type.name == "array" and ret.template_subtypes
+                   else None)
+        items = [self._normalize_arg(values[i], subtype).text if subtype
+                 else values[i].text for i in sorted(values)]
+        if dictionary:
+            items = ["{" + items[i] + ", " + items[i + 1] + "}"
+                     for i in range(0, len(items), 2)]
+        return "{" + ", ".join(items) + "}"
+
     def _list_literal(self, ret, arg: Atom, pos: int) -> str | None:
         """The initialiser list a list factory was handed, as a declared local.
 
@@ -4340,8 +4444,6 @@ class FuncDecompiler:
         """
         if ret is None or ret.obj_type is None:
             return None
-        if ret.obj_type.name not in ("array",) + self.PAIR_LISTS:
-            return None
         # The argument is the buffer slot. It arrives named where the
         # simulation gave the slot a name and as a bare pointer where it
         # did not, so match on either.
@@ -4351,19 +4453,9 @@ class FuncDecompiler:
             off = arg.offset
         if off is None:
             return None
-        values = self.list_values.get(off, {})
-        size = self.list_sizes.get(off, -1)
-        dictionary = ret.obj_type.name in self.PAIR_LISTS
-        if size < 0 or len(values) != size * (2 if dictionary else 1):
+        text = self.list_text(off, ret)
+        if text is None:
             return None
-        subtype = (ret.template_subtypes[0]
-                   if ret.obj_type.name == "array" and ret.template_subtypes
-                   else None)
-        items = [self._normalize_arg(values[i], subtype).text if subtype
-                 else values[i].text for i in sorted(values)]
-        if dictionary:
-            items = ["{" + items[i] + ", " + items[i + 1] + "}"
-                     for i in range(0, len(items), 2)]
         # **An element that names a frame slot is refused, not emitted.**
         # The declaration is hoisted to the top of the body, so a slot
         # name in it reads a value the slot does not hold yet -- and the
@@ -4373,7 +4465,7 @@ class FuncDecompiler:
         # a list that does not compile is worse than one that is empty.
         tname = ret.format().removeprefix("const ").rstrip("@&").strip()
         local = f"__nvgt_list_{off}_{pos}"
-        self._stmt(f"{tname} {local} = " + "{" + ", ".join(items) + "};")
+        self._stmt(f"{tname} {local} = {text};")
         return local
 
     def _normalize_arg(self, atom: Atom, dt: DataType) -> Atom:
@@ -7385,6 +7477,11 @@ class ModuleDecompiler:
         self.m = module
         self.comments = comments
         self.lines: list[str] = []
+        #: (class, member) -> the initialiser list its declaration carries.
+        #: Filled while a constructor is decompiled and read when the
+        #: property declarations are written, which is why `_render_class`
+        #: decompiles the constructors into a buffer first.
+        self.member_lists: dict[tuple[str, str], str] = {}
 
     def emit(self, s: str = "") -> None:
         self.lines.append(s)
@@ -7470,6 +7567,22 @@ class ModuleDecompiler:
             if f.parent_class is c:
                 self.emit("    " + funcdef_declaration(f))
         sizes = _member_array_sizes(c)
+        # **The constructors are decompiled first, into a buffer.** A member
+        # declared with an initialiser list is built in the constructor's
+        # prologue and its store is dropped as generated code, so the list
+        # survives only on the declaration -- and only the simulation knows
+        # the elements. Buffering is what lets the declaration be written
+        # after the body that found them, without decompiling twice.
+        constructors: list[tuple[str, list[str]]] = []
+        seen_ctors: set[str] = set()
+        for f in c.constructors:
+            key = f.signature(False)
+            if key in seen_ctors:
+                continue
+            seen_ctors.add(key)
+            pnames = [name for _, name in _parameter_layout(f)]
+            constructors.append(("    " + function_signature(f, pnames) + " {",
+                                 list(self._body(f, 2))))
         for pname, dt, flags in c.properties:
             if flags & 4:
                 continue  # inherited properties are declared by the base
@@ -7486,18 +7599,20 @@ class ModuleDecompiler:
             # said only "Failed to initialize global variable 'recorder'".
             length = sizes.get(pname)
             suffix = f"({length})" if length is not None else ""
-            self.emit(f"    {visibility}{decl} {pname}{suffix};")
+            # A member initialiser list, which BGT accepts at class scope --
+            # asked of the engine before this was emitted. Without it
+            # `string[] text1;` stands alone and every read of it is an
+            # empty array: Build to Survive's server threw
+            # `Index out of bounds` the moment a player joined.
+            items = self.member_lists.get((c.name, pname))
+            initialiser = f" = {items}" if items and not suffix else ""
+            self.emit(
+                f"    {visibility}{decl} {pname}{suffix}{initialiser};")
         if c.properties:
             self.emit()
-        seen_ctors: set[str] = set()
-        for f in c.constructors:
-            key = f.signature(False)
-            if key in seen_ctors:
-                continue
-            seen_ctors.add(key)
-            pnames = [name for _, name in _parameter_layout(f)]
-            self.emit("    " + function_signature(f, pnames) + " {")
-            for line in self._body(f, 2):
+        for header, body in constructors:
+            self.emit(header)
+            for line in body:
                 self.emit(line)
             self.emit("    }")
             self.emit()
@@ -7685,6 +7800,12 @@ class ModuleDecompiler:
                         text = "%s = %s%s" % (name, bare, text[len(name):])
                     event.data = ("", "" if text == name + ";" else prefix + text)
             ev = [e for e in ev if e.kind != "stmt" or e.data != ("", "")]
+            # A member's initialiser list is built here and its store is
+            # dropped, so the elements have to reach the property
+            # declaration. This is the only point that has both.
+            if f.object_type is not None:
+                for member, text in fd.member_lists().items():
+                    self.member_lists[(f.object_type.name, member)] = text
             scopes = _recover_plain_scopes(ev, f, self.m.classes)
             st = Structurer(ev, f, scopes)
             body = _use_compound_assignment(declarations + st.render(indent))

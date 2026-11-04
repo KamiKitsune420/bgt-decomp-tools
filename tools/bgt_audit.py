@@ -284,6 +284,52 @@ def body_label(found: Sequence[Tuple[str, str, int, int]], name: str,
     return "%s%s::%s" % (prefix, owner[1], name)
 
 
+def _owner_class(found: Sequence[Tuple[str, str, int, int]],
+                 head: int) -> Optional[Tuple[str, str, int, int]]:
+    """The innermost class whose braces hold `head`, or None."""
+    classes = [s for s in found if s[0] == "class" and s[2] < head < s[3]]
+    return max(classes, key=lambda s: s[2]) if classes else None
+
+
+def declaration_spans(scrubbed: str, start: int,
+                      end: int) -> List[Tuple[int, int]]:
+    """Byte ranges of a class body's own top-level `;` statements.
+
+    Its property declarations, in other words -- a nested `{...}` is skipped
+    whole, so no method body and no signature is included. **Only
+    declarations**, deliberately: this text is added to what a constructor is
+    audited against, and every character added is one more chance for a lost
+    value to find a match somewhere and go unreported. A method's body would
+    be exactly that.
+    """
+    spans: List[Tuple[int, int]] = []
+    i = statement = start + 1
+    while i < end:
+        if scrubbed[i] == "{":
+            closing = _matching(scrubbed, i, "{}")
+            if closing is None:
+                break
+            i = closing + 1
+            # An initialiser's braces are part of the declaration they
+            # belong to -- `string[] text1 = {"a", "b"};` -- and a block's
+            # are not. What separates them is the next thing along: an
+            # initialiser is followed by `;` or `,`, a block by the next
+            # member. Restarting the statement either way threw away
+            # exactly the declarations this is here to reach.
+            after = i
+            while after < end and scrubbed[after].isspace():
+                after += 1
+            if after >= end or scrubbed[after] not in ";,":
+                statement = i
+            continue
+        if scrubbed[i] == ";":
+            spans.append((statement, i + 1))
+            i = statement = i + 1
+            continue
+        i += 1
+    return spans
+
+
 def text_bodies(project: str) -> Dict[str, List[Body]]:
     """Every function body in the project's `.bgt` files, by `owner::name`.
 
@@ -310,9 +356,25 @@ def text_bodies(project: str) -> Dict[str, List[Body]]:
             found = scopes(scrubbed)
             for fname, head, start, end in function_heads(scrubbed):
                 label = body_label(found, fname, head)
+                body_raw = raw[start:end + 1]
+                body_scrubbed = scrubbed[start:end + 1]
+                # **A constructor also carries its class's declarations.**
+                # A member declared with an initialiser -- a length, a
+                # constructor argument, an initialiser list -- is built by
+                # the constructor's generated prologue, so the bytecode
+                # attributes those values to the constructor while source
+                # writes them on the declaration. Audited against the braces
+                # alone, every one of them reads as lost: Build to Survive's
+                # server reported 59 string literals missing from three
+                # bodies that hold every one of them.
+                owner = _owner_class(found, head)
+                if owner is not None and fname == owner[1]:
+                    spans = declaration_spans(scrubbed, owner[2], owner[3])
+                    body_raw += "".join(raw[a:b] for a, b in spans)
+                    body_scrubbed += "".join(scrubbed[a:b] for a, b in spans)
                 out[label].append(Body(
                     fname, label, path, relpath, raw.count("\n", 0, head) + 1,
-                    raw[start:end + 1], scrubbed[start:end + 1], stock))
+                    body_raw, body_scrubbed, stock))
     return out
 
 

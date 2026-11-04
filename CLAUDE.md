@@ -5558,6 +5558,113 @@ screen of whoever was at the machine -- the same lesson this file records for
 answer "did we lose a literal?" without launching anything, and they are the
 cheaper place to ask.
 
+### ...and the same list on a MEMBER, which no title in the corpus had
+
+The section above recovers an initialiser list bound to a local or a
+global. A **member** declared with one is the same protocol feeding a
+different store, and that store is dropped:
+
+```
+AllocMem 7 ; SetListSize 7 0 5 ; <five elements written>
+PshVPtr 7 ; CALL factstub ; STOREOBJ 8
+PshVPtr 8 ; PshVPtr 0 ; ADDSi dogbot::text1 ; REFCPY ; PopPtr ; FREE 8
+```
+
+The tail of that is the eight-instruction idiom this file already records as
+**a constructor's generated member initialisation**, dropped because no
+source statement produces it -- and the list went with it, so
+`string[] text1 = {"is here", ...};` came out as `string[] text1;`.
+
+**Nothing reports an empty array**, which this file says of the local case
+and which is worse here, because these are read by index. Build to Survive's
+server does
+
+```
+onmsg = text1[random(0, (text1.length() - 1))];
+```
+
+in three classes, so a recovered server threw `Index out of bounds` the
+moment a player, a dogbot or an update bot spawned -- a game that compiles,
+starts, and dies on the first connection.
+
+**The declaration is where it goes**, which is where the array length and a
+by-value member's constructor arguments already go, and the engine was asked
+rather than assumed: `string[] a = {...};` and `int[] n = {...};` at class
+scope compile cleanly and keep their values.
+
+| | |
+|---|---|
+| members affected | **7**, all in one title |
+| swept across | 9 artefacts -- Super Egg Hunt, Battle of the Hunter, Field Wars, The Gate, Manamon 1, both Air Puck halves, both Build to Survive halves |
+| anywhere else | **0** |
+
+#### One buffer slot serves them all, so the list is taken AT the call
+
+The first version read the buffer after the simulation had run, and that is
+wrong for any class with more than one such member: the compiler reuses one
+buffer slot, `AllocMem` resets its elements and `SetListSize` overwrites its
+size, so afterwards the slot holds only the **last** list. `player` declares
+four, and all four came out with it -- `wepclass`, whose three elements are
+`melee`, `short-range` and `long-range`, got a list of chat lines.
+
+That is worse than the empty array it was fixing, and **no count could see
+it**: the line totals, the goto count, the split check and the call count are
+identical either way, because a list lives on a line that already existed.
+The tree diff is what caught it, which is this file's own rule arriving on
+its own change -- the diff is the measurement and the counts are the summary.
+
+So the record is keyed by the dropped call's **instruction index**, and the
+snapshot is taken as the simulation steps over it, which is the one moment
+the buffer holds that member's list.
+
+#### ...and the audit could not see its own subject
+
+`bgt audit` pairs a body against the recovered text of that body, and a
+member initialiser lands on the **declaration** -- outside the
+constructor's braces, while the bytecode attributes its values to the
+constructor, because that is where the compiler builds them. So the audit
+reported **59 string literals missing from three bodies**, identically
+before the fix and after it.
+
+A constructor is audited against its class's top-level declarations as well
+now. **Only the declarations**, deliberately: every character added is one
+more chance for a lost value to find a match and go unreported, which a
+method body would be. And a declaration can hold braces -- `string[] text1 =
+{"a", "b"};` is exactly the shape at issue -- so an initialiser's `{...}` is
+told from a block's by what follows the closing brace, `;` or `,` against the
+next member. The first version skipped both as blocks and threw away the one
+thing it was written to reach; its own test caught that.
+
+| | before the fix | after |
+|---|---|---|
+| the audit on the old recovery | 59 literals, 3 bodies | 59 -- it still reports the real defect |
+| the audit on the new one | -- | **0 literals, 0 constants** |
+
+#### What it cost
+
+| title | lines | goto | split | calls read back | .bgt files differing |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,239 | 0 | verified | 1,623 | **0 of 14** |
+| Battle of the Hunter | 4,269 | 0 | verified | 1,334 | **0 of 13** |
+| Field Wars | 7,942 | 0 | verified | 3,005 | **0 of 34** |
+| The Gate | 34,031 | 0 | verified | 8,681 | **0 of 178** |
+| Build to Survive client | 13,015 | 0 | verified | 4,718 | **0 of 47** |
+| Build to Survive admin_maker | 99 | 0 | verified | 25 | **0 of 2** |
+| Build to Survive server | 27,211 | 0 | verified | 6,520 | **3 of 38** |
+
+**288 files byte-identical across six titles**, and the seventh differs in
+exactly the three files that hold the seven lists -- with its line count,
+goto count, split check and call count all unmoved, because a list is
+rendered onto a declaration that was already there. `bgt signatures` is
+identical before and after on every title.
+
+Manamon 1 and the two Air Puck halves were not re-measured: that run was
+stopped by the host for system memory, which this file records happening
+four times now. They cannot differ, and the sweep above is why rather than
+an argument -- it found **0** members of this shape in either, so
+`member_list_slots` is empty, the snapshot never runs and the property
+emission is the byte-for-byte same.
+
 ### What the audits leave, and what they cleared
 
 What is left on Paladin after the fix is one lost literal pair, and it is not
@@ -11873,7 +11980,7 @@ Two things worth keeping, and the second is the one that generalises:
   a *problem* in `recovery.json` rather than a statistic -- and the
   suite pins that no field name this file reads is absent from `Atom`.
 
-# A debug build keeps the names, and SIX shipped games are
+# A debug build keeps the names, and NINE shipped games are
 
 This file says in two places that a game's own file names and its local
 variable names are "stripped and unrecoverable", on the grounds that
@@ -11884,10 +11991,18 @@ of `-c`**, and the installer registers both: `compile_release` passes
 **And it is not a quirk of one title.** Screaming Strike was the first found;
 Antony, Grodan Gun and Ljudfarmen are all `noDebugInfo = 0` as well, which is
 BGT's own author shipping his own games from the debug build, and **Air Puck
-2PE ships both its client and its server that way**. So six of the corpus's
+2PE ships both its client and its server that way**. **Build to Survive adds
+three more** -- its client, its server and its `admin_maker`, all stock BGT
+1.3 and all `-c`, by the same author as Air Puck. So nine of the corpus's
 titles carry local names, and three of them are the only samples here of the
 2011 and 2012 engines -- see **The 2011 module is a third reader generation**
 below, which is what has to be read before any of that can be used.
+
+**Nine is also the point at which this stops being a curiosity.** Two of
+the last three titles to arrive were debug builds, which is the opposite
+way round from what this file assumed for most of its life -- that a
+shipped game is a release build and the names are gone. For this author's
+games they are not.
 
 **Air Puck is the one that pays**, because it is the engine this whole
 document is written against: stock BGT 1.3, so the release half of every
