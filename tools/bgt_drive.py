@@ -79,7 +79,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 try:                      # installed as a package
@@ -244,6 +246,46 @@ def read_results(path: str) -> List[Dict[str, str]]:
     return [dict(zip(head, line.split("\t"))) for line in lines[1:]]
 
 
+def _run_built(executable, project, results, timeout):
+    """Start the built probe and wait for its table. Returns an outcome.
+
+    The probe writes its rows and exits, so there is nothing to read from the
+    process: the file appearing is the signal. It is given the project as its
+    working directory, because the script asks the engine for its pack by a
+    relative name.
+
+    The process is killed if it outlives the deadline. That is not a failure
+    on its own -- a probe whose watched expression opens a window waits on it
+    -- so the rows are read either way and the caller reports what it got.
+    """
+    if not os.path.isfile(executable):
+        return "nobuild"
+    deadline = time.monotonic() + max(timeout, 5.0)
+    try:
+        proc = subprocess.Popen([executable], cwd=project,
+                                stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        print("note: could not start %s: %s" % (executable, exc))
+        return "nodriver"
+    try:
+        while time.monotonic() < deadline:
+            if os.path.isfile(results):
+                # written in one go, but give the write a moment to land
+                time.sleep(0.2)
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            proc.wait()
+    return "started" if os.path.isfile(results) else "timeout"
+
+
 def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
           hold: Sequence[str] = (), setup: Sequence[str] = (),
           duration: int = 1000, every: int = 100, tick: int = 5,
@@ -288,7 +330,20 @@ def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
             os.remove(results)
         report = bgt_compile.check(probe, compiler=compiler, timeout=timeout,
                                    build=build, workdir=project)
-        return {"probe": probe, "outcome": report.outcome,
+        outcome = report.outcome
+        if build and report.ok:
+            #: **And then run it.** `check(build=...)` compiles and verifies
+            #: the executable exists; it does not start it, so every
+            #: `--build` run came back `compiled` with no rows -- the one
+            #: mode whose whole purpose is a question a script run cannot
+            #: answer. Crazy Party is why it matters: `g_test` is
+            #: `!get_SCRIPT_COMPILED()` and its sound loading is behind the
+            #: same test, so run from source it opens no pack and announces
+            #: 223 missing bot sounds, and `--build release` was the only
+            #: way to ask it anything and silently asked nothing.
+            outcome = _run_built(produced, project, results, timeout) \
+                or outcome
+        return {"probe": probe, "outcome": outcome,
                 "errors": [d.message for d in report.errors],
                 "raw": (report.raw or "").strip(),
                 "rows": read_results(results),

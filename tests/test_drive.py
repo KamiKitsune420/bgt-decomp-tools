@@ -317,3 +317,42 @@ def _ok():
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def test_build_mode_runs_what_it_built():
+    """`--build release` has to START the executable, not just produce it.
+
+    `bgt_compile.check(build=...)` compiles and then confirms the file
+    exists; it never launched it, so every `--build` run came back
+    `compiled` with an empty table -- the one mode whose whole purpose is a
+    question a script run cannot answer, silently answering nothing. Its own
+    help said "build and run an executable".
+
+    Crazy Party is why it matters. `g_test` is `!get_SCRIPT_COMPILED()` and
+    the game's sound loading sits behind the same test, so run from source it
+    opens no pack and announces 223 missing bot sounds -- and `--build
+    release` was the only way to ask it anything.
+
+    Checked on the source, because the behaviour needs the engine: drive has
+    to own the launch, and it has to wait for the probe's table rather than
+    for the process.
+    """
+    import inspect
+
+    source = inspect.getsource(bgt_drive)
+    assert "def _run_built(" in source, (
+        "drive has to start the executable itself: check() only builds it")
+    body = inspect.getsource(bgt_drive._run_built)
+    assert "subprocess.Popen" in body
+    assert "cwd=project" in body, (
+        "the script asks the engine for its pack by a relative name, so the "
+        "project has to be the working directory")
+    assert "os.path.isfile(results)" in body, (
+        "the probe writes its table and exits, so the file appearing is the "
+        "signal -- not the process ending")
+    assert "proc.kill()" in body, (
+        "a probe whose watched expression draws a window waits on it")
+    # ...and `drive` actually calls it, only in build mode
+    drive_src = inspect.getsource(bgt_drive.drive)
+    assert "_run_built(" in drive_src
+    assert "if build and report.ok:" in drive_src

@@ -1079,9 +1079,55 @@ def _written_arguments(code, call_at: int, count: int):
         elif ins.name == "PshG4" and getattr(ins, "global_name", None):
             args.append(ins.global_name)
         else:
-            return None
+            read = _global_accessor_before(code, at)
+            if read is None:
+                return None
+            args.append(read)
         at -= 1
     return args
+
+
+def _global_accessor_before(code, at: int):
+    """`texteStatut.get_length()`, where a member's length is computed.
+
+    A member sized from a constant is `PshC4 8 ; CALL factstub`, which the
+    rule above reads. One sized from a global's own length is
+
+        PshGPtr texteStatut ; CHKREF ; CALLSYS array<T>::get_length
+        CpyRtoV4 3 ; PshV4 3 ; CALL factstub
+
+    and refusing it lost the size altogether -- so `int[] modNivStatut;` came
+    out length 0 and `modNivStatut[0] = x` threw `Index out of bounds` the
+    first time a card was built, which is a recovered Crazy Party failing
+    during startup.
+
+    Deliberately this narrow: the receiver must be a *named global* and the
+    call must take no arguments, so there is nothing to evaluate and nothing
+    to get wrong about order. Anything else still returns None.
+    """
+    if at < 3:
+        return None
+    push = code[at]
+    if push.name not in ("PshV4", "PshV8"):
+        return None
+    slot = push.w_arg
+    capture = code[at - 1]
+    if capture.name not in ("CpyRtoV4", "CpyRtoV8") or capture.w_arg != slot:
+        return None
+    call = code[at - 2]
+    if call.name not in ("CALLSYS", "CALL", "CALLINTF") or call.func_ref is None:
+        return None
+    if call.func_ref.param_types:
+        return None
+    walk = at - 3
+    while walk >= 0 and code[walk].name in ("CHKREF", "GETOBJREF", "GETREF"):
+        walk -= 1
+    if walk < 0:
+        return None
+    recv = code[walk]
+    if recv.name not in ("PshGPtr", "LDG") or not getattr(recv, "global_name", None):
+        return None
+    return "%s.%s()" % (recv.global_name, call.func_ref.name)
 
 def _member_array_sizes(c: TypeInfo) -> dict:
     """What a member's declaration has to carry because its store is dropped.
@@ -1136,8 +1182,23 @@ def _member_array_sizes(c: TypeInfo) -> dict:
             name = (code[k + 4].prop_name or "").split(".")[-1]
             if not name:
                 continue
-            out.setdefault(name, str(_s32(previous.dw_arg))
-                           if previous.name == "PshC4" else None)
+            if previous.name == "PshC4":
+                length = str(_s32(previous.dw_arg))
+            else:
+                #: A length that is NOT a literal.  Giving up here loses the
+                #: size altogether, and a member array of length 0 is not a
+                #: smaller mistake than a wrong one: Crazy Party's
+                #:
+                #:     int[] modNivStatut(texteStatut.length());
+                #:
+                #: came out `int[] modNivStatut;`, so `modNivStatut[0] = x`
+                #: threw `Index out of bounds` on the first card the game
+                #: built -- a recovery that compiled cleanly and died during
+                #: startup.  A no-argument call on a named global is the one
+                #: computed form worth reading: there is nothing to evaluate,
+                #: so there is no order to get wrong.
+                length = _global_accessor_before(code, k - 1)
+            out.setdefault(name, length)
             if out[name] is None:
                 del out[name]
 

@@ -2154,6 +2154,88 @@ without it, which is the whole defect in one value -- 55/55 against 54/55.
 None of the previous 53 shapes reached it, because none of them reused the
 out slot for an earlier return.
 
+#### A member array's length may be COMPUTED, and giving up loses it
+
+`_member_array_sizes` carries a length that has nowhere else to live: the
+store that applies it is generated prologue and is dropped, so the
+declaration is the only place it can go. It read a literal, and for anything
+else it recorded `None` and **deleted the entry** -- which does not leave the
+member alone, it leaves it *unsized*. A member array of length 0 is not a
+smaller mistake than a wrong length; it throws on first use.
+
+Crazy Party's `CarteCombat` has both shapes side by side, which is what makes
+the gap legible:
+
+```
+PshC4 8 ; CALL factstub ; ADDSi CarteCombat::modNivStat        -> int[] modNivStat(8)
+PshGPtr texteStatut ; CHKREF ; CALLSYS array<T>::get_length
+PshV4 ; CALL factstub ; ADDSi CarteCombat::modNivStatut        -> int[] modNivStatut;
+```
+
+The source is `int[] modNivStatut(texteStatut.length());`, and without the
+length `setModNivStatut` writes `modNivStatut[0]` into an empty array:
+**`Index out of bounds` on the first card the game builds**, from a recovery
+that compiled cleanly, passed every audit and read back 90,194 calls. It was
+found by somebody playing it.
+
+`_global_accessor_before` reads the one computed form worth reading -- a
+**no-argument call on a named global** -- because there is nothing to
+evaluate and so no evaluation order to get wrong. Anything else still
+returns None.
+
+**The first attempt at this fixed nothing, and the reason is worth keeping.**
+`_member_array_sizes` has two branches -- the array length and a by-value
+member's constructor argument -- and the widening went into
+`_written_arguments`, which only the second one uses. The array branch has
+its own gate, and it recognised the computed push *and then discarded it*. A
+re-recovery emitted the identical unsized declaration, and the fix was
+reported as working on the strength of a code change rather than a
+measurement. Ask the rule directly before believing it:
+
+```python
+decompile._member_array_sizes(c)   # {'modNivStat': '8',
+                                   #  'modNivStatut': 'texteStatut.get_length()'}
+```
+
+Swept across the project for the general failure -- a member declared as an
+unsized array, indexed at a fixed index, never resized -- six candidates and
+four of them correct: three `listeCombattant` filled by `insert_last`, and
+`JoueurTerrain::path`, assigned a whole array before it is indexed. The two
+`CarteCombat` members are the defect.
+
+### `bgt drive --build` never ran what it built
+
+Its own help says "build and run an executable ... where the answer could
+depend on `get_SCRIPT_COMPILED()`", and `bgt_compile.check(build=...)`
+compiles and then confirms the file exists -- it never starts it. So every
+`--build` run returned `compiled` with no rows: the one mode whose entire
+purpose is a question a script run cannot answer, answering nothing, in
+silence.
+
+**Crazy Party is the title that needs it**, and the cost was two symptoms
+nobody could check. `g_test` is `!get_SCRIPT_COMPILED()` and that game's
+sound loading sits behind the same test, so a source run opens no pack,
+every bot's sound lookup fails, and `dis` announces all 223 -- of which
+`screen_reader_speak` interrupts 222, so a player hears exactly one, the
+last. Both readings of that ("no sounds", "it says a creature name at me")
+look like recovery defects and are the author's own developer path.
+
+`_run_built` starts the executable with the project as its working
+directory -- the script asks the engine for its pack by a relative name --
+and waits for the probe's **table** rather than for the process, because the
+probe writes its rows and exits. A probe that outlives the deadline is
+killed, and the rows are read either way.
+
+One honest limit, found immediately: the probe disarms `main`, so a game that
+opens its pack there has not opened it. `existeSon` then reads an unopened
+pack and answers 0 under a compiled build, which looks exactly like the
+defect it was meant to disprove. Open the pack in `--setup`:
+
+```bash
+bgt drive recovered/ --build release --setup 'g_data.open("data.dat");' \
+          --watch 'existeSon("bot/leviathan")'       # 1, with g_test 0
+```
+
 ### ...and neither is its SIGNEDNESS, which the instruction set names
 
 The round trip's census, run again after the two fixes above, put a new
