@@ -43,6 +43,52 @@ Two environment notes that cost time if you hit them cold:
   load. And note the MCP servers are **GUI plugins** — they do nothing headless,
   where `-postScript` is the mechanism instead (which is what this tool uses).
 
+## When Ghidra is the wrong tool: capstone and a 150-line probe
+
+Two of this project's module generations were read **without Ghidra at all**,
+and both times for the same reason: the import died. A game executable is
+half encrypted overlay, so the string and switch analyzers grind through it
+for nothing -- importing the PE stub instead is the fix this document gives
+below -- and even then a 790 KB stub ran out of heap at the 4G that suffices
+for `bgt.exe`. The 2011 generation and the 2012-07 one were both read with
+capstone and a short probe, so it is worth writing down as a route rather
+than as a last resort.
+
+What makes it work is that **a record reader's call sequence IS the record
+layout**, in order, with no decompiler needed. Four tricks find the
+functions:
+
+* **A literal's address, searched little-endian.** A 32-bit build pushes a
+  string's address as an immediate, so computing the literal's VA from the
+  section table and searching the file for those four bytes gives every push
+  site. `_builtin_function_` is the anchor to use on a BGT runtime: the
+  reader recurses into `ReadFunctionSignature` when a value's object type is
+  that placeholder, so one of its push sites is inside the signature reader.
+* **`E8` plus a signed displacement** gives every caller of a known address,
+  which walks `ReadDataType` up to `ReadFunctionSignature` up to `ReadInner`.
+* **MSVC's `int3` padding** gives each function's bounds.
+* **Counting the calls to the encoded-integer reader, grouped by enclosing
+  function**, ranks the candidates: the record readers are the functions that
+  call it most.
+
+Two traps in the method itself, both of which cost time:
+
+* **`int3` bounds span two functions when they are adjacent.** A 4 KB
+  "function" holding a writer *and* a reader is the tell -- calls to
+  `ReadEncodedUInt` in the middle of something that had been writing. Read
+  the call sequence for what it is and look for the `ret`.
+* **Capstone mis-aligns if you start mid-function.** Disassemble from the
+  function's own entry and filter to the range you want, rather than seeding
+  the decoder at an interesting address.
+
+And one thing that is not a trap but decides the whole exercise: **ask the
+WRITER where you can.** `asCWriter` has no branching on what it just read,
+so its call sequence is the layout with nothing to interpret. The reader is
+the authority where the two generations differ by a *condition* rather than
+a field order -- a gated initialiser, a flag tested before an operand is
+translated -- and those are exactly the cases where the writer's zeros are
+ambiguous.
+
 ## Getting the binary loaded
 
 The GUI runs auto-analysis out of memory on a small machine. Run it headless with

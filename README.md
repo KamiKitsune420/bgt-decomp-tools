@@ -20,9 +20,12 @@ bgt recover game.exe -o recovered/ --compile
 
 That produces a whole project -- an entry script that `#include`s a tree of
 `.bgt` files (one class per file; library files under their real names), a ZIP,
-and a report -- and, with `--compile`, BGT's own compiler's verdict on it. The
-original file *names* of a game's own code are not recoverable, so the layout
-is generated and every file says so; what is recovered is the code.
+and a report -- and, with `--compile`, BGT's own compiler's verdict on it.
+
+Where the game was built with BGT's `-c`, the module records the file every
+function came from and the project comes out under those names. Where it was
+built with `-C`, which strips them, the layout is generated and every file
+says so. Either way what is recovered is the code.
 
 For the pseudo-source view of a single function or a whole module, the lifter
 is still there and is less machinery:
@@ -254,7 +257,8 @@ itself.
 | `bgt opcodes game.exe` | dump the engine's opcode table |
 | `bgt validate a.exe b.exe` | run the whole pipeline over several games |
 | `bgt libcheck module.bin game.exe` | score lifted code against BGT's own library source |
-| `bgt files module.bin game.exe` | which source files a stripped module was built from |
+| `bgt files module.bin game.exe` | which source files a module was built from -- named outright for a debug build |
+| `bgt early game.exe` | the 2010-2012 module format, which is a format rather than a dialect |
 | `bgt api NAME` | what the engine has: documented, and registered |
 | `bgt ghidra status \| install \| decompile` | set up and drive Ghidra |
 | **BGT: a project, and the checks on it** | |
@@ -285,12 +289,28 @@ itself.
 
 ## What you get, and what you don't
 
-**BGT** strips debug information at compile time. You get every function,
-class, property and enum **name**, every string literal, the full call graph,
-and control flow as `if` / `while` / `break`. You don't get local variable
-names, parameter names, line numbers or comments: locals read as `v3`,
-parameters as `a0`. So you can rebuild a game faithfully; you cannot recover
-its original text exactly.
+**It depends on which switch the author used**, and this README used to say
+otherwise. BGT's `-C` strips the debug information and its `-c` keeps it, and
+a shipped game can be either.
+
+From **any** BGT game you get every function, class, property and enum
+**name**, every string literal, the full call graph, and control flow as
+`if` / `while` / `break`.
+
+From a **release** build (`-C`) that is all: no local or parameter names, no
+line numbers, no comments. Locals read as `local_4` and parameters as `arg0`,
+and you name them from context.
+
+From a **debug** build (`-c`) the module also records the source file each
+function came from, every parameter name and every local name, and the
+recovery uses all three. Ten shipped games here are debug builds -- Air Puck's
+client and server, Build to Survive's three programs, Screaming Strike, and
+four of BlastBay's own early Swedish titles -- so this is not a rarity to be
+mentioned in passing.
+
+Comments, formatting and the original `#include` boundaries are gone in both
+cases, so you can rebuild a game faithfully; you cannot recover its text
+exactly.
 
 **NVGT** games compiled in debug mode keep source-section file names, local
 and parameter names and line numbers, and recovery uses them. Release builds
@@ -306,21 +326,25 @@ bgt validate mygame.exe            # BGT
 bgt nvgt recover mygame.exe -o check.zip --check-with nvgt.exe   # NVGT
 ```
 
-For BGT every stage prints `ok` or `FAIL`. All four titles this has been run
-against pass every stage:
+For BGT every stage prints `ok` or `FAIL`. Roughly twenty shipped titles
+have been run end to end, from a 2010 beta to a 2019 fork, and the current
+figures for each -- lines recovered, residual gotos, calls read back, and
+whether the recovery compiles and runs -- are kept in one table in
+[CLAUDE.md](CLAUDE.md) rather than duplicated here, because a number in two
+places is a number that goes stale in one of them.
 
-| | Psycho Strike | Paladin of the Sky | Manamon 2 | SBYW |
-|---|---|---|---|---|
-| dialect | tagged | tagged | len2 | tagged |
-| classes | 68 | 47 | 1,604 | 154 |
-| function bodies | 1,102 | 926 | 9,924 | 2,348 |
-| operands named | 100% | 100% | 100% | 100% |
-| rebuilds byte-for-byte | yes | yes | yes | yes |
-| bodies ending with an empty stack | 100% | 100% | 100% | 100% |
+BGT games share one engine, so a title that fails is more likely a BGT
+*version* this has not seen than a modified engine. There are four module
+generations rather than one:
 
-BGT games share one engine, so a title that fails is more likely a BGT *version*
-this has not seen than a modified engine. `bgt validate` shows which stage
-stops.
+| | what reads it |
+|---|---|
+| 2010 to 2012 | `bgt early` -- a different format, not a dialect |
+| one 2012-07 engine | `as_module`, with that generation's records as a profile |
+| BGT 1.3 and the VGStorm forks | `as_module` |
+| NVGT | the `nvgt/` half |
+
+`bgt identify` picks the half and `bgt validate` shows which stage stops.
 
 ---
 

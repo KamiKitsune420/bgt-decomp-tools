@@ -472,7 +472,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_unpack.py` | CLI: unpack one or more executables, report each layer, write bytecode |
 | `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
 | `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
-| `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF |
+| `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF; the records that move by engine RELEASE are named profiles (`RECORD_PROFILES`), tried verified-first so a module that already lands on EOF cannot be re-described |
 | `as_early.py` | `bgt early`: the 2010 to 2012 module format, which is a different format rather than a third dialect -- five engine releases, all five titles read end to end AND recover, and the debug ones name their own source files |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
 | `as_disasm.py` | readable disassembly — resolves calls, literals, globals and members to names, and labels jumps |
@@ -723,14 +723,27 @@ Two consequences:
   `3f`→63, `40 56`→86, `40 5b`→91, `40 81`→129, `40 a7`→167, `40 e7`→231. These are
   in `tests/test_toolkit.py`.
 
-## Hard limit on what is recoverable
+## Hard limit on what is recoverable -- IN A RELEASE BUILD
 
-BGT compiles with `noDebugInfo = 1`. **Line numbers, source filenames and local
-variable names are stripped and unrecoverable.** Function, class, property and enum
-names survive, as does every string literal.
+Function, class, property and enum names survive in every BGT game, as does
+every string literal. What else survives depends on **which switch the author
+used**, and this section stated the release answer as though it were the only
+one for most of this project's life.
 
-So a faithful re-implementation of a BGT game is achievable; a byte-identical one is
-not. Locals will read as `v3` and parameters as `a0`, and you name them from context.
+| built with | line numbers, source file names, local and parameter names |
+|---|---|
+| `-C`, release (`noDebugInfo = 1`) | **stripped and unrecoverable** |
+| `-c`, debug (`noDebugInfo = 0`) | **all of it, and the recovery uses it** |
+
+BGT's installer registers both, as `compile_release` and `compile_debug`, and
+**ten shipped titles here are debug builds** -- see **A debug build keeps the
+names** below, which also explains what had to change in this reader before
+any of it could be used.
+
+So for a release build a faithful re-implementation is achievable and a
+byte-identical one is not: locals read as `local_4` and parameters as `arg0`,
+and you name them from context. For a debug build the names are the author's
+own and the project comes out under the file names the module records.
 
 ## Extending the reader
 
@@ -2482,7 +2495,7 @@ for the `for` headers it now writes.
 
 | title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
-| Screaming Strike (2012-07 engine, **debug**) | 958 | 0 | 0 | yes | 346 | not asked |
+| Screaming Strike (2012-07 engine, **debug**) | 958 | 0 | 0 | yes | 346 | compiles cleanly -- not driven |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
@@ -11987,7 +12000,7 @@ Two things worth keeping, and the second is the one that generalises:
   a *problem* in `recovery.json` rather than a statistic -- and the
   suite pins that no field name this file reads is absent from `Atom`.
 
-# A debug build keeps the names, and NINE shipped games are
+# A debug build keeps the names, and TEN shipped games are
 
 This file says in two places that a game's own file names and its local
 variable names are "stripped and unrecoverable", on the grounds that
@@ -12000,12 +12013,19 @@ Antony, Grodan Gun and Ljudfarmen are all `noDebugInfo = 0` as well, which is
 BGT's own author shipping his own games from the debug build, and **Air Puck
 2PE ships both its client and its server that way**. **Build to Survive adds
 three more** -- its client, its server and its `admin_maker`, all stock BGT
-1.3 and all `-c`, by the same author as Air Puck. So nine of the corpus's
-titles carry local names, and three of them are the only samples here of the
-2011 and 2012 engines -- see **The 2011 module is a third reader generation**
-below, which is what has to be read before any of that can be used.
+1.3 and all `-c`, by the same author as Air Puck.
 
-**Nine is also the point at which this stops being a curiosity.** Two of
+**And this said NINE, leaving out Perilous Hearts**, which is one of the four
+early titles whose records name their source files -- sixteen of them, in the
+table under **Proven end to end, on two shipped titles**, where this file
+already records that four of those five are debug builds and only Palace
+Punch-up is not. So it is **ten**: Screaming Strike, Air Puck's client and
+server, Build to Survive's three, and Ljudfarmen, Grodan Gun, Perilous Hearts
+and Antony. Four of them are the only samples here of the 2011 and 2012
+engines -- see **The 2011 module is a third reader generation** below, which
+is what has to be read before any of that can be used.
+
+**Ten is also the point at which this stops being a curiosity.** Two of
 the last three titles to arrive were debug builds, which is the opposite
 way round from what this file assumed for most of its life -- that a
 shipped game is a release build and the names are gone. For this author's
@@ -12871,7 +12891,14 @@ declares it.
 |---|---|---|
 | `bgt audit` literals | 19 values in 6 bodies | **0 in 0** |
 | `null` arguments in the text | 25 | **0** |
-| the compiler | 22 errors | **not re-asked** -- the 22 came from somebody running it on their own machine, and asking again spends a modal dialog on somebody's screen, so the standings still say `not asked` for this title |
+| the compiler | 22 errors | **compiled cleanly** |
+
+The 22 and the clean run both came from somebody compiling it on their own
+machine rather than from a check here, which is the only way this column ever
+gets filled in without spending a modal dialog on whoever is at the keyboard.
+So the title compiles, and the standings still say what is true of the
+stronger claim: it has not been **driven**, and a compile-only check never
+runs a global initialiser.
 
 and the call that was `speak_interrupt(null)` now reads as the author wrote
 it:
