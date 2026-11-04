@@ -2482,15 +2482,18 @@ for the `for` headers it now writes.
 
 | title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
-| Antony (2012-02) | 2,874 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
+| Screaming Strike (2012-07 engine, **debug**) | 927 | 0 | 0 | yes | 346 | not asked |
+| Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
-| Grodan Gun (2011-09) | 3,208 | 0 | 0 | yes | 734 | not asked |
-| Palace Punch-up (2010 beta) | 3,214 | 0 | 0 | yes | 823 | not asked |
+| Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
+| Palace Punch-up (2010 beta) | 3,200 | 0 | 0 | yes | 823 | not asked |
 | Air Puck server (**debug**) | 3,717 | 0 | 0 | yes | 995 | **yes** |
 | constant velocity | 3,805 | 0 | 0 | yes | 1,767 | **yes** |
 | Battle of the Hunter | 4,269 | 0 | 0 | yes | 1,334 | **yes** |
 | Super Egg Hunt | 5,239 | 0 | 0 | yes | 1,623 | **yes** |
 | Air Puck client (**debug**) | 5,650 | 0 | 0 | yes | 1,783 | **yes** |
+| Build to Survive client (**debug**) | 13,014 | 0 | 0 | yes | 4,718 | **yes** |
+| Build to Survive server (**debug**) | 21,194 | 0 | 0 | yes | 6,576 | **yes** |
 | Field Wars | 7,942 | 0 | 0 | yes | 3,005 | **yes** |
 | cs client | 7,963 | 0 | 0 | yes | 2,858 | **yes** |
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
@@ -10043,10 +10046,14 @@ for a slot that really does carry 163 temporaries. The tell was the flag
 reporting 4 and 4 when the right answer is 1.
 
 **It went in as analysis only and is spent now** -- see below, where
-`is_named_here` asks it per web. A body over `WEB_ANALYSIS_LIMIT` declines
-rather than spending a fixpoint on Crazy Party's 1,074,460-instruction
-generated function, and declining means no split, which is the conservative
-answer and what this file did everywhere before.
+`is_named_here` asks it per web. A slot whose fixpoint would cost more than
+`WEB_ANALYSIS_BUDGET` declines, and declining means no split, which is the
+conservative answer and what this file did everywhere before.
+
+**That used to be a limit on the body's SIZE, and its reason was false** --
+see **The webs limit was guarding against something that cannot happen**,
+where Crazy Party's 1,074,460-instruction `ajouteLangue`, the body it named,
+turns out to write no frame slot at all.
 
 #### Attempt seven: `is_named`, asked of the VALUE
 
@@ -10137,7 +10144,7 @@ With those, `bgt oracle` is **52/52** and its `counter` is 13.
 
 `is_named_here(off)` answers for the web containing the current position
 and falls back to the whole-body answer wherever there is nothing to split
--- one web, a single write, or a body over `WEB_ANALYSIS_LIMIT` -- so
+-- one web, a single write, or a fixpoint over `WEB_ANALYSIS_BUDGET` -- so
 nothing moves for a slot that really is one variable.
 
 Which way each call site asks was audited rather than guessed, and the
@@ -12085,15 +12092,15 @@ EOF. What that leaves is one build rather than a format:
 |---|---|---|
 | **stock BGT 1.3**, both Air Puck halves | -- | **lands exactly on EOF** |
 | my 744-byte probe | 0x2D5 | `implausible count 33554433` |
-| `screamingStrike_en`, a 2013 build | 0x1A | `bad string tag 0x01` |
+| `screamingStrike_en`, a 2013 build | -- | **lands exactly on EOF** |
 
-Screaming Strike's remaining stop is **not the debug block** and the rest of
-this section says where it is: its 0x1A is inside the first GLOBAL PROPERTY's
-record, before any function, and this file's own reading is that the record
-holds one byte more there than the reader expects -- which the 2011
-generation's writer explains, since it gates a global's initialiser on a
-byte. That is a per-build field in a 2013 engine and wants its own reading;
-nothing below depends on it.
+**Screaming Strike's stop was at 0x1A and it is closed**, which supersedes
+what this section used to say about it. The reading written down here was
+right as far as it went -- the global-property record holds one byte more
+than 1.3's, and the 2011 generation's gate byte is what it is -- and the
+whole answer is larger: that build is 1.3's format with seven records from
+the generation before it, read out of its own `asCReader`. See
+**Screaming Strike is a FOURTH generation** below.
 
 The probe is the one to finish on, because its source is known: it reads
 both globals and both functions and stops near the end, so the remaining
@@ -12614,6 +12621,478 @@ every call, literal and constant the bytecode holds is in the text, in a
 different order. Only running the function and knowing the answer could
 see it, which is what `bgt drive` is for and what the standings' last
 column is about.
+
+## Screaming Strike is a FOURTH generation, and it splits a window in two
+
+`screamingStrike_en.exe` (Nyanchan) is the title this file has
+carried as "stops at 0x1A" for a long time, with the next step written down as
+*read `asCReader::ReadGlobalProperty` and `ReadDataType` out of this build*.
+Done, and the answer is better than the question: it is **1.3's format with
+seven records from the generation before it**, plus that generation's
+token numbering, so the two changes this file
+dates to the same window -- the encoded integer's sign flag and the
+`noDebugInfo` byte -- did **not** arrive together.
+
+**And the date that matters is the ENGINE's, not the game's.** The file
+shipped 2013-04-10 and its runtime's PE timestamp is **2012-07-24**, which
+is the build this file already lists at 394 registered names. A format
+change is the engine's, so what follows dates it to July 2012 -- this
+file's own rule that a build date says when *that copy* was compiled,
+applied to the half that is evidence.
+
+| | the early generation | **this engine, 2012-07** | BGT 1.3 |
+|---|---|---|---|
+| encoded integer | plain base-128 | **sign flag** | sign flag |
+| `noDebugInfo` byte | absent | **absent** | present |
+| `ReadDataType` | token first, two flag bytes | **the same** | zero first, one packed byte |
+| a global's initialiser | gated on a byte | **the same** | unconditional |
+| a template type-info | one subtype, no count | **the same** | a count |
+| `ReadFunctionSignature` | funcType as four raw bytes, namespace after the name | **1.3's: an encoded funcType, the namespace last** | as stated |
+| the body | its own order | **1.3's** | as stated |
+| the tail sections | its own order | **1.3's, section for section** | as stated |
+
+So the sign flag is in by **2012-07-24** and the `noDebugInfo` byte is not.
+That splits this file's "between 2012-02 and 2014-06" into two windows with
+a build between them: the sign flag arrived between **February and July
+2012**, and the `noDebugInfo` byte between **July 2012 and June 2014**.
+
+### How it was read, which is the method rather than the result
+
+Ghidra was not used. This build carries no `LoadByteCode` literal to anchor
+on, and this file already records the import dying on `OutOfMemoryError` at
+the heap that suffices for `bgt.exe`. What worked is the method the 2011
+generation was read with -- capstone and about 150 lines of probe, over the
+**PE stub** rather than the executable:
+
+- a literal's VA, searched little-endian, gives every push site, because a
+  32-bit build pushes a string's address as an immediate;
+- an `E8` displacement gives every caller of a known address;
+- MSVC's `int3` padding gives each function's bounds;
+- and the **call sequence** of a record reader is the record layout, in
+  order, with no decompiler needed.
+
+`_builtin_function_` at 0x49AD40 was the anchor, exactly as it was for the
+2011 runtime, because `ReadDataType` recurses into `ReadFunctionSignature`
+when a value's object type is that placeholder.
+
+| function | where | what settled it |
+|---|---|---|
+| `ReadEncodedUInt64` | `0x417010` | `and al,0x7f / 0x7e / 0x7c` and `shr bl,7` -- the modern ladder with the sign lifted out |
+| `ReadEncodedUInt` | `0x417540` | the 32-bit wrapper: the high dword must be 0 or -1, else the error flag at `+0xC` |
+| `ReadData(ptr,n)` | `0x416FE0` | fills its destination backwards, which is what makes the stream big-endian |
+| `ReadDataType` | `0x419AE0` | `test edi,edi / jne` -- a NON-zero lead takes the token branch |
+| `ReadTypeInfo` | `0x419E40` | `cmp al,0x61 / 0x73 / 0x6f`, and `'o'` reads two strings |
+| `ReadFunctionSignature` | `0x4197C0` | eleven calls in 1.3's order, with the namespace string last |
+| `ReadByteCode` | `0x417AA0` | seventeen `ReadEncodedUInt64` sites, one per operand |
+| `ReadFunction` | `0x41A8E0` | the one-byte read at `0x41AC1F`, between the line numbers and the variables |
+| `ReadGlobalProperty` | `0x41AEB0` | `call edx` for one byte, then `cmp byte [esp+0xf],0 / je` over the whole `ReadFunction` |
+| `ReadInner` | `0x41BBB0` | its first call is `eu64`, with no `ReadData` above it |
+| the five tail helpers | `0x41A2B0`, `0x41A720`, `0x41A3B0`, `0x4196A0`, `0x41A620` | each one's own call sequence: a DataType list, a byte-plus-signature, two strings plus a DataType plus a byte, one string, a type-info plus a string -- which is usedTypeIds, usedFunctions, usedGlobalProps, usedStringConstants, usedObjectProps, **1.3's order exactly** |
+
+**Two guesses were made from a call list and both were wrong**, and reading
+the instructions is what corrected them. `0x41A720` was taken for
+`usedObjectProps` because it calls `ReadTypeInfo`, and it is
+`usedFunctions`: the type-info is the owner inside a signature. And the
+traits byte was placed after the variables, as 1.3 does, until the
+one-byte read at `0x41AC1F` turned up between the line-number loop and the
+variable count.
+
+### A PROFILE, not eight more free fields
+
+`as_module` already trials four per-build fields against the exact-EOF
+landing. Adding eight more as free axes is how a wrong story gets fitted,
+which this file says of `as_early` -- and the day this was written it was
+demonstrated: adding ONE free field to that reader's product let a synthetic
+module with a spare byte land on EOF and two of its own tests caught it.
+
+So these are `RECORD_PROFILES`: one entry per engine release, tried in
+order, the verified one first and kept on a tie. A module that already
+lands cannot be re-described, and the 2013 entry is reached only by a module
+that does not.
+
+**And `detect` and `summarize` trial it in one place now.** They computed
+the best walk separately, and `detect`'s copy was pinned at
+`template_namespace=True` -- so a module whose landing needs `False` was
+reported as not landing by the half that chooses the dialect, and then
+landed in the half that reports it. Screaming Strike is exactly that module.
+Two places answering one question with one of them stricter, for the
+umpteenth time in this file; `_trial` is the one answer.
+
+### What it recovers
+
+| | |
+|---|---|
+| engine | 2012-07-24, 394 registered names |
+| module | 23,859 bytes, `tagged`, enum section at +1 |
+| tail | lands **exactly on EOF** at 0x5D33, 0 parse errors, 0 resyncs |
+| counts | 0 enums, 0 classes, 0 funcdefs, 51 globals, 21 functions, 72 bodies |
+| recovered | **927 lines, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced files, a verified split**, 346 calls read back |
+| swept | **all ten `bgt signatures` shapes at 0** |
+| named | the one source file it was built from, and the author's own locals |
+
+It is a **debug** build, so the project comes out under
+`screamingStrike_en.bgt` -- the name the module records -- and `main` opens:
+
+```
+void main()
+{
+    string version;
+    int i;
+    set_sound_decryption_key("scstse13013", true);
+    version = "1.03";
+    show_game_window((("Screaming strike version " + version) + ""));
+    sound intro;
+    intro.stream("data/sounds/ssIntro.dat");
+    intro.play();
+```
+
+-- with `version`, `intro`, `gameMode`, `itemloop`, `bgm` and `dead` the
+names the author typed, and the pack key in the clear where the script
+passes it.
+
+#### The token numbering is a per-release fact, so it lives in the profile
+
+The first recovery of it was 1,396 lines of nonsense in the right shape:
+every `void` function returned `uint64` and every `int` local was declared
+`tok68`. `eTokenType` moved twice between this AngelScript and the one the
+IR uses, and `bgt_asir` chose between the two shifts by asking whether the
+module had come through the *early reader* -- which this one does not. The
+shift is in the profile now and the adapter reads it. Getting it wrong is
+not subtle, and it is confident.
+
+#### ...and a declaration with no arguments has no parentheses
+
+`sound s(500);` constructs in place, which is the only form a class with no
+default constructor accepts and what the source wrote. With **no** arguments
+there is nothing to construct with and the parentheses stop being an
+argument list: `sound s();` is a function declaration to a parser that has
+to choose, where `sound s;` is unambiguous and means the same thing.
+
+Screaming Strike is where it showed up -- `sound intro();` and
+`file logData();`, because a plain default construction is how that game
+opens a sound -- and it reaches the older titles too, where the first
+construction of an object slot was rendered as a hoisted declaration **and**
+a redundant `local_18 = string();`. The first construction IS the
+declaration; a reused slot's later ones are still assignments and still
+emitted.
+
+#### The BEHAVIOUR numbering is this build's too
+
+An eighth per-release field, and the module settles it without a
+disassembly: every `usedFunctions` entry records its owner and its
+signature, so what each behaviour IS can be read off rather than argued.
+
+```
+_beh_0_  owner=string  params=0 or 1  void    -- the constructor
+_beh_1_  owner=string  params=0       void    -- the DESTRUCTOR
+_beh_2_  owner=None    params=0       object  -- the FACTORY
+```
+
+which is the 2010-2012 numbering this file already records, where 1.3 has
+2 for the destructor and 3 for the factory. So `early_behaviours` is its
+own field rather than something inferred from the token shift: one build
+stores its operands the newer way and numbers its behaviours the older
+way, and nothing said those had to move together.
+
+Read as 1.3's, `_beh_1_` is a copy-construction, so a string temp was
+copy-constructed where the original destroyed it -- and the slot then
+looked like a variable. **Ten dead `string local_4;` declarations**, in
+bodies whose only use of that slot was the destructor.
+
+**It is right and it is NOT the cause of the lost literals below**, which
+is worth separating: the rename was adopted on the module's own records,
+and the audit reports exactly the same 19 literals before and after it.
+
+#### What is still open on this title: 19 literals and 19 calls
+
+`bgt audit` is the check that found it, and no structural one could: the
+recovery has 0 residual gotos, a verified split, 0 unbalanced files and
+every sweep shape at 0, and six of its twenty-one paired bodies are
+missing a value.
+
+| body | lost |
+|---|---|
+| `main` | six literals and 6 `random` |
+| `itemGet` | the seven item names, and 7 `random` |
+| `scorePost` | two literals and 8 `random` |
+| `game`, `hitPunch`, `destruct` | one, one and two literals |
+
+The visible instance is `voice.speak_interrupt(null)` -- the argument that
+should be `"Shrink"` -- and the bytecode says what the shape is:
+
+```
+PSF 7                               ; the ALLOC's destination, pushed deepest
+STR "Shrink" ; _string_factory_ ; PshRPtr
+PSF 6 ; string::_beh_0_             ; slot 6 = the literal
+PSF 6 ; ALLOC 6, 33                 ; a COPY into a new object, handle -> slot 7
+PSF 6 ; string::_beh_1_             ; destroy slot 6
+VAR 7 ; PshGPtr voice ; GETOBJ ; CALLSYS tts_voice::speak_interrupt
+```
+
+So the literal reaches slot 6 and the value that is passed is an `ALLOC`'d
+copy of it in slot 7, which the simulation does not bind -- and `_deref`
+answers `null` for a handle slot nothing has written, which is this file's
+own rule working correctly on a write it cannot see. That is the third kind
+of unseen write this document records, after a behaviour through a pushed
+address and a store through the reference register, reached by a fourth
+route: a copy construction whose destination was pushed before the value
+it copies.
+
+**Not fixed**, and it wants its own measurement rather than being bolted
+on: `_alloc` records a destination, and whether it can reach one pushed
+that early is the question. The same `null` arguments are in the five
+2010-2012 titles' recoveries, before any of this work, so it is one defect
+and not this build's.
+
+#### What all of it cost, measured against a frozen tree
+
+The baseline is a copy of the tree as it stood before this change, not
+`HEAD`: the working tree already carried the Build to Survive change set,
+and this file's own rule is that two changes in flight is one measurement of
+neither.
+
+| title | lines | differing .bgt files |
+|---|---|---|
+| Super Egg Hunt | 5,239 | **0 of 14** |
+| Ljudfarmen | 3,304 | **0 of 9** |
+| Perilous Hearts | 14,876 | **0 of 19** |
+| Antony | 2,874 -> 2,856 | 2 of 10 |
+| Grodan Gun | 3,208 -> 3,194 | 1 of 12 |
+| Palace Punch-up | 3,214 -> 3,200 | 5 of 10 |
+| Air Puck client | 5,650 | 7 of 22 |
+| Air Puck server | 3,717 | 6 of 13 |
+| Build to Survive client | 13,014 | 11 of 47 |
+| Build to Survive server | 21,194 | 13 of 38 |
+| Build to Survive admin_maker | 99 | 2 of 2 |
+| Screaming Strike | -- | **the baseline cannot read it at all** |
+
+**Every differing line in all eight is the one shape**, checked line by line
+rather than sampled: a declaration losing its empty parentheses, or the
+redundant construction beside an already-hoisted one. Not one residual goto,
+dangling goto, unbalanced file, split check, call count, passthrough or body
+error moves on any title. The three debug builds are where the shape is
+easiest to read, because the names are the author's: `file f;`,
+`savedata sd;`, `network t;`.
+
+**And three titles are NOT measured**, which is said here rather than left
+to be assumed. The Gate's two runs and Manamon 1's and Crazy Party's were
+not taken: the host stopped the comparison for system memory partway
+through The Gate, which this file records happening five times now. What
+bounds them is the shape above and nothing stronger -- the change can only
+reach a zero-argument object construction used as a declaration, and on the
+eight artefacts that were measured it reaches nothing else -- so the three
+rows are an expectation rather than a reading, and they are owed.
+
+## Build to Survive is three DEBUG builds, and every free check passed
+
+Three stock BGT 1.3 executables by Air Puck's author -- a client, a server
+and a tiny `admin_maker`, all `noDebugInfo = 0`, so the recovered source
+carries the file names, parameter names and local names the author typed:
+`player.bgt`, `bike.bgt`, `vanishing_platform.bgt`, `thug.bgt`,
+`barricade.bgt`. 46 source files for the client and 37 for the server.
+
+All three recovered with **0 unmodelled opcodes, 0 bodies given up on, 0
+residual gotos, 0 dangling gotos, 0 unbalanced files and a verified split**,
+and `bgt audit` reported nothing lost on the client. **None of the three
+compiled**, and the server's own report named 5 defects behind 47
+diagnostics.
+
+That is this file's standing lesson arriving for the second time in a row on
+a debug build, and the reason the standings' last column is *does it RUN?*.
+Every one of the four below is a rule asked in several places with only one
+of them right -- the shape this document keeps recording -- and the debug
+names are what exposed them, because nothing that reads the recovery's own
+text had seen a real name until Air Puck.
+
+### `string local_2("");` is a declaration, and two of three askers missed it
+
+`_body` handles the constructor form and says why: *"Up to the first
+non-identifier character, so the constructor form counts too -- matching on
+the first word missed it."* The same question is asked twice more with a
+pattern that wants `=` or `;` after the name:
+
+| asker | what it cost |
+|---|---|
+| `_initialiser_declarations` | hoisted `string local_2;` above `string local_2("");` -- `'local_2' is already declared` |
+| `_SIMPLE_BINDING`, which `_fold_to_construction` needs every statement to match | the fold was refused, so the generated helper was emitted |
+
+And the refused fold is the expensive half, because the helper cannot
+compile at all:
+
+```
+prowl p = __nvgt_global_init_58();        // no default constructor
+prowl __nvgt_global_init_58() {
+    prowl p;                               // ...again
+    p = local_4;                           // no opAssign
+    return p;                              // and a temporary copy
+}
+```
+
+-- four errors, plus `Use of uninitialized global variable 'p'` at every
+later use. `_local_binding` is the one answer now, and it comes out
+`prowl p("9f0d479726220728408f4ef9c461791cdd0cf5ab", (string("")));` with no
+helper.
+
+**A statement keyword can stand where a type does.** `return f(x);` matches
+the constructor form exactly, and taken for a declaration of `f` it would
+both refuse a fold and skip a declaration that is needed, so the words that
+can appear there are excluded by name.
+
+### A `const` local whose value arrives by assignment is not `const`
+
+The module records `const string[] dirs`, and the author really wrote
+`const string[] dirs = find_files("players/*/team.usr");` -- legal, because
+the value is in the declaration. This decompiler splits it in two:
+
+```
+const string[] dirs = array<string>();
+dirs = local_4;                            // Reference is read-only
+```
+
+`_body`'s hoist already drops `const` for exactly this reason. An **object**
+local is not hoisted -- it is declared where the bytecode constructs it --
+so that path kept it: five sites in the server and three in the client.
+
+**Conditional rather than unconditional**, because four of the corpus's
+twelve `const` locals are complete -- `const string[] d2 =
+__nvgt_list_5_241;` -- and keeping those faithful costs nothing. The
+condition is the simulation's own observation: a **second** `_emit_assign`
+to a slot is exactly "the value arrives by assignment", so the declaration
+it already emitted is corrected then. A static test would have to combine
+`slot_writes` with the behaviour writes, and this file records both as
+incomplete in ways that differ.
+
+### A handle is reassigned with `@`, and the TYPENAME is what says so
+
+`player@ handel;` then `handel = get_player(id);` -- "No appropriate
+opAssign method found in 'player'", because without the `@` the statement is
+a value copy into whatever the handle points at.
+
+The rule has been in `_body` for a long time and asked
+`fd.var_names` for the type by NAME. That map keeps **one name per slot**,
+and a reused slot carries several, so every name that reached the hoist
+through the debug variables found nothing and got no `@`. The event's own
+`typename` is the string the declaration above was just built from, so it
+cannot disagree with it.
+
+**It reaches a release build too.** Manamon 1 gains four, each a generated
+`__nvgt_ret_N` holding a handle return -- `character@[]@
+get_transportal_party(...)` and `dictionary@ load_save_file(...)` -- which
+were value assignments into a handle and could only ever have thrown. That
+title cannot be compiled here, which is why they were never reported.
+
+### A hoisted local must not shadow a global
+
+The client declares `sound_pool p(5000)` globally, and `netloop` has a
+`uint p` the author scoped to an inner block. **Every declaration this
+decompiler emits is hoisted to the top of the body**, so the local shadows
+the pool for the whole function and sixteen calls on it are `Illegal
+operation on 'uint'`, with `'p' is not initialized` beside them. In the
+original the two never met.
+
+So the local is renamed, which is what `claim` already does when two slots
+want one name -- **renaming rather than qualifying the global with `::p`**,
+and the deciding argument is completeness: the local's name has ONE source,
+`f.variables`, where a global is rendered in at least six places. Missing a
+site either way is a program that compiles and means something else, so the
+fix goes where the answer is single.
+
+**Only where the body reads that global as well.** The first version renamed
+every local whose name matched a global, and shadowing is legal -- a
+function that only ever means its own local compiled before and after.
+Measured, it renamed `seconds`, `m`, `w`, `s`, `r` and `bla` across six of
+the client's files, for nothing. What hoisting creates is a body that means
+both, and the bytecode says which those are, because a global read names the
+global it reads. That needs `global_name`, which the translator resolves, so
+the pass runs after `_post_process`.
+
+### What they cost, and all three RUN
+
+| | lines | goto | split | calls read back | and does it RUN? |
+|---|---|---|---|---|---|
+| Build to Survive client | 13,014 | 0 | verified | 4,718 | **yes** |
+| Build to Survive server | 21,194 | 0 | verified | 6,576 | **yes** |
+| Build to Survive admin_maker | 99 | 0 | verified | 25 | **yes** |
+
+Measured against the committed tree, title by title and file by file:
+
+| title | .bgt files differing |
+|---|---|
+| Super Egg Hunt, Battle of the Hunter, Field Wars, The Gate, admin_maker | **0 of 241** |
+| Air Puck client, Air Puck server | **0 of 35** |
+| Manamon 1 | **4 of 806** -- the four handle returns above |
+| Build to Survive client | 2 of 47 |
+| Build to Survive server | 3 of 38 |
+
+So 276 files across seven artefacts are byte-identical, and the four that
+move are the defects and nothing else.
+
+**And a `yes` is still only `it runs`.** The server answers
+`ms_to_readable_time(90000)` with `"30 seconds"` where it is a minute and a
+half, and `(3661000)` with `"1 second"` -- which is the reduced-divisor
+cascade this file records from Air Puck, in a second game by the same
+author. Two instances now, so it is a general defect rather than one
+title's bad luck, and that is what **What is still open** says about it.
+
+## The webs limit was guarding against something that cannot happen
+
+`WEB_ANALYSIS_LIMIT = 60000` declined any body above that, and declining
+means `is_named_here` falls back to the whole-body answer -- one name and
+one type per slot for the whole function, which is what collapses a
+short-circuit chain and what gives a reused slot the wrong declaration.
+
+The server's `mainloop` is **100,540 instructions**, and that one body held
+**20 collapsed chains** in the command dispatcher plus 1,362 assignments to
+names declared as handles while the bytecode used the slot as an int. Its
+own `handel` error was one of those.
+
+**The limit's stated reason is false.** Its comment named Crazy Party's
+generated `ajouteLangue` -- 1,074,460 instructions, where a per-slot
+fixpoint "would cost more than it can buy" -- and that body **writes no
+frame slot at all**, so `defs` is empty for every slot and the fixpoint
+never ran over it. Measured:
+
+| body | instructions | slots written | the fixpoint |
+|---|---|---|---|
+| `ajouteLangue` (Crazy Party) | 1,074,460 | **0** | never runs |
+| `mainloop` (BTS server) | 100,540 | 25 | ~2s each, 85 MB |
+| `ajouteCarte` (Crazy Party) | 81,184 | 9 | ~2s each, 27 MB |
+
+So the cheap early-outs come first -- fewer than two definitions or no use
+cannot be split, whatever the body's size -- and what is bounded is the work
+the fixpoint does, `len(instrs) * len(defs)`. `WEB_ANALYSIS_BUDGET` is
+250,000,000, about 2.8x `mainloop`'s busiest slot.
+
+**And a size guard stays in front, as an optimisation rather than a limit.**
+`_slot_io` allocates per instruction, measured at **251 MB and 16 seconds**
+on `ajouteLangue` to discover it has nothing to split. `WEB_TABLE_LIMIT` is
+400,000 -- four times the largest body in the corpus that has anything to
+split -- and the only body above it answers `[]` either way. A limit changes
+what is recovered; this changes what is spent discovering that nothing is.
+
+### Nothing is refused now that was analysed before
+
+Which is the claim that matters, and it is computed rather than argued. The
+two rules can disagree in both directions -- a body under 60,000 whose slot
+has enough definitions would newly exceed the budget -- so every body in the
+corpus was asked:
+
+| title | slots analysed now and not before | refused now and not before |
+|---|---|---|
+| Build to Survive server | **24**, all `mainloop` | 0 |
+| Crazy Party | **9**, all `ajouteCarte` | 0 |
+| Super Egg Hunt, Battle of the Hunter, Field Wars, The Gate, Manamon 1, both Air Pucks, BTS client | 0 | **0** |
+
+**So two bodies in ten artefacts gain analysis and nothing anywhere loses
+it.** Which also bounds Crazy Party without a run of it: its only exposure
+is `ajouteCarte`, and that body **renders byte-identical** with the budget
+and without it -- 5,548 lines, 0 gotos either way. The reasoning that a
+small body can never be refused is sound and is not what this rests on; the
+sweep is.
+
+What it bought on the server: `collapsed_chain` **20 -> 0**, 6,007 fewer
+lines of slot traffic, 57 more calls read back, and the last of its compiler
+errors gone.
 
 ### Nothing in the corpus moves
 

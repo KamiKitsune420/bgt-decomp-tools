@@ -84,9 +84,33 @@ CONV_OPS = {
 #: the compiler -- from the ones it merely reads, which may be the source's
 #: own. Reading is not writing: an arm that calls a method on a local pushes
 #: that local's slot, and counting the push would unforce a real variable.
-#: How big a body `slot_webs` will analyse. Above this it declines, and
-#: nothing is split -- the behaviour this file has everywhere today.
-WEB_ANALYSIS_LIMIT = 60000
+#: How much work `slot_webs` will spend on ONE slot before declining: the
+#: body's instruction count times the number of definitions reaching it,
+#: which is what the reaching-definitions fixpoint costs. Declining means
+#: nothing is split, which is the conservative answer.
+#:
+#: Measured rather than guessed. The largest in the corpus is Build to
+#: Survive's `mainloop`, 100,540 instructions and 892 definitions of its
+#: busiest slot -- 89.7M, which takes 2.4s and peaks at 85 MB -- so this is
+#: about 2.8x the worst real case.
+#:
+#: It replaces a limit on the body's SIZE, whose stated reason was that a
+#: fixpoint over Crazy Party's million-instruction `ajouteLangue` would cost
+#: more than it buys. That body writes no frame slot at all, so no fixpoint
+#: ever ran over it; the limit was refusing `mainloop` and `ajouteCarte`,
+#: which it can afford, to guard against something that cannot happen.
+WEB_ANALYSIS_BUDGET = 250_000_000
+
+#: How long a body `slot_webs` will build its per-instruction tables for.
+#: `_slot_io` allocates one entry per instruction, measured at 251 MB and 16
+#: seconds on Crazy Party's `ajouteLangue` (1,074,460 instructions) -- spent
+#: to discover that it writes no frame slot and nothing can be split.
+#:
+#: This is an **optimisation, not a limit**: it is four times the largest
+#: body in the corpus that has anything to split, and the only body above it
+#: answers `[]` either way. A limit changes what is recovered; this changes
+#: what is spent discovering that nothing is.
+WEB_TABLE_LIMIT = 400_000
 
 #: Opcodes that write through the REFERENCE register rather than naming a
 #: slot. `a++` is `LDV 1 ; INCi`, so the increment's operand mentions nothing
@@ -218,11 +242,18 @@ def _initialiser_declarations(fd, stmts: list[str], skip: str) -> list[str]:
         quoted = re.escape(name)
         if not re.search(r"(?<![A-Za-z_0-9])%s\b" % quoted, body):
             continue
-        #: `<type> <name> =` or `<type> <name>;` is already a declaration
-        if re.search(r"(?<![A-Za-z_0-9:])[A-Za-z_][\w:<>@\[\]]*\s+%s\s*[;=]"
-                     % quoted, body):
+        #: Already declared by one of the statements -- in any of the forms
+        #: a declaration takes, which is what `_local_binding` is for. The
+        #: constructor form was missing here: `string local_2("");` declares
+        #: `local_2`, and hoisting a second `string local_2;` above it is
+        #: `'local_2' is already declared`.
+        if any((_local_binding(stmt) or (None,))[0] == name
+               for stmt in stmts):
             continue
-        typename = dt.format().replace("&", "").strip()
+        #: Without its initialiser, as `_body`'s hoist does -- and so
+        #: without `const`, which a declaration that will be assigned
+        #: cannot carry.
+        typename = dt.format().replace("&", "").removeprefix("const ").strip()
         if typename:
             out.append("%s %s;" % (typename, name))
     return out
@@ -1347,10 +1378,45 @@ def _construction_args(dt: DataType, expr: str) -> str | None:
     return None
 
 
-_SIMPLE_BINDING = re.compile(
-    r"^\s*(?:const\s+)?[A-Za-z_][\w:]*(?:\s*[@&\[\]]+)?\s+"
-    r"([A-Za-z_]\w*)\s*=\s*(.+);\s*$")
+_TYPE_AND_NAME = r"^\s*(?:const\s+)?([A-Za-z_][\w:]*(?:\s*[@&\[\]]+)?)\s+([A-Za-z_]\w*)\s*"
+_SIMPLE_BINDING = re.compile(_TYPE_AND_NAME + r"=\s*(.+);\s*$")
+#: `string local_2("");` -- a declaration whose initialiser is the
+#: constructor's own argument list rather than an `=`.
+_CONSTRUCTED_BINDING = re.compile(_TYPE_AND_NAME + r"\((.*)\);\s*$")
+#: Words that can stand where a type does and are not one. `return f(x);`
+#: matches the constructor form exactly, and taking it for a declaration of
+#: `f` would both refuse a fold and skip a declaration that is needed.
+_STATEMENT_WORDS = frozenset((
+    "return", "if", "else", "for", "while", "do", "switch", "case",
+    "default", "break", "continue", "goto",
+))
 _LEFTOVER_LOCAL = re.compile(r"(?<![A-Za-z_0-9])local_\d+(?![A-Za-z_0-9])")
+
+
+def _local_binding(stmt: str):
+    """`(name, value)` for a statement that declares one local, else None.
+
+    The one answer to "is this a plain local declaration?", which three
+    places ask. Both initialiser forms count -- `string s = "";` and
+    `string s("");` -- because the compiler emits whichever the construction
+    needs and the question is about the declaration, not its spelling.
+    `value` is None for a bare `string s;`, which declares without binding.
+    """
+    hit = _SIMPLE_BINDING.match(stmt)
+    if hit is not None:
+        if hit.group(1).strip() in _STATEMENT_WORDS:
+            return None
+        return hit.group(2), hit.group(3).strip()
+    hit = _CONSTRUCTED_BINDING.match(stmt)
+    if hit is not None:
+        typename = hit.group(1).strip()
+        if typename in _STATEMENT_WORDS:
+            return None
+        return hit.group(2), "%s(%s)" % (typename, hit.group(3).strip())
+    hit = re.match(_TYPE_AND_NAME + r";\s*$", stmt)
+    if hit is not None and hit.group(1).strip() not in _STATEMENT_WORDS:
+        return hit.group(2), None
+    return None
 
 
 def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
@@ -1389,13 +1455,13 @@ def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
     bindings = {}
     order = []
     for stmt in stmts[:-1]:
-        hit = _SIMPLE_BINDING.match(stmt)
-        if hit is None:
+        hit = _local_binding(stmt)
+        if hit is None or hit[1] is None:
             return None
-        if hit.group(1) in bindings:
+        if hit[0] in bindings:
             return None
-        bindings[hit.group(1)] = hit.group(2).strip()
-        order.append(hit.group(1))
+        bindings[hit[0]] = hit[1]
+        order.append(hit[0])
     # innermost first, so a binding that uses an earlier one is resolved
     # before that earlier one is looked for
     for local in reversed(order):
@@ -1550,6 +1616,9 @@ class FuncDecompiler:
                           if i.name == "JMP" and _jump_target(i) > i.pos]
         #: Where each frame slot is written, by bytecode position.
         self.slot_writes: dict[int, list[int]] = {}
+        #: slot -> the `const` declaration event emitted for it, until a
+        #: later assignment proves the `const` wrong and removes it.
+        self.const_declarations: dict[int, Event] = {}
         #: Handle assignments by slot, built on first use. Only
         #: `_written_inside_this_loop` reads it, so widening what counts as a
         #: write here cannot reach the fold rules that share `slot_writes`.
@@ -2048,7 +2117,7 @@ class FuncDecompiler:
 
         Falls back to the whole-body answer wherever there is nothing to
         split -- one web, a slot with a single write, or a body over
-        `WEB_ANALYSIS_LIMIT` -- so nothing moves for a slot that really is
+        `WEB_ANALYSIS_BUDGET` -- so nothing moves for a slot that really is
         one variable.
         """
         if not self.is_named(off):
@@ -2497,11 +2566,37 @@ class FuncDecompiler:
             tn = dt.format() if dt else ""
             tn = tn.replace("&", "").strip()
             if dt and dt.obj_type and not dt.is_object_handle and a.text.startswith(tn + "(") and a.text.endswith(")"):
-                text = f"{name}{a.text[len(tn):]};"
+                # `sound s(500);` constructs in place, which is what the
+                # source wrote and the only form a class with no default
+                # constructor accepts. **With no arguments there is nothing
+                # to construct with, and the parentheses stop being an
+                # argument list**: `sound s();` reads as a function
+                # declaration to a parser that has to decide, where
+                # `sound s;` is unambiguous and means the same thing. Two
+                # sites in Screaming Strike -- `sound intro();` and
+                # `file logData();` -- are where this first showed up,
+                # because a plain default construction is how that game
+                # opens a sound.
+                args = a.text[len(tn) + 1:-1].strip()
+                text = f"{name}({args});" if args else f"{name};"
             else:
                 text = f"{name} = {a.text};"
             self._append_stmt(tn, text)
+            if tn.startswith("const "):
+                self.const_declarations[off] = self.events[-1]
         else:
+            # **The value arrives by assignment, so the declaration above is
+            # not `const`.** The module records what the author wrote --
+            # `const string[] dirs = find_files(...)` is legal, because the
+            # value is in the declaration -- and this decompiler splits that
+            # into an empty construction plus this statement, which the
+            # engine refuses with "Reference is read-only". The hoisting path
+            # drops `const` for the same reason; an object local is not
+            # hoisted, so it needs it here.
+            event = self.const_declarations.pop(off, None)
+            if event is not None:
+                typename, declaration = event.data
+                event.data = (typename.removeprefix("const "), declaration)
             # A handle variable is REASSIGNED with `@`. Without it the statement
             # is a value copy into the object the handle points at, which
             # `sound` and every funcdef type refuse: "No appropriate opAssign
@@ -4580,9 +4675,19 @@ class FuncDecompiler:
 
     def _emit_global_write(self, g: str, a: Atom) -> None:
         a = self._deref(a)
-        if g in self.global_types:
-            a = self._normalize_arg(a, self.global_types[g])
-        self._stmt(f"{g} = {a.text};")
+        dt = self.global_types.get(g)
+        if dt is not None:
+            a = self._normalize_arg(a, dt)
+        # **A handle is REASSIGNED with `@`**, globals as much as slots. The
+        # slot path has carried this rule for a long time and records the
+        # cost of missing it -- without the `@` the statement is a value copy
+        # into the object the handle points at, which a script class refuses:
+        # Build to Survive's server does `handel = get_player(id);` on a
+        # `player@` global, and the engine answers "No appropriate opAssign
+        # method found in 'player'". One rule, two places that write a
+        # variable, and only one of them asked.
+        prefix = "@" if dt is not None and dt.is_object_handle else ""
+        self._stmt(f"{prefix}{g} = {a.text};")
 
     def _ptr_target_text(self) -> str:
         # value register holds a pointer (from LdGRdR4/LoadThisR etc.)
@@ -6437,18 +6542,25 @@ class FuncDecompiler:
         their earliest write appears, or an empty list when the slot has
         fewer than two writes and so cannot be split.
         """
-        #: Crazy Party's generated `ajouteLangue` is 1,074,460 instructions,
-        #: and a per-slot fixpoint over it would cost more than it can buy.
-        #: Declining is the conservative answer -- no split, which is what
-        #: this file does everywhere today.
-        if len(self.instrs) > WEB_ANALYSIS_LIMIT:
+        #: `_slot_io` allocates per instruction, so a body long enough for
+        #: that to cost real memory is refused before it is built -- see
+        #: `WEB_TABLE_LIMIT`, which is above everything in the corpus that
+        #: has slots to split.
+        if len(self.instrs) > WEB_TABLE_LIMIT:
             return []
+        #: Then the early-outs, because they are cheap and decide most
+        #: slots: fewer than two definitions cannot be split and no use
+        #: cannot join any. `_slot_io` is memoised, so one body pays once.
         writes, reads = self._slot_io()
         defs = [k for k, off in enumerate(writes) if off == slot]
         if len(defs) < 2:
             return []
         uses = [k for k, got in enumerate(reads) if slot in got]
         if not uses:
+            return []
+        #: ...and then the fixpoint, which is the only expensive part and
+        #: costs the body's length times the definitions reaching it.
+        if len(self.instrs) * len(defs) > WEB_ANALYSIS_BUDGET:
             return []
         succ = self._successors()
 
@@ -7789,8 +7901,19 @@ class ModuleDecompiler:
                     if name not in hoisted_names:
                         hoisted_names.add(name)
                         declarations.append(decl)
-                    off = next((off for off in fd.var_names if fd.name_of(off) == name), None)
-                    is_handle = off is not None and fd.var_types.get(off) and fd.var_types[off].is_object_handle
+                    # **A handle is reassigned with `@`, and the typename is
+                    # what says so.** It is the string the declaration above
+                    # was just built from, so it cannot disagree with it.
+                    # Looked up by NAME in `var_names` instead, this missed
+                    # every name that reached `scalar_names` through the
+                    # debug variables: that map keeps one name per slot, and
+                    # a reused slot carries several. Build to Survive's
+                    # server is the cost -- `player@ handel;` declared and
+                    # then `handel = get_player(id);`, which the engine
+                    # refuses with "No appropriate opAssign method found in
+                    # 'player'", because without the `@` it is a value copy
+                    # into whatever the handle points at.
+                    is_handle = typename.rstrip().endswith("@")
                     prefix = "@" if is_handle and text != name + ";" else ""
                     if text.startswith(name + "("):
                         # The constructor form has to become an assignment:

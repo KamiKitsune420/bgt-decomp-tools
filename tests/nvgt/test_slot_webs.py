@@ -156,12 +156,49 @@ class DecliningTests(unittest.TestCase):
                   op("RET", 2)]
         self.assertEqual(sim(instrs).slot_webs(4), [])
 
-    def test_a_body_too_big_to_analyse_declines(self):
-        """Crazy Party's generated `ajouteLangue` is 1,074,460 instructions.
-        Declining is the conservative answer: no split, which is what this
-        file does everywhere today."""
-        self.assertGreater(decompile.WEB_ANALYSIS_LIMIT, 30000)
-        self.assertLess(decompile.WEB_ANALYSIS_LIMIT, 1000000)
+    def test_the_fixpoint_declines_when_its_own_work_is_too_much(self):
+        """And the budget is about the fixpoint, not the body's size.
+
+        It used to be a limit on the instruction count, justified by Crazy
+        Party's generated `ajouteLangue` -- 1,074,460 instructions, where a
+        per-slot fixpoint "would cost more than it can buy". That body writes
+        no frame slot at all, so no fixpoint ever ran over it, while the limit
+        refused Build to Survive's `mainloop` (100,540 instructions, 25 slots,
+        about two seconds each) and with it every short-circuit chain in that
+        server's command dispatcher.
+        """
+        instrs = [op("SetV4", 0, w_arg=4, dw_arg=1, bc_type="asBCTYPE_wW_DW_ARG"),
+                  op("SetV4", 1, w_arg=4, dw_arg=2, bc_type="asBCTYPE_wW_DW_ARG"),
+                  op("CpyVtoR4", 2, w_arg=4, bc_type="asBCTYPE_rW_ARG"),
+                  op("RET", 3)]
+        self.assertTrue(sim(instrs).slot_webs(4), "two writes and a read")
+
+        budget = decompile.WEB_ANALYSIS_BUDGET
+        try:
+            decompile.WEB_ANALYSIS_BUDGET = 1
+            self.assertEqual(sim(instrs).slot_webs(4), [],
+                             "over the budget, nothing is split")
+        finally:
+            decompile.WEB_ANALYSIS_BUDGET = budget
+
+    def test_the_early_outs_run_whatever_the_body_costs(self):
+        """A slot with one write is refused without touching the fixpoint.
+
+        Which is what makes a million-instruction body free: `ajouteLangue`
+        writes no slot, so every call returns before the budget is consulted.
+        """
+        instrs = [op("SetV4", 0, w_arg=4, dw_arg=1, bc_type="asBCTYPE_wW_DW_ARG"),
+                  op("CpyVtoR4", 1, w_arg=4, bc_type="asBCTYPE_rW_ARG"),
+                  op("RET", 2)]
+        budget = decompile.WEB_ANALYSIS_BUDGET
+        try:
+            decompile.WEB_ANALYSIS_BUDGET = 0
+            self.assertEqual(sim(instrs).slot_webs(4), [],
+                             "one write cannot be split, budget or no budget")
+            self.assertEqual(sim(instrs).slot_webs(9), [],
+                             "and a slot nothing writes is refused the same")
+        finally:
+            decompile.WEB_ANALYSIS_BUDGET = budget
 
 
 class WebLocalNamingTests(unittest.TestCase):

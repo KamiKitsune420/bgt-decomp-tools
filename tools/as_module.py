@@ -118,14 +118,113 @@ def read_encoded_uint(buf: bytes, p: int) -> Tuple[int, int]:
     return (-v if negative else v), p
 
 
+#: The record layouts that move with the ENGINE RELEASE rather than per
+#: build. Kept as named profiles and never as a free product: `as_module`
+#: already trials four per-build fields, and this document's own rule is that
+#: a trial over eight more is how a wrong story gets fitted -- which was
+#: demonstrated the day this was written, when one extra free field let a
+#: synthetic module with a spare byte land on EOF.
+#:
+#: Every field below was read out of a runtime's own `asCReader`, with the
+#: exact-EOF landing as the arbiter, and the verified profile is tried first
+#: and kept on a tie -- so a module that already lands cannot be
+#: re-described.
+RECORDS_13 = {
+    #: Whether the module opens with the `noDebugInfo` byte. BGT 1.3 does;
+    #: the 2010-2012 generation does not, and neither does the 2013 engine,
+    #: whose `ReadInner` (0x41BBB0 in screamingStrike_en.exe) opens straight
+    #: on a count. So the sign-flag integer and this byte did NOT arrive
+    #: together: that engine is 2012-07-24 and has the first and not the
+    #: second, which splits a window this project had as one.
+    "debug_byte": True,
+    #: `ReadDataType`'s convention. 1.3 reads `eu(v)`, where a NON-zero v is
+    #: a back-reference and zero means a token follows, and packs the four
+    #: flags into one byte. The earlier reading is the other way round --
+    #: zero introduces a back-reference, a non-zero lead IS the token -- and
+    #: writes the flags as separate bytes, two of them, or four when the
+    #: token is 5. Both halves come out of the one function (0x419AE0), so
+    #: they are one field.
+    "datatype_early": False,
+    #: Whether a global property's initialiser is gated on a byte.
+    #: `ReadGlobalProperty` at 0x41AEB0 reads name, namespace, data type,
+    #: ONE byte, and the initialiser only when that byte is 1.
+    "global_init_gate": False,
+    #: Whether a template type-info declares how many subtypes it has. 1.3
+    #: writes a count; the AngelScript before it has no multi-subtype
+    #: template, so the subtype's own tag follows the name directly.
+    "template_subtype_count": True,
+    #: Whether the debug block carries the scriptSections list -- the
+    #: alternating index-and-string table.
+    "debug_sections": True,
+    #: Where the body's traits byte sits. 1.3 writes it after the variables,
+    #: closing the funcType-1 branch; the 2013 engine writes it between the
+    #: line numbers and the variables (0x41AC1F, right after the loop at
+    #: 0x41ABE4).
+    "traits_last": True,
+    #: Whether a function record ends with ONE script-section string, for
+    #: every funcType, instead of 1.3's scriptSection + declaredAt +
+    #: parameter names. The 2013 engine reads that string at the join after
+    #: its funcType switch (0x41ADBB), so a funcdef carries an empty one.
+    "section_per_record": False,
+    #: How far this build's `eTokenType` sits below the numbering the IR
+    #: uses. Two keywords went in between BGT 1.3's AngelScript and the
+    #: newer one, at 36 and 64, so 1.3 is two lower; the generation before
+    #: it is four, two more having gone in between 2.19 and 1.3. Read off a
+    #: known answer rather than counted: this build's `int` is 66, where
+    #: 1.3's is 68 and the IR's is 70.
+    "token_shift": 2,
+    #: Whether the engine's BEHAVIOUR numbering is the one before 1.3's,
+    #: where `_beh_1_` is the destructor and `_beh_2_` the factory rather
+    #: than 1.3's copy-constructor and destructor. A separate field from the
+    #: token shift, because nothing says the two had to move together --
+    #: and the module's own `usedFunctions` settles it per build, since each
+    #: entry records its owner and its signature:
+    #:
+    #:     _beh_0_  owner=string  params=0 or 1  void   -- the constructor
+    #:     _beh_1_  owner=string  params=0       void   -- the DESTRUCTOR
+    #:     _beh_2_  owner=None    params=0       object -- the FACTORY
+    #:
+    #: Read as 1.3's, `_beh_1_` is a copy-construction, so the temp holding
+    #: a string literal was copy-constructed where the original destroyed
+    #: it -- and the argument that should have been the literal came out
+    #: `null`. `voice.speak_interrupt(null)` in Screaming Strike, 19
+    #: literals across six bodies, which the bytecode audit reported and
+    #: no structural check could.
+    "early_behaviours": False,
+}
+
+#: Screaming Strike's engine (2012-07-24, 394 registered names): 1.3's
+#: format everywhere
+#: this reader does not say otherwise -- the same sign-flag encoded integer,
+#: the same signature order with the namespace last, the same tail sections
+#: in the same order -- with these seven records the generation before it.
+RECORDS_2012 = {
+    "debug_byte": False,
+    "datatype_early": True,
+    "global_init_gate": True,
+    "template_subtype_count": False,
+    "debug_sections": False,
+    "traits_last": False,
+    "section_per_record": True,
+    "token_shift": 4,
+    "early_behaviours": True,
+}
+
+#: Tried in order, verified first.
+RECORD_PROFILES = (("1.3", RECORDS_13), ("2012-07", RECORDS_2012))
+
+
 class Reader:
     def __init__(self, data: bytes, dialect: str, pos: int = 0,
                  opcodes: Optional[Dict[int, Dict[str, Any]]] = None,
                  template_namespace: bool = True,
                  unguarded_lists: bool = False,
                  objvar_three: bool = False,
-                 legacy_body: Optional[bool] = None) -> None:
+                 legacy_body: Optional[bool] = None,
+                 records: Optional[Dict[str, bool]] = None) -> None:
         self.d = data
+        #: Which release's record layouts to read. See `RECORD_PROFILES`.
+        self.records = dict(RECORDS_13 if records is None else records)
         self.dialect = dialect
         self.p = pos
         # **Whether this module kept its debug information**, which is the
@@ -144,6 +243,12 @@ class Reader:
         # byte is a null marker and not the flag, and taking that for a debug
         # build made it look for fields that are not there.
         self.debug_info = pos > 0 and bool(data) and data[0] == 0
+        if not self.records["debug_byte"]:
+            # No flag to read, so the debug fields are written whatever the
+            # build: a release module of that generation carries zero line
+            # numbers, zero variables and an empty section string per record
+            # rather than nothing at all.
+            self.debug_info = True
         # Whether ReadTypeInfo's 'a' (template) form carries a namespace string
         # after the name. It does in Psycho Strike and Manamon 2 and does NOT in
         # Paladin of the Sky -- three builds, two answers, so this is a per-build
@@ -375,9 +480,19 @@ class Reader:
         if tag == 0x61:                      # 'a'
             name = self.string().decode("latin1")
             ns = self.string().decode("latin1") if self.template_namespace else ""
-            n = self.eu()
-            if not 0 <= n <= 64:
-                raise ParseError("implausible subtype count %d at 0x%X" % (n, self.p))
+            # One subtype and NO count in the generation before 1.3: that
+            # AngelScript has no multi-subtype template, so the subtype's own
+            # tag follows the name directly. `objectTimer`, an `array<timer>`
+            # in Screaming Strike, is the record that shows it -- 'a',
+            # "array", then 's' straight away, where reading a count takes
+            # that 's' for 115 subtypes.
+            if not self.records["template_subtype_count"]:
+                n = 1
+            else:
+                n = self.eu()
+                if not 0 <= n <= 64:
+                    raise ParseError("implausible subtype count %d at 0x%X"
+                                     % (n, self.p))
             subs = []
             for _ in range(n):
                 sub = self.raw(1)[0]
@@ -407,21 +522,37 @@ class Reader:
         a nested type takes a later index than its parent. Appending afterwards
         gets the numbering subtly wrong.
         """
+        early = self.records["datatype_early"]
         v = self.eu()
-        if v != 0:
-            i = v - 1
+        if (v == 0) if early else (v != 0):
+            # A back-reference. The two generations spell it opposite ways
+            # round: 1.3 puts the index in the lead value, and the earlier
+            # reader writes a zero lead and then the index.
+            i = self.eu() if early else v - 1
             return self.types[i] if i < len(self.types) else {"ref": i}
 
         slot = len(self.types)
         self.types.append(None)                  # reserve, then patch
-        token = self.eu()
+        token = v if early else self.eu()
         obj = self.type_info() if token == 5 else None
 
         # ALWAYS exactly one byte, in both dialects. An early Psycho Strike model
         # had this as two bytes for object types; decoding menu_callback byte by
         # byte shows it is one -- the apparent second byte was the namespace
         # string that ReadTypeInfo had already consumed.
-        flags = self.raw(1)[0]
+        #
+        # ...and the generation before 1.3 writes them as SEPARATE bytes
+        # instead, which is a different claim from the refuted one: two bytes
+        # always, and two more ahead of them when the token is 5.
+        if early:
+            flags = 0
+            if token == 5:
+                flags |= 1 if self.raw(1)[0] else 0          # handle
+                flags |= 2 if self.raw(1)[0] else 0          # const
+            flags |= 4 if self.raw(1)[0] else 0              # reference
+            flags |= 8 if self.raw(1)[0] else 0              # read-only
+        else:
+            flags = self.raw(1)[0]
 
         # The older reader recurses into ReadFunctionSignature when the object
         # type is the placeholder `_builtin_function_` -- that is how it stores a
@@ -609,7 +740,12 @@ class Reader:
         # record.** `debug_head` above and `debug_tail` in `function()` are
         # one debug block in the source and the traits byte is written
         # between them -- see `debug_head`.
-        rec["traits"] = self.raw(1)[0]
+        #
+        # ...and which of the two it is moves with the release: the 2013
+        # engine writes it inside the debug block instead, so `debug_head`
+        # has already taken it and there is nothing here to read.
+        if self.records["traits_last"]:
+            rec["traits"] = self.raw(1)[0]
 
     def debug_head(self, rec: Dict[str, Any]) -> None:
         """The debug fields a DEBUG build writes BEFORE the traits byte.
@@ -654,13 +790,22 @@ class Reader:
         # column 7.
         rec["lineNumbers"] = [self.eu() for _ in range(count)]
 
-        count = self.eu()
-        if not 0 <= count <= 1 << 16:
-            raise ParseError("implausible section count %d" % count)
-        sections = []
-        for i in range(count):
-            sections.append(self.eu() if i % 2 == 0 else self.string())
-        rec["sections"] = sections
+        if not self.records["traits_last"]:
+            # The 2013 engine closes the line numbers with the traits byte and
+            # only then reads the variables -- the one-byte read at 0x41AC1F,
+            # immediately after the loop at 0x41ABE4. 1.3 writes it after the
+            # variables instead, which is why `_script_body_legacy` reads it
+            # there and this does not.
+            rec["traits"] = self.raw(1)[0]
+
+        if self.records["debug_sections"]:
+            count = self.eu()
+            if not 0 <= count <= 1 << 16:
+                raise ParseError("implausible section count %d" % count)
+            sections = []
+            for i in range(count):
+                sections.append(self.eu() if i % 2 == 0 else self.string())
+            rec["sections"] = sections
 
         count = self.eu()
         if not 0 <= count <= 1 << 16:
@@ -683,6 +828,23 @@ class Reader:
     def debug_tail(self, rec: Dict[str, Any]) -> None:
         """The debug fields that follow the traits byte. See `debug_head`."""
         if not self.debug_info:
+            return
+        if self.records["section_per_record"]:
+            # One string and nothing else, read at the join after the
+            # funcType switch (0x41ADBB), so a funcdef carries an empty one
+            # and there is no declaredAt and no parameter-name list. That it
+            # is either empty or a source path is the check that makes the
+            # body before it judgeable: a desynchronised body leaves
+            # something else here.
+            at = self.p
+            section = self.string()
+            text = section.decode("latin1")
+            if text and not text.lower().endswith((".bgt", ".nvgt")):
+                raise ParseError(
+                    "a function's script section at 0x%X reads %r, which is "
+                    "no source file -- the body before it desynchronised"
+                    % (at, text[:40]))
+            rec["scriptSection"] = section
             return
         rec["scriptSection"] = self.string()
         rec["declaredAt"] = self.eu()
@@ -750,7 +912,7 @@ class Reader:
         # every record is the reading a person would take from the source --
         # and it dies on Air Puck's first virtual stub, where keeping it to
         # funcType 1 lands the tail exactly on EOF.
-        if ft == 1:
+        if ft == 1 or self.records["section_per_record"]:
             self.debug_tail(rec)
         return rec
 
@@ -962,7 +1124,19 @@ class Reader:
         name = self.string()
         ns = self.string()
         dt = self.data_type()
-        init = self.function_or_error(name.decode("latin1"), "initialiser")
+        init = None
+        if self.records["global_init_gate"]:
+            # One byte, and the function only when it is 1. Read out of
+            # `ReadGlobalProperty` at 0x41AEB0: `call edx` for one byte, then
+            # `cmp byte [esp+0xf], 0 / je` over the whole `ReadFunction`.
+            gate = self.raw(1)[0]
+            if gate not in (0, 1):
+                raise ParseError("a global's initialiser gate at 0x%X is %d, "
+                                 "which is neither 0 nor 1" % (self.p - 1, gate))
+            if gate:
+                init = self.function_or_error(name.decode("latin1"), "initialiser")
+        else:
+            init = self.function_or_error(name.decode("latin1"), "initialiser")
         return {"name": name.decode("latin1"), "namespace": ns.decode("latin1"),
                 "type": dt, "init": init}
 
@@ -1175,6 +1349,20 @@ def detect(data: bytes,
                 candidates.append((dialect, start, enums))
         except (ParseError, IndexError, struct.error):
             pass
+        # A build with NO `noDebugInfo` byte: the module's first field is
+        # the enum count, so the records start one value in rather than two.
+        # Screaming Strike is one -- its own `ReadInner` opens on a count --
+        # and the two readings are indistinguishable from the bytes when the
+        # counts are zero, which they are for a single-file game. The EOF
+        # landing below is what separates them.
+        try:
+            n_enums, start = read_encoded_uint(data, 0)
+            if 0 <= n_enums <= 4096:
+                r = Reader(data, dialect, start, records=RECORDS_2012)
+                enums = [r.enum() for _ in range(n_enums)]
+                candidates.append((dialect, start, enums))
+        except (ParseError, IndexError, struct.error):
+            pass
         for start in range(1, 6):
             enums, _ = _try_parse_enums(data, dialect, start)
             if enums:
@@ -1208,8 +1396,7 @@ def detect(data: bytes,
     # refusal stands. The first version of this fallback passed None and
     # could never have succeeded.
     for dialect, start, enums in candidates:
-        walk = _walk(data, dialect, start, len(enums), opcodes,
-                     True, False, False, dialect == TAGGED)
+        walk, _release = _trial(data, dialect, start, len(enums), opcodes)
         if walk["tail"]:
             return (dialect, start, enums)
 
@@ -1219,8 +1406,7 @@ def detect(data: bytes,
     # reading rather than refusing a module whose head is sound.
     if candidates:
         ranked = max(candidates, key=lambda c: _score(
-            _walk(data, c[0], c[1], len(c[2]), opcodes,
-                  True, False, False, c[0] == TAGGED)))
+            _trial(data, c[0], c[1], len(c[2]), opcodes)[0]))
         return ranked
     raise ParseError("neither dialect parses a coherent module head")
 
@@ -1325,13 +1511,15 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
           template_namespace: bool,
           unguarded_lists: bool = False,
           objvar_three: bool = False,
-          legacy_body: Optional[bool] = None) -> Dict[str, Any]:
+          legacy_body: Optional[bool] = None,
+          records: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
     """One full pass over a module under one set of build assumptions."""
     r = Reader(data, dialect, start, opcodes=opcodes,
                template_namespace=template_namespace,
                unguarded_lists=unguarded_lists,
                objvar_three=objvar_three,
-               legacy_body=legacy_body)
+               legacy_body=legacy_body,
+               records=records)
     classes, declared = [], None
     funcdefs, funcdefs_declared = [], None
     enums: List[Dict[str, Any]] = []
@@ -1372,14 +1560,61 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
                          len(blocks),
                          "?" if declared is None else declared))
 
-    return {"enums": enums, "classes": classes, "classes_declared": declared,
+    return {"debug_byte": r.records["debug_byte"],
+            "token_shift": r.records["token_shift"],
+            "early_behaviours": r.records["early_behaviours"],
+            "enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
-            "parse_errors": r.parse_errors, "end": r.p,
+            "parse_errors": r.parse_errors, "end": min(r.p, len(data)),
             "template_namespace": template_namespace,
             "unguarded_lists": unguarded_lists,
             "objvar_three": objvar_three,
             "legacy_body": r.legacy_body}
+
+
+def _trial(data: bytes, dialect: str, start: int, n_enums: int,
+           opcodes: Optional[Dict[int, Dict[str, Any]]]
+           ) -> Tuple[Dict[str, Any], str]:
+    """The best walk of one (dialect, start), and which release won it.
+
+    Every axis this reader trials, in one place: the record profiles, then
+    the four per-build fields. `detect` and `summarize` both need the answer
+    and used to compute it separately, with `detect`'s version pinned at
+    `template_namespace=True` -- so a module whose landing needs False was
+    reported as not landing at all by the one that chooses the dialect, and
+    then landed in the one that reports it. Two places answering one
+    question, with one of them stricter: the failure this document keeps
+    recording.
+
+    The record profiles are the OUTERMOST loop and the verified one is
+    first, so a module that already lands keeps the reading this reader
+    already held.
+    """
+    legacy_first = dialect == TAGGED
+    walk = None
+    release = RECORD_PROFILES[0][0]
+    for name, records in RECORD_PROFILES:
+        for namespaced in (True, False):
+            for unguarded in (False, True):
+                for three in (False, True):
+                    for legacy in (legacy_first, not legacy_first):
+                        t = _walk(data, dialect, start, n_enums, opcodes,
+                                  namespaced, unguarded, three, legacy,
+                                  records=records)
+                        if walk is None or _score(t) > _score(walk):
+                            walk, release = t, name
+                        if walk["tail"]:
+                            break
+                    if walk["tail"]:
+                        break
+                if walk["tail"]:
+                    break
+            if walk["tail"]:
+                break
+        if walk["tail"]:
+            break
+    return walk, release
 
 
 def _score(w: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1452,27 +1687,18 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
     # The body shape is tried in the order that puts each dialect's known
     # answer first, so adding the dimension cannot silently re-describe a
     # module that was already landing on EOF.
-    legacy_first = dialect == TAGGED
-    walk = None
-    for namespaced in (True, False):
-        for unguarded in (False, True):
-            for three in (False, True):
-                for legacy in (legacy_first, not legacy_first):
-                    trial = _walk(data, dialect, start, len(enums), opcodes,
-                                  namespaced, unguarded, three, legacy)
-                    if walk is None or _score(trial) > _score(walk):
-                        walk = trial
-                    if walk["tail"]:
-                        break
-                if walk["tail"]:
-                    break
-            if walk["tail"]:
-                break
-        if walk["tail"]:
-            break
+    walk, release = _trial(data, dialect, start, len(enums), opcodes)
 
     return {"path": path, "size": len(data), "dialect": dialect,
-            "start": start, "no_debug_info": data[0],
+            "start": start, "records": release,
+            "token_shift": walk["token_shift"],
+            "early_behaviours": walk["early_behaviours"],
+            # The module's own first byte -- unless the build writes no such
+            # byte, in which case there is nothing to report and a 0 here
+            # would read as "a debug build" for every release module of that
+            # generation. The debug fields are unconditional there, so the
+            # answer is in the records rather than in a flag.
+            "no_debug_info": (data[0] if walk["debug_byte"] else None),
             "enums": enums, "member_count": members,
             "classes": walk["classes"], "classes_declared": walk["classes_declared"],
             "funcdefs": walk["funcdefs"],
@@ -1501,7 +1727,12 @@ if __name__ == "__main__":
         print("%s  (%d bytes)" % (path, info["size"]))
         print("  dialect        %s   (enum section at +%d)"
               % (info["dialect"], info["start"]))
-        print("  noDebugInfo    %d" % info["no_debug_info"])
+        print("  records        %s" % info["records"])
+        if info["no_debug_info"] is None:
+            print("  noDebugInfo    -- this build writes no such byte, so the "
+                  "debug fields are unconditional")
+        else:
+            print("  noDebugInfo    %d" % info["no_debug_info"])
         print("  enums parsed   %d   (%d members)"
               % (len(info["enums"]), info["member_count"]))
         for e in info["enums"][:8]:

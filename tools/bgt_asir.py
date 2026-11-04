@@ -498,12 +498,26 @@ class Builder:
         self.m.bytecode_profile = (info.get("profile")
                                    or "bgt_%s" % info["dialect"])
         #: How a stored `eTokenType` becomes the one the IR uses: this
-        #: generation is four lower, BGT 1.3 two.
-        self.token = as_early.token if info.get("early") else _token
+        #: generation is four lower, BGT 1.3 two -- and one 1.3-shaped build
+        #: carries the four-lower numbering, which is why this asks the
+        #: reader's own answer rather than only whether the module came
+        #: through the early reader. Getting it wrong is not subtle but it
+        #: is confident: every `void` function came out returning `uint64`
+        #: and every `int` local as `tok68`.
+        self.token = (as_early.token
+                      if info.get("early") or info.get("token_shift") == 4
+                      else _token)
         #: Whether the operands are stored this generation's way -- a word
         #: as two raw bytes, a dword as a plain encoded integer, a quadword
         #: as eight raw bytes -- rather than as the newer varints.
         self.early = bool(info.get("early"))
+        #: ...and whether the BEHAVIOUR numbering is that generation's,
+        #: which is a separate question: one build stores its operands the
+        #: newer way and numbers its behaviours the older way. Taking the
+        #: two together read every string temp's destructor as a
+        #: copy-construction.
+        self.early_behaviours = bool(info.get("early")
+                                     or info.get("early_behaviours"))
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}
@@ -1244,7 +1258,70 @@ class Builder:
         self.name_funcdef_types(m)
         self.normalise(m)
         _Translator(m, positions_are_dwords=self.early)._post_process()
+        #: After the translator, which is what resolves `global_name` -- the
+        #: evidence this pass turns on.
+        self.rename_shadowed_locals(m)
         return m
+
+    def rename_shadowed_locals(self, m: Module) -> None:
+        """Rename a debug local that shares a global's name.
+
+        Every declaration this decompiler emits is hoisted to the top of its
+        body, so a local the author scoped to an inner block shadows the
+        global for the whole function. Build to Survive's client declares
+        `sound_pool p(5000)` and its `netloop` has a `uint p`: hoisted, the
+        sixteen `p.play_stationary(...)` calls on the pool are `Illegal
+        operation on 'uint'`.
+
+        **Only where the body reads that global as well.** Shadowing is
+        legal, and a function that only ever means its own local compiled
+        before this pass and after it: renaming those is noise that loses the
+        author's names, measured at six files of the client -- `seconds`,
+        `m`, `w`, `s`, `r`, `bla`. What hoisting creates is a body that means
+        both, and the bytecode says which bodies those are, because a global
+        read names the global it reads.
+
+        A PARAMETER is left alone: it is in scope for the whole function in
+        the original too, so if the body uses that name it means the
+        parameter, and renaming would change which variable is read.
+
+        Run after the module is built and translated: `debug_names` is called
+        while the globals are still being read, and `global_name` is what the
+        translator resolves.
+        """
+        names = {g.name for g in list(m.globals) + list(m.used_globals)
+                 if g.name and not g.namespace_}
+        if not names:
+            return
+        for f in m.saved_functions:
+            if not getattr(f, "has_debug_info", False) or not f.variables:
+                continue
+            reads = {ins.global_name for ins in (f.bytecode or ())
+                     if getattr(ins, "global_name", None)}
+            if not reads:
+                continue
+            taken = {v.name for v in f.variables if v.name}
+            taken.update(f.param_names or ())
+            # One new name per OFFSET, so a slot with several declarations
+            # keeps one identity -- which is what `claim` guarantees and what
+            # `redeclare` relies on.
+            renamed: Dict[str, str] = {}
+            for v in f.variables:
+                if (v.stack_offset or 0) <= 0 or not v.name:
+                    continue
+                if v.name not in names or v.name not in reads:
+                    continue
+                key = "%s@%s" % (v.name, v.stack_offset)
+                if key not in renamed:
+                    for n in range(2, 1000):
+                        alt = "%s_%d" % (v.name, n)
+                        if alt not in taken and alt not in names:
+                            taken.add(alt)
+                            renamed[key] = alt
+                            break
+                    else:
+                        continue
+                v.name = renamed[key]
 
     def mark_inherited(self, m: Module) -> None:
         """Flag the properties a class inherits rather than declares.
@@ -1346,8 +1423,8 @@ class Builder:
                 digits = f.name[5:-1]
                 if digits.isdigit():
                     f.original_name = f.name
-                    f.name = EARLY_BEHAVIOURS.get(int(digits)) if self.early \
-                        else None
+                    f.name = (EARLY_BEHAVIOURS.get(int(digits))
+                              if self.early_behaviours else None)
                     if f.name is None:
                         f.name = "$beh" + digits
             for ins in f.bytecode:
