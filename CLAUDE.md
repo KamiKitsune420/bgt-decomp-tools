@@ -2482,7 +2482,7 @@ for the `for` headers it now writes.
 
 | title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
-| Screaming Strike (2012-07 engine, **debug**) | 927 | 0 | 0 | yes | 346 | not asked |
+| Screaming Strike (2012-07 engine, **debug**) | 958 | 0 | 0 | yes | 346 | not asked |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
@@ -12726,7 +12726,7 @@ umpteenth time in this file; `_trial` is the one answer.
 | module | 23,859 bytes, `tagged`, enum section at +1 |
 | tail | lands **exactly on EOF** at 0x5D33, 0 parse errors, 0 resyncs |
 | counts | 0 enums, 0 classes, 0 funcdefs, 51 globals, 21 functions, 72 bodies |
-| recovered | **927 lines, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced files, a verified split**, 346 calls read back |
+| recovered | **958 lines, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced files, a verified split**, 346 calls read back |
 | swept | **all ten `bgt signatures` shapes at 0** |
 | named | the one source file it was built from, and the author's own locals |
 
@@ -12803,46 +12803,104 @@ bodies whose only use of that slot was the destructor.
 is worth separating: the rename was adopted on the module's own records,
 and the audit reports exactly the same 19 literals before and after it.
 
-#### What is still open on this title: 19 literals and 19 calls
+#### `ALLOC`'s callee operand is not always a callee
 
-`bgt audit` is the check that found it, and no structural one could: the
-recovery has 0 residual gotos, a verified split, 0 unbalanced files and
-every sweep shape at 0, and six of its twenty-one paired bodies are
-missing a value.
+The last fault on this title, and the compiler is what forced it out: every
+free check passed -- 0 residual gotos, a verified split, 0 unbalanced files,
+every sweep shape at 0 -- and `bgt audit` reported **19 string literals
+missing from six bodies**, which is the only instrument that could see it.
+Asked to compile, BGT gave **22 errors** and all of them were the same line:
 
-| body | lost |
-|---|---|
-| `main` | six literals and 6 `random` |
-| `itemGet` | the seven item names, and 7 `random` |
-| `scorePost` | two literals and 8 `random` |
-| `game`, `hitPunch`, `destruct` | one, one and two literals |
+```
+voice.speak_interrupt(null);
+Error: No matching signatures to 'tts_voice::speak_interrupt(<null handle>)'
+Information: Candidates are: bool tts_voice::speak_interrupt(string) const
+```
 
-The visible instance is `voice.speak_interrupt(null)` -- the argument that
-should be `"Shrink"` -- and the bytecode says what the shape is:
+The bytecode for one of them, which is where the answer is:
 
 ```
 PSF 7                               ; the ALLOC's destination, pushed deepest
 STR "Shrink" ; _string_factory_ ; PshRPtr
 PSF 6 ; string::_beh_0_             ; slot 6 = the literal
-PSF 6 ; ALLOC 6, 33                 ; a COPY into a new object, handle -> slot 7
+PSF 6 ; ALLOC 6, 33                 ; a heap copy of it, handle -> slot 7
 PSF 6 ; string::_beh_1_             ; destroy slot 6
 VAR 7 ; PshGPtr voice ; GETOBJ ; CALLSYS tts_voice::speak_interrupt
 ```
 
-So the literal reaches slot 6 and the value that is passed is an `ALLOC`'d
-copy of it in slot 7, which the simulation does not bind -- and `_deref`
-answers `null` for a handle slot nothing has written, which is this file's
-own rule working correctly on a write it cannot see. That is the third kind
-of unseen write this document records, after a behaviour through a pushed
-address and a store through the reference register, reached by a fourth
-route: a copy construction whose destination was pushed before the value
-it copies.
+**All fifty of that module's `ALLOC`s read `6, 33`.** A `usedFunctions`
+index would vary; a constant says the operand is not one. One-based it
+resolves to the engine's `random`, which takes TWO parameters -- so the
+simulation popped the destination as an argument, slot 7 was never written,
+and `_deref` answered `null` for a handle slot nothing had written. That
+rule being right about a write it cannot see is the fourth time this file
+records that shape, after a behaviour through a pushed address, a store
+through the reference register, and `ALLOC`'s own stacked destination.
 
-**Not fixed**, and it wants its own measurement rather than being bolted
-on: `_alloc` records a destination, and whether it can reach one pushed
-that early is the question. The same `null` arguments are in the five
-2010-2012 titles' recoveries, before any of this work, so it is one defect
-and not this build's.
+The engine says why, in its own `TranslateFunction` at `0x418F6E`:
+
+```
+cmp edi, 0x40 / jne               ; ALLOC
+  FindObjectType(arg0)            ; the type
+  test [type+0x84], 0x80000       ; is it a SCRIPT OBJECT?
+  je  done                        ; <- if not, arg1 is NEVER TRANSLATED
+  FindFunction(arg1)              ; ...and with no minus one
+```
+
+Two things at once. This build's index is **plain**, where 1.3's is
+one-based under a `!= 0` guard. And for a type the module does not declare
+the operand is **never read at all**, so it holds whatever the compiler left
+there -- `0x80000` being this generation's script-object flag, which this
+file already dates to 2011-11.
+
+So the arity comes from the stack when the operand is unreadable, where the
+destination is the deepest pushed value and everything above it is an
+argument. Instrumented at the site, the stack holds exactly `local_7` and
+`tmp6` -- the destination and one argument -- which is what the shape above
+predicts.
+
+**An owner match was tried first and is the wrong test.** It is the check
+this file settled the operand's base with, going from 322 of 15,619 sites to
+all of them -- and the bogus callee here is `random`, a global function with
+no owner at all, so "no owner, therefore a factory" waved it straight
+through and nothing changed. The engine does not ask about the callee; it
+asks about the type, and the equivalent question here is whether the module
+declares it.
+
+| | before | after |
+|---|---|---|
+| `bgt audit` literals | 19 values in 6 bodies | **0 in 0** |
+| `null` arguments in the text | 25 | **0** |
+| the compiler | 22 errors | **not re-asked** -- the 22 came from somebody running it on their own machine, and asking again spends a modal dialog on somebody's screen, so the standings still say `not asked` for this title |
+
+and the call that was `speak_interrupt(null)` now reads as the author wrote
+it:
+
+```
+local_14 = string("Press 1 to play normal mode, or 2 to play arcade mode.");
+voice.speak_interrupt(local_14);
+```
+
+##### ...and the AUDIT reads that operand too, so its last six rows are its own
+
+`bgt audit` takes an `ALLOC`'s callee from the operand `as_disasm`
+resolved, under the one-based rule -- so it expects a `random` per `ALLOC`
+that the program never calls. Counted per body, the phantoms and the
+`ALLOC` sites agree exactly:
+
+| body | `ALLOC` sites | phantom `random` the audit expects |
+|---|---|---|
+| `main` | 6 | 6 |
+| `game` | 1 | 1 |
+| `hitPunch` | 1 | 1 |
+| `itemGet` | 7 | 7 |
+| `destruct` | 2 | 2 |
+| `scorePost` | 8 | 8 |
+
+Six for six, so those rows are the audit's own artifact rather than a lost
+call -- the same kind as the eight escaped bytes on Manamon 1. Not fixed,
+because the one-based rule lives in `as_disasm`, which is not told which
+build it is reading; recorded here so the rows are not re-triaged.
 
 #### What all of it cost, measured against a frozen tree
 

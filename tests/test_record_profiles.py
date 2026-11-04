@@ -263,3 +263,34 @@ def test_a_declaration_with_no_arguments_has_no_parentheses():
     # ...and a construction WITH arguments keeps them, which is the form
     # this file records as the only one that compiles for such a class.
     assert 'args = a.text[len(tn) + 1:-1].strip()' in src
+def test_an_allocs_callee_operand_is_only_read_where_the_engine_reads_it():
+    """One build translates it only for a SCRIPT object, so for a registered
+    type it holds whatever the compiler left there. All fifty of Screaming
+    Strike's read `6, 33` -- a constant, where a real index would vary --
+    and one-based that resolves to the engine's `random`, two parameters,
+    so the simulation took the ALLOC's destination for an argument and the
+    slot the string was in was never written.
+    """
+    assert as_module.RECORDS_13["alloc_callee_script_only"] is False
+    assert as_module.RECORDS_2012["alloc_callee_script_only"] is True
+
+
+def test_the_alloc_arity_falls_back_on_the_type_not_the_callee():
+    """An owner match was tried first and did nothing: the bogus callee is a
+    global function with no owner at all, so "no owner, therefore a factory"
+    waved it through. The engine asks about the TYPE -- is it one the module
+    declares -- which is what the fallback has to ask too.
+
+    A source check, because reaching it needs a module of that build and
+    this repository holds no game files.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "tools", "nvgt", "decompile.py")
+    with open(path, encoding="utf-8") as handle:
+        src = handle.read()
+    assert "_alloc_callee_is_readable" in src
+    assert "alloc_callee_script_only" in src
+    # the question is asked of the module's own classes, not of the callee
+    body = src.split("def _alloc_callee_is_readable", 1)[1].split("\n    def ", 1)[0]
+    assert "self.m.classes" in body
+    assert "object_type" not in body

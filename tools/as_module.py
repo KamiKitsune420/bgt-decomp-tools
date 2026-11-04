@@ -191,6 +191,13 @@ RECORDS_13 = {
     #: literals across six bodies, which the bytecode audit reported and
     #: no structural check could.
     "early_behaviours": False,
+    #: Whether `ALLOC`'s callee operand is translated only when the
+    #: allocated type is a SCRIPT object. 1.3 resolves it for every type;
+    #: the 2012-07 engine tests the script-object flag first and leaves the
+    #: operand alone otherwise, so for a registered type it holds whatever
+    #: the compiler put there and means nothing to a reader. Read out of
+    #: that build's own `TranslateFunction` at 0x418F6E.
+    "alloc_callee_script_only": False,
 }
 
 #: Screaming Strike's engine (2012-07-24, 394 registered names): 1.3's
@@ -208,6 +215,7 @@ RECORDS_2012 = {
     "section_per_record": True,
     "token_shift": 4,
     "early_behaviours": True,
+    "alloc_callee_script_only": True,
 }
 
 #: Tried in order, verified first.
@@ -1563,6 +1571,8 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
     return {"debug_byte": r.records["debug_byte"],
             "token_shift": r.records["token_shift"],
             "early_behaviours": r.records["early_behaviours"],
+            "alloc_callee_script_only":
+                r.records["alloc_callee_script_only"],
             "enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
@@ -1693,6 +1703,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "start": start, "records": release,
             "token_shift": walk["token_shift"],
             "early_behaviours": walk["early_behaviours"],
+            "alloc_callee_script_only": walk["alloc_callee_script_only"],
             # The module's own first byte -- unless the build writes no such
             # byte, in which case there is nothing to report and a 0 here
             # would read as "a debug build" for every release module of that

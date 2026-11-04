@@ -518,6 +518,11 @@ class Builder:
         #: copy-construction.
         self.early_behaviours = bool(info.get("early")
                                      or info.get("early_behaviours"))
+        #: ...and whether an `ALLOC`'s callee operand is worth reading at
+        #: all for a type the module does not declare. Carried on the
+        #: module, because the decompiler is where the arity is used.
+        self.m.alloc_callee_script_only = bool(
+            info.get("alloc_callee_script_only"))
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}

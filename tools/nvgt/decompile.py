@@ -5496,10 +5496,66 @@ class FuncDecompiler:
         else:
             self._stmt(f"{calltxt};")
 
+    def _alloc_callee_is_readable(self, ins: Instr) -> bool:
+        """Is this `ALLOC`'s callee operand worth reading at all?
+
+        One BGT engine translates it only when the allocated type is a
+        SCRIPT object, so for a registered type it holds whatever the
+        compiler left there. The engine's own test is the script-object
+        flag; the equivalent here is whether the module DECLARES the type,
+        which is the same question asked of the same module.
+
+        An owner match was tried first and is the wrong test: the bogus
+        callee this was found through is `random`, a global function with
+        no owner at all, so "no owner, therefore a factory" waved it
+        through. The engine does not ask about the callee; it asks about
+        the type.
+        """
+        if not getattr(self.m, "alloc_callee_script_only", False):
+            return True
+        want = ins.type_ref
+        if want is None:
+            return True
+        return any(c is want for c in (self.m.classes or ()))
+
     def _alloc(self, ins: Instr) -> None:
         tname = ins.type_ref.format_name() if ins.type_ref else f"type#{ins.qw_arg}"
         fr = ins.func_ref
         nparams = len(fr.param_types) if fr else 0
+        # **An ALLOC's callee operand is not always a callee.** One BGT
+        # engine (the 2012-07 build Screaming Strike ships) translates it
+        # only when the allocated type is a SCRIPT OBJECT -- read out of its
+        # own `TranslateFunction` at 0x418F6E:
+        #
+        #     cmp edi, 0x40 / jne            ; ALLOC
+        #     FindObjectType(arg0)           ; the type
+        #     test [type+0x84], 0x80000      ; a script object?
+        #     je done                        ; if not, arg1 is left alone
+        #     FindFunction(arg1)
+        #
+        # so for a registered type the operand is whatever the compiler put
+        # there and means nothing to the reader. All fifty of that module's
+        # ALLOCs read `6, 33`, which resolved to the engine's `random` -- two
+        # parameters, so the simulation popped the destination as an argument
+        # and the slot it should have written was never written. `_deref`
+        # then answered `null` for a handle slot nothing had written, which
+        # is that rule being right about a write it could not see, and the
+        # compiler reported 22 errors of the form
+        # `speak_interrupt(<null handle>)`.
+        #
+        # The owner-match check is the one this file already uses to settle
+        # this operand -- it is what said `arg1 - 1` rather than `arg1`, by
+        # going from 322 of 15,619 sites to all of them -- so a callee whose
+        # owner is not the allocated type is not this type's constructor.
+        # The arity then comes from the stack, where the destination is the
+        # DEEPEST pushed value: everything above it is an argument.
+        if fr is not None and nparams and not self._alloc_callee_is_readable(ins):
+            ptrs = 0
+            for atom in reversed(self.stack):
+                if not atom.is_ptr:
+                    break
+                ptrs += 1
+            nparams = max(0, ptrs - 1)
         # VM layout: [dest pushed first] [args reversed] (obj pushed by VM);
         # pops yield args in forward order, then the destination slot.
         args = [self._deref(self.stack.pop() if self.stack else Atom("raw", "<?>"))
