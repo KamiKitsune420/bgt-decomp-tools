@@ -62,7 +62,83 @@ WILDCARD = "Game executable (*.exe)|*.exe|All files (*.*)|*.*"
 SCRIPT_WILDCARD = "BGT script (*.bgt)|*.bgt|All files (*.*)|*.*"
 
 
-def _labelled(parent, sizer, label, value="", wildcard=None, directory=False):
+def _new_folder_target(current, name, fallback):
+    """Where a folder called `name` goes, given what the field holds now.
+
+    Pure, and kept apart from the button, because this is the half worth
+    checking: an absolute name is taken as it stands, a bare name is placed
+    inside the field's own folder when that exists, inside its parent when
+    the field names a folder that does not exist yet, and inside `fallback`
+    when the field says nothing usable. Returns "" for an empty name, which
+    the caller reads as "the user changed their mind".
+    """
+    name = (name or "").strip().strip('"')
+    if not name:
+        return ""
+    if os.path.isabs(name):
+        return os.path.normpath(name)
+    current = (current or "").strip().strip('"')
+    if os.path.isdir(current):
+        base = current
+    elif current and os.path.isdir(os.path.dirname(current)):
+        base = os.path.dirname(current)
+    else:
+        base = fallback
+    return os.path.normpath(os.path.join(base, name))
+
+
+def _new_folder_button(parent, field, label):
+    """A button that makes a folder without going near the shell's dialog.
+
+    The shell's own "New folder" is what this exists to avoid. Making a
+    folder there is brokered through `RuntimeBroker.exe`, and when the broker
+    does not answer the picker waits on it forever -- on the GUI's own
+    thread, because the picker is modal -- so Windows declares the whole
+    program unresponsive and closes it. That is recorded as
+    `AppHangXProcB1`, naming `python.exe` and `RuntimeBroker.exe`, and it
+    happened to somebody choosing an output folder. Nothing in this program
+    is on that path and nothing in it can shorten the wait.
+
+    Asking for the name in a `wx.TextEntryDialog` is also the accessible
+    answer rather than merely the working one: it is a dialog with a labelled
+    field, which a screen reader announces without being asked, where the
+    shell creates the folder as an inline rename in a list.
+    """
+    button = wx.Button(parent, label="&New folder...")
+    button.SetName("Make a new folder for %s" % label.rstrip(":").lower())
+
+    def make(_event):
+        current = (field.GetValue() or "").strip().strip('"')
+        where = current if os.path.isdir(current) else os.path.dirname(current)
+        if not os.path.isdir(where):
+            where = os.path.expanduser("~")
+        prompt = wx.TextEntryDialog(
+            parent,
+            "Name for the new folder. It will be made inside:\n%s\n\n"
+            "A full path is taken as it stands." % where,
+            "New folder")
+        with prompt:
+            if prompt.ShowModal() != wx.ID_OK:
+                return
+            name = prompt.GetValue()
+        target = _new_folder_target(current, name, os.path.expanduser("~"))
+        if not target:
+            return
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as problem:
+            wx.MessageBox("That folder could not be made.\n\n%s" % problem,
+                          "New folder", wx.OK | wx.ICON_ERROR, parent)
+            return
+        field.SetValue(target)
+        field.SetFocus()
+
+    button.Bind(wx.EVT_BUTTON, make)
+    return button
+
+
+def _labelled(parent, sizer, label, value="", wildcard=None,
+              directory=False, new_folder=False):
     """A labelled text field with a Browse button, as one row.
 
     Returns the `wx.TextCtrl`. The label is set twice on purpose -- once as the
@@ -98,10 +174,13 @@ def _labelled(parent, sizer, label, value="", wildcard=None, directory=False):
                 field.SetFocus()
 
     browse.Bind(wx.EVT_BUTTON, pick)
+    extra = _new_folder_button(parent, field, label) if new_folder else None
 
     row = wx.BoxSizer(wx.HORIZONTAL)
     row.Add(field, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
     row.Add(browse, 0)
+    if extra is not None:
+        row.Add(extra, 0, wx.LEFT, 6)
     sizer.Add(text, 0, wx.TOP, 8)
     sizer.Add(row, 0, wx.EXPAND)
     return field
@@ -116,7 +195,8 @@ class Frame(wx.Frame):
         body = wx.BoxSizer(wx.VERTICAL)
 
         self.exe = _labelled(panel, body, "Game executable:")
-        self.out = _labelled(panel, body, "Output folder:", directory=True)
+        self.out = _labelled(panel, body, "Output folder:",
+                             directory=True, new_folder=True)
 
         options = wx.StaticBoxSizer(wx.VERTICAL, panel, "Options")
         box = options.GetStaticBox()
@@ -189,6 +269,11 @@ class Frame(wx.Frame):
         # reports and the user never sees the point of.
         wx.CallAfter(self.exe.SetFocus)
         self.say("Ready. Choose a game executable and an output folder.")
+        self.say("The output folder does not have to exist -- type a path "
+                 "and it is made for you, or use New folder. Avoid the "
+                 "shell dialog's own New folder button: making a folder "
+                 "there waits on a Windows broker that can stall, and "
+                 "Windows then closes this window.")
         self.say("Recover gives you the source, the asset packs the script "
                  "opens, those packs extracted, and the game's own data "
                  "files -- a folder that runs, not just one that compiles.")

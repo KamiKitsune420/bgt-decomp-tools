@@ -183,3 +183,53 @@ def test_focus_is_taken_after_the_frame_exists(frame):
     for _ in range(10):
         wx.Yield()
     frame.Hide()
+def test_the_output_row_can_make_a_folder_without_the_shell(frame):
+    """The shell's own New-folder button is what this replaces.
+
+    Making a folder there is brokered through `RuntimeBroker.exe`; when the
+    broker does not answer, the modal picker waits on the GUI's own thread
+    and Windows closes the program -- `AppHangXProcB1`, naming `python.exe`
+    and `RuntimeBroker.exe`. So the window needs a way to make a folder that
+    never touches the shell, and it has to be announceable.
+    """
+    buttons = [c for c in _interactive(frame) if isinstance(c, wx.Button)]
+    labels = [(c.GetLabel() or "") for c in buttons]
+    mine = [c for c in buttons if "new folder" in (c.GetLabel() or "").lower()]
+    assert mine, "no New-folder button on the window: %s" % labels
+    name = (mine[0].GetName() or "").strip()
+    assert name.lower() not in GENERIC_NAMES and name
+    # ...and it belongs to the OUTPUT row, not the executable one, which is
+    # a file rather than a folder.
+    assert "output" in name.lower()
+
+
+def test_a_new_folder_goes_where_the_field_points():
+    """The placement is the half worth checking, so it is a pure function.
+
+    A full path is taken as it stands; a bare name lands inside the folder
+    the field names; and where the field names a folder that does not exist
+    yet -- which is the normal case, since the output folder is created for
+    you -- the name lands beside it rather than inside something that is not
+    there.
+    """
+    target = bgt_gui._new_folder_target
+    here = os.path.dirname(os.path.abspath(__file__))
+    fallback = os.path.join(here, "fallback")
+
+    # a full path stands alone
+    full = os.path.join(here, "somewhere", "deep")
+    assert target("", full, fallback) == os.path.normpath(full)
+
+    # a bare name goes inside a folder that exists
+    assert target(here, "recovered", fallback) == os.path.join(here, "recovered")
+
+    # ...and beside one that does not
+    missing = os.path.join(here, "not_there_at_all")
+    assert target(missing, "recovered", fallback) == os.path.join(here, "recovered")
+
+    # nothing usable in the field falls back
+    assert target("", "recovered", fallback) == os.path.join(fallback, "recovered")
+
+    # an empty name is "never mind", not a folder called ""
+    assert target(here, "   ", fallback) == ""
+    assert target(here, "", fallback) == ""
