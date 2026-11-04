@@ -2495,7 +2495,7 @@ for the `for` headers it now writes.
 
 | title | lines | goto | unbalanced | split | calls read back | and does it RUN? |
 |---|---|---|---|---|---|---|
-| Screaming Strike (2012-07 engine, **debug**) | 958 | 0 | 0 | yes | 346 | compiles cleanly -- not driven |
+| Screaming Strike (2012-07 engine, **debug**) | 951 | 0 | 0 | yes | 346 | **yes** |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
@@ -2526,9 +2526,14 @@ global initialiser -- this file records `Failed to initialize global variable
 recovery, holds a key down and reads an answer back, so a **yes** there means
 every global initialised, the module loaded, and the engine answered.
 
-**Nine titles run**, and the biggest of those is a 9,692-line networked
-game server. (This said seven; Air Puck's two halves are the difference,
-and they are the first DEBUG builds in the table.)
+**Ten titles run**, and the biggest of those is a 9,692-line networked
+game server. (This said seven, then nine; Air Puck's two halves and then
+Screaming Strike are the difference, and all three are DEBUG builds.)
+
+**And the tenth was PLAYED, not driven.** Screaming Strike's row says yes
+because somebody compiled the recovery and played a game of it, which is
+the only evidence stronger than `bgt drive` and the only kind this project
+cannot generate for itself.
 
 **Air Puck's two rows are the first DEBUG builds in this table**, and they
 are the two whose recovered source is nearest its original: real file names,
@@ -12746,7 +12751,7 @@ umpteenth time in this file; `_trial` is the one answer.
 | module | 23,859 bytes, `tagged`, enum section at +1 |
 | tail | lands **exactly on EOF** at 0x5D33, 0 parse errors, 0 resyncs |
 | counts | 0 enums, 0 classes, 0 funcdefs, 51 globals, 21 functions, 72 bodies |
-| recovered | **958 lines, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced files, a verified split**, 346 calls read back |
+| recovered | **951 lines in ONE file, 0 unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced files, a verified split**, 346 calls read back |
 | swept | **all ten `bgt signatures` shapes at 0** |
 | named | the one source file it was built from, and the author's own locals |
 
@@ -12823,6 +12828,74 @@ bodies whose only use of that slot was the destructor.
 is worth separating: the rename was adopted on the module's own records,
 and the audit reports exactly the same 19 literals before and after it.
 
+#### A one-file game comes out as ONE file
+
+`bgt recover` writes an entry script that `#include`s a tree, and the entry
+carries a **prefix** of that tree inline -- as many sections as it needs
+before one declares something, because BGT writes no executable for a script
+section it calls empty. For a single-file game that left one section over,
+so the project came out as an entry script plus `includes/` holding one file
+**of the same name**:
+
+```
+screaming_strike_bgt_src/
+  screamingStrike_en.bgt            <- the entry
+  includes/
+    screamingStrike_en.bgt          <- ...and the whole game
+```
+
+which is nobody's layout. Where everything left to write is a single
+section, the entry carries that too and there are no `#include` lines at
+all, so no folder is made. Inlining the WHOLE order is still a prefix, so
+it moves nothing, and the split check is then exact by construction: one
+file holding the sections in order IS the one-file render.
+
+**Only when what remains is one section**, which is what keeps a game with
+a real tree browsable -- that is what `bgt recover` exists for, and a
+46-file game inlined into one entry would be the opposite of it. Measured:
+Screaming Strike and Build to Survive's `admin_maker` go to one file each,
+and Super Egg Hunt's 14 and Air Puck's 22 are byte for byte unchanged.
+
+#### ...and a default construction of a global is redundant
+
+`string gameMode;` came out as a whole helper function:
+
+```
+string gameMode = __nvgt_global_init_49();
+
+string __nvgt_global_init_49() {
+    string gameMode;
+    gameMode = string();          <- this line
+    gameMode = "";
+    return gameMode;
+}
+```
+
+Two statements, so the single-statement fold that puts a value on its
+declaration could not fire. The first is a default construction of a
+variable the declaration already default-constructs, and the second
+overwrites it without reading it -- so the value being dropped is
+unreachable and `T()` has nothing to run besides the construction that
+happens anyway. Both conditions are required: `gameMode = string();
+gameMode += "x";` is not a dead store and keeps its helper.
+
+What that is worth is not tidiness. These are the games' own keys and text,
+moved from inside a generated function to where the author wrote them:
+
+| | |
+|---|---|
+| Air Puck server | 14 helpers -> **0** -- `encrkey`, `bandecrypt`, the admin help, the changelog |
+| Air Puck client | 14 -> **0** |
+| Super Egg Hunt | 8 -> **2** -- `h_key`, its 32-byte pack key, now a literal |
+| Screaming Strike | 1 -> **0** |
+| Antony, Grodan Gun | 0 and 4, unchanged |
+
+Exactly one file per title differs, `includes/globals.bgt`, and every
+`bgt audit` figure is identical before and after on both titles that were
+checked -- Air Puck's server at 12 call rows, 0 literals, 0 constants and
+Super Egg Hunt at 0, 1 and 0 -- so nothing moved but the rendering. No
+sweep shape moves, no residual goto, and every split still verifies.
+
 #### `ALLOC`'s callee operand is not always a callee
 
 The last fault on this title, and the compiler is what forced it out: every
@@ -12891,7 +12964,7 @@ declares it.
 |---|---|---|
 | `bgt audit` literals | 19 values in 6 bodies | **0 in 0** |
 | `null` arguments in the text | 25 | **0** |
-| the compiler | 22 errors | **compiled cleanly** |
+| the compiler | 22 errors | **compiled cleanly, and the game was played** |
 
 The 22 and the clean run both came from somebody compiling it on their own
 machine rather than from a check here, which is the only way this column ever

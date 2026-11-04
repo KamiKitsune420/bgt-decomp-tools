@@ -1775,6 +1775,11 @@ def inline_prefix(order: List[str],
     runtime stub with no script attached -- which Windows declines to launch
     at all, as "not a valid application for this OS platform".
     """
+    distinct: List[str] = []
+    for path in order:
+        if path not in distinct:
+            distinct.append(path)
+
     inlined: List[str] = []
     for path in order:
         if path not in written_text:
@@ -1784,6 +1789,22 @@ def inline_prefix(order: List[str],
             break
         inlined.append(path)
         if declares_anything("\n".join(written_text[path])):
+            # **A one-file project comes out as ONE file.** Where exactly one
+            # section is left to write, carrying it inline too leaves no
+            # `#include` at all, so no `includes/` folder is made -- a
+            # single-file game was coming out as an entry script plus a
+            # folder holding one file OF THE SAME NAME, which is nobody's
+            # layout.
+            #
+            # Still a prefix, so it moves nothing, and the split check is
+            # then exact by construction: one file holding the sections in
+            # order IS the one-file render. Only when ONE is left, which is
+            # what keeps a game with a real tree browsable -- that is what
+            # `bgt recover` is for, and a 46-file game inlined into its
+            # entry would be the opposite of it.
+            rest = [p for p in distinct if p not in inlined]
+            if len(rest) == 1 and all(p in written_text for p in rest):
+                inlined.extend(rest)
             return inlined, None
     return [], ("the entry script declares nothing of the module's own, so it "
                 "carries a marker global: BGT writes no executable for a script "

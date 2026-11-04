@@ -624,13 +624,68 @@ def test_the_entry_script_always_declares_something():
     # A PREFIX, so the concatenation is unchanged -- the banner cannot be
     # skipped over, because the inlined text is emitted ahead of every
     # `#include` and skipping would move a declaration.
-    assert inlined == ["includes/types.bgt", "includes/classes/holder.bgt"]
+    #
+    # All three, because taking the prefix leaves exactly ONE section to
+    # write and a project with one file is not a tree: carrying it too
+    # means no `#include` at all and no `includes/` folder. Still a prefix,
+    # so nothing moves. See the two-sections-left case below, which is what
+    # keeps a real tree browsable.
+    assert inlined == order
 
     # ...and where the first section does declare something, nothing changes.
     written["includes/types.bgt"] = [banner + "enum team { red, blue }\n"]
     inlined, problem = bgt_project.inline_prefix(order, written)
     assert problem is None
     assert inlined == ["includes/types.bgt"]
+
+
+def test_a_one_file_project_needs_no_includes_folder():
+    """A single-file game was coming out as an entry script plus a folder
+    holding one file OF THE SAME NAME, which is nobody's layout.
+
+    Where exactly one section is left after the prefix, the entry carries it
+    too, there are no `#include` lines and no folder is made. Where two or
+    more are left, the tree stays -- that is what `bgt recover` is for, and
+    inlining a 46-file game into its entry would be the opposite of it.
+    """
+    banner = "// Decompiled.\n"
+    # one section left -> all of it inline
+    order = ["includes/types.bgt", "includes/globals.bgt",
+             "includes/game.bgt"]
+    written = {"includes/types.bgt": [banner],
+               "includes/globals.bgt": ["int lives = 3;\n"],
+               "includes/game.bgt": ["void main() {}\n"]}
+    inlined, problem = bgt_project.inline_prefix(order, written)
+    assert problem is None and inlined == order
+
+    # two left -> the prefix stops where it always did
+    order2 = order + ["includes/classes/player.bgt"]
+    written2 = dict(written, **{"includes/classes/player.bgt": ["class player {}\n"]})
+    inlined2, problem2 = bgt_project.inline_prefix(order2, written2)
+    assert problem2 is None
+    assert inlined2 == ["includes/types.bgt", "includes/globals.bgt"]
+
+    # ...and a section this did not write is never carried, because BGT's own
+    # source is already on disk there and there is nothing of ours to take.
+    inlined3, _problem3 = bgt_project.inline_prefix(
+        ["includes/types.bgt", "includes/globals.bgt", "includes/form.bgt"],
+        written)
+    assert "includes/form.bgt" not in inlined3
+
+
+def test_a_one_file_project_still_has_to_declare_something():
+    """The collapse must not become a way round the check it sits inside.
+
+    BGT writes no executable for a script section it calls empty, so an
+    entry carrying one section that declares nothing is the failure this
+    whole function exists to prevent -- and an early return for the
+    one-file case skipped the test for it.
+    """
+    order = ["includes/types.bgt"]
+    written = {"includes/types.bgt": ["// Decompiled.\n"]}
+    inlined, problem = bgt_project.inline_prefix(order, written)
+    assert inlined == []
+    assert problem is not None and "declares nothing" in problem
 
 
 def test_an_include_line_is_not_a_declaration():

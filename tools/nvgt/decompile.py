@@ -1419,6 +1419,39 @@ def _local_binding(stmt: str):
     return None
 
 
+def _drop_redundant_construction(dt: DataType, name: str, stmts, namespace=""):
+    """Drop `name = T();` where the declaration already constructs it.
+
+    Only where the NEXT statement overwrites the same name without reading
+    it, which is what makes the dropped value unreachable rather than merely
+    uninteresting -- `gameMode = string(); gameMode = "";` is a dead store
+    and `gameMode = string(); gameMode += "x";` is not.
+
+    `T()` of the global's own type is the only value dropped. Anything else
+    could have something to run, and a default construction is what the
+    declaration performs anyway.
+    """
+    if len(stmts) < 2:
+        return stmts
+    tname = dt.format().replace("&", "").removeprefix("const ").strip()
+    if not tname:
+        return stmts
+    names = [name] + ([namespace + "::" + name] if namespace else [])
+    dead = {"%s = %s();" % (n, tname) for n in names}
+    out = list(stmts)
+    while len(out) >= 2 and out[0].strip() in dead:
+        nxt = out[1].strip()
+        target = next((n for n in names if nxt.startswith(n + " = ")), None)
+        if target is None:
+            break
+        value = nxt[len(target) + 3:]
+        if re.search(r"(?<![A-Za-z_0-9])" + re.escape(name) + r"(?![A-Za-z_0-9])",
+                     value):
+            break              # the next statement READS it: not a dead store
+        out.pop(0)
+    return out
+
+
 def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
     """Collapse a generated global initialiser back into one construction.
 
@@ -8048,6 +8081,26 @@ class ModuleDecompiler:
                 self.emit(f"{g.type.format()} {g.name} = {list_expr};")
                 continue
             stmts = init_stmts.get(g.name) or []
+            # **A default construction of the global itself is redundant**,
+            # because the declaration already performs one -- so BGT's
+            # `string gameMode;` came out as a whole helper function:
+            #
+            #     string gameMode = __nvgt_global_init_49();
+            #     string __nvgt_global_init_49() {
+            #         string gameMode;
+            #         gameMode = string();       <- this line
+            #         gameMode = "";
+            #         return gameMode;
+            #     }
+            #
+            # Two statements, so the single-statement fold below could not
+            # fire and a helper was emitted for a global that holds "".
+            # Dropping it is safe for one reason and one only: the next
+            # statement overwrites the name without reading it, so the value
+            # being dropped is unreachable, and `T()` has nothing to run
+            # besides the construction the declaration does anyway.
+            stmts = _drop_redundant_construction(g.type, g.name, stmts,
+                                                 namespace)
             # A global of a script class whose constructor takes arguments has
             # to be DECLARED with them. `T x = T(a, b);` needs a default
             # constructor and an opAssign, and a class with only an
