@@ -2556,6 +2556,69 @@ def test_the_driver_never_declares_a_parameter_named_switch():
     assert '"-Switch"' not in source
 
 
+def test_the_driver_keeps_every_report_window_s_diagnostics():
+    """A later report window must not drop an earlier one's diagnostics.
+
+    A warning-only compile shows the diagnostics and then a second report
+    window saying the executable was written, and that one carries none. The
+    driver assigned `$text` per window, so the second wiped the first and
+    `bgt compile` answered `compiled cleanly` on a project whose compile had
+    just reported `Warning: 'resultat' is not initialized`. The engine was
+    read correctly and the answer was thrown away one window later -- the
+    same shape as reading the exit code before the report, which this driver
+    already guards against.
+
+    Checked on the driver's source, because the behaviour needs the engine:
+    the report branch has to accumulate, and panes have to be separated by a
+    blank line or the success pane becomes the tail of the last diagnostic's
+    message.
+    """
+    driver = bgt_compile.DRIVER
+    assert "$reports = @()" in driver, "report text has to accumulate"
+    assert "$reports -notcontains $block" in driver, (
+        "the same window is read every 150ms until it is dismissed, so a "
+        "block already seen must not be added twice")
+    assert '$text = $reports -join "`n`n"' in driver
+    assert '$block = $parts -join "`n`n"' in driver, (
+        "one pane is one record, so panes need a blank line between them")
+    # the old shape, which let a later window replace an earlier one
+    assert '{ $text = $parts -join "`n" }' not in driver
+
+
+def test_a_warning_after_an_information_line_is_parsed():
+    """The engine's report for a warning-only compile, parsed.
+
+    Two hazards in one text: an `Information: Compiling <signature>` record
+    stands before the warning, and the success pane stands after it with no
+    diagnostic of its own. Neither may swallow the warning, and the success
+    pane must not become part of its message.
+    """
+    report = "\n".join([
+        "File: C:\\x\\part_5.bgt",
+        "On line: 460 (1)",
+        "Information: Compiling double dgetn(dictionary@, string)",
+        "",
+        "File: C:\\x\\part_5.bgt",
+        "On line: 468 (26)",
+        "Line:         ancienResultat = resultat;",
+        "Warning: 'resultat' is not initialized.",
+        "",
+        "Compiled a debug version of the script into a file.",
+        "",
+    ])
+    got = bgt_compile.parse(report)
+    kinds = [d.kind for d in got]
+    assert "Warning" in kinds, kinds
+    warning = [d for d in got if d.kind == "Warning"][0]
+    assert warning.line == 468
+    assert warning.message == "'resultat' is not initialized."
+    # a report holding only warnings is still a compile that happened, and
+    # the summary has to say how many rather than "cleanly"
+    report_obj = bgt_compile.Report(outcome="errors", diagnostics=got)
+    assert "warning(s)" in report_obj.summary()
+    assert report_obj.ok
+
+
 def test_build_mode_asks_for_a_flag_and_run_mode_does_not():
     """`-c` / `-C` compile to an executable; no switch runs the script. The
     two are opposite outcomes, so the mapping is worth pinning: every value

@@ -64,7 +64,7 @@ from typing import List, Optional
 try:                      # installed as a package
     from . import (as_disasm, as_early, as_lift, as_module, as_opcodes, as_write,
                    bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
-                   bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
+                   bgt_rename, bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
                    bgt_ghidra, bgt_oracle, bgt_drive,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
                    bgt_installer, bgt_unpack, bgt_validate,
@@ -80,6 +80,7 @@ except ImportError:       # run directly from a checkout
     import bgt_apicheck
     import bgt_audit
     import bgt_roundtrip
+    import bgt_rename
     import bgt_signatures
     import bgt_to_nvgt
     import bgt_oracle
@@ -394,6 +395,22 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
     if args.scratch:
         argv += ["--scratch", args.scratch]
     return _run(bgt_roundtrip.main, argv, prog="bgt roundtrip")
+
+
+def cmd_rename(args: argparse.Namespace) -> int:
+    """`bgt rename` gives every local and parameter of a release build a name
+    inferred from what the code does with it. A release build keeps no local
+    name at all, so the choice is between `local_7` and a reading -- and
+    every reading here is checked against what it could shadow."""
+    argv = [args.project]
+    for name in ("chm", "cache", "lexicon", "json", "names"):
+        value = getattr(args, name, None)
+        if value:
+            argv += ["--" + name, value]
+    for flag in ("no_repair", "no_check"):
+        if getattr(args, flag):
+            argv.append("--" + flag.replace("_", "-"))
+    return _run(bgt_rename.main, argv, prog="bgt rename")
 
 
 def cmd_signatures(args: argparse.Namespace) -> int:
@@ -988,6 +1005,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="convert without asking the compiler")
     p.add_argument("--json", metavar="FILE", help="write the report")
     p.set_defaults(func=cmd_tonvgt)
+
+    p = sub.add_parser("rename",
+                       help="name every local and parameter of a recovered "
+                            "project, inferred from what the code does")
+    p.add_argument("project", help="the directory bgt recover wrote")
+    p.add_argument("--chm", metavar="FILE",
+                   help="bgt.chm, for the engine's own parameter names")
+    p.add_argument("--cache", metavar="DIR",
+                   help="where to keep the unpacked help file")
+    p.add_argument("--lexicon", metavar="FILE",
+                   help="a per-title JSON lexicon naming the parameters of "
+                        "the game's own helpers")
+    p.add_argument("--names", metavar="FILE",
+                   help="write every slot, its new name and the evidence")
+    p.add_argument("--json", metavar="FILE", help="write the report")
+    p.add_argument("--no-repair", action="store_true",
+                   help="leave a member initialiser list alone")
+    p.add_argument("--no-check", action="store_true",
+                   help="skip the token-stream and shadowing checks")
+    p.set_defaults(func=cmd_rename)
 
     p = sub.add_parser("signatures",
                        help="shapes in recovered text that no author "

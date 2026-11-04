@@ -111,6 +111,16 @@ $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
 $outcome = "timeout"
 $title = ""
 $text = ""
+# Every report window's text, kept rather than replaced.
+#
+# A warning-only compile shows TWO report windows in turn: the diagnostics,
+# and then the `Compilation Result` window that says the executable was
+# written -- and that second one carries no diagnostics. Assigning `$text`
+# per window let the second wipe the first, so a project whose compile really
+# did report `Warning: 'resultat' is not initialized` came back as
+# `compiled cleanly`. That is the failure this driver exists to prevent,
+# arriving one window later than the exit code it already guards against.
+$reports = @()
 # Whether a window that is NOT the compilation report appeared, i.e. the
 # script itself got as far as drawing. Running past the report is the whole
 # point of run mode, so breaking on the report would answer the wrong
@@ -145,7 +155,28 @@ while ((Get-Date) -lt $deadline) {
                 }
             }
             $isReport = ($title -like "Compilation*")
-            if ($isReport -or $text -eq "") { $text = $parts -join "`n" }
+            if ($isReport) {
+                # Accumulate, and do not let a later window drop an earlier
+                # one's diagnostics. The same window is read again every
+                # 150ms until it is dismissed, so a block already seen is not
+                # added twice.
+                # One pane is one complete record, so panes are separated by a
+                # blank line: the report window carries the diagnostics in one
+                # pane and "Compiled a debug version..." in another, and a
+                # single newline between them made the second the tail of the
+                # last diagnostic's message.
+                $block = $parts -join "`n`n"
+                if ($block -ne "" -and ($reports -notcontains $block)) {
+                    $reports += $block
+                }
+                # A blank line between blocks, because the parser separates
+                # records on one: joined with a single newline, the success
+                # window's "Compiled a debug version..." ran into the last
+                # diagnostic and became part of its message.
+                $text = $reports -join "`n`n"
+            } elseif ($text -eq "") {
+                $text = $parts -join "`n"
+            }
             # What the script itself said, kept apart from what the compiler
             # said about the source. A clean compile is silent about whether
             # the project has the files it opens, and the engine is not.
@@ -687,9 +718,17 @@ def parse(text: str) -> List[Diagnostic]:
                                   source=str(current.get("source", ""))))
         current = {}
 
+    # Whether a message is still open for its wrapped tail.  A blank line
+    # closes it: the records are blank-line separated, so a bare line after
+    # one is a new block and not the rest of the message above it -- the
+    # report window's "Compiled a debug version..." pane became the tail of
+    # the last warning without this.
+    wrapped_open = False
+
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         if not line.strip():
+            wrapped_open = False
             continue
         if line.startswith("File: "):
             flush()
@@ -726,10 +765,11 @@ def parse(text: str) -> List[Diagnostic]:
             current["kind"] = kind
             current["message"] = message
             flush()
+            wrapped_open = True
             break
         else:
             # A continuation of whatever message is open (messages can wrap).
-            if out and not current:
+            if out and not current and wrapped_open:
                 out[-1].message += " " + line.strip()
     flush()
     return out

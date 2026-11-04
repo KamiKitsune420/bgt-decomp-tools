@@ -5103,6 +5103,26 @@ class FuncDecompiler:
                     out_locals.append(local)
                     self.consumed_temps.discard(off)
                     self.temps[off] = Atom("var", local, data_type=output_type)
+                    #: **And the slot is bound HERE, at the call.** Writing
+                    #: `temps` directly leaves `temp_bound` holding whatever
+                    #: position the slot last had, and a promotion puts its
+                    #: assignment back at that bind -- so the copy-back can
+                    #: land in a block the call is not even in. Crazy Party's
+                    #: `dgetn` is the shape:
+                    #:
+                    #:     if (!d.exists(k)) {
+                    #:         local_4 = __nvgt_out_4_37;    <- from SetV8 4 0
+                    #:         return 0.0;
+                    #:     }
+                    #:     d.get(k, __nvgt_out_4_37);
+                    #:     return local_4;                   <- never written
+                    #:
+                    #: where slot 4 is reused for the two early `return 0.0`
+                    #: values, so its stale bind is inside the guard. That
+                    #: function returns 0 for every key that exists, which
+                    #: compiles, runs, and is wrong -- the same bind-position
+                    #: omission as the copy-constructed temp above.
+                    self.temp_bound[off] = (self._pos(), self.stmt_count)
                 else:
                     arg = self.var_atom(off)
                     #: **A named slot needs ordering too.** It passes

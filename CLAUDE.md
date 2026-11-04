@@ -486,6 +486,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_roundtrip.py` | `bgt roundtrip`: the original bytecode against the RECOMPILED bytecode, body by body -- the only check that compares a recovery against the whole original |
 | `bgt_compile.py` | `bgt compile`: runs BGT's own compiler and reads back every diagnostic; `bgt verbs`: which BGT the shell runs for a `.bgt`, and repoint it |
 | `bgt_project.py` | `bgt recover`: a browsable, compilable project — files, ZIP, report |
+| `bgt_rename.py` | `bgt rename`: a name for every local and parameter of a RELEASE build, inferred from what the code does with them -- the engine's own documented parameter names, the member a slot is read from or stored into, the type it is constructed from, the loop it counts, and the declared type last; verified by re-lexing both trees and requiring one consistent mapping per body, and by refusing any name that would shadow something visible |
 | `bgt_oracle.py` | `bgt oracle`: a source whose answer is known, round-tripped through the engine — the check for whether a recovery is the SAME PROGRAM |
 | `bgt_drive.py` | `bgt drive`: runs a recovered game's own functions with keys held down and watches what they answer -- silently, and with no window |
 | `bgt_gui.py` | `bgt gui`: a wxPython window over identify, recover and compile |
@@ -545,6 +546,7 @@ Or, in one command, the whole thing as a project the compiler judges:
 bgt recover game.exe -o recovered/ --compile
 bgt recover game.exe -o recovered/ --extract-data # ...and unpack the packs too
 bgt recover game.exe -o recovered/ --no-game-files  # ...without the game's other data
+bgt rename  recovered/                    # ...and give every local and parameter a NAME
 bgt compile recovered/game.bgt            # just the compiler, on any script
 bgt oracle                                # does a recovery still COMPUTE the same?
 bgt drive recovered/ --scenario ctrl      # ...and does the GAME's own code answer right?
@@ -2104,6 +2106,54 @@ flag it restores, and `deserialize_calendar` reads as the source wrote it. No
 residual goto, call-sequence score or literal count moves on any of the
 three.
 
+#### ...and the synthesised out local had NO BIND POSITION, for the same reason
+
+The third instance of one omission, after the copy-constructed temp and the
+return-slot shortcut: the `?&out` branch installs the slot's new atom by
+writing `self.temps[off]` **directly**, so `temp_bound[off]` keeps whatever
+position the slot last had -- and a promotion puts the assignment back at
+that bind. Where the slot is reused, that bind is in another block.
+
+Crazy Party's `dgetn` is the shape, and it is the only one in 174,000 lines:
+
+```
+if (d is null) return 0.0;        SetV8 4 0 ; CpyVtoR8 4 ; JMP exit
+if (!d.exists(k)) return 0.0;     SetV8 4 0 ; CpyVtoR8 4 ; JMP exit
+                                  VAR 4 ; CALLSYS dictionary::get
+                                  CpyVtoV8 6 4 ; CpyVtoR8 6
+```
+
+Slot 4 carries both early `return 0.0` values **and** the out argument, so
+its stale bind is inside the second guard, and the copy-back came out there:
+
+```
+if (!d.exists(k)) {
+    local_4 = __nvgt_out_4_37;    <- positioned by SetV8 4 0
+    return 0.0;
+}
+d.get(k, __nvgt_out_4_37);
+return local_4;                   <- nothing ever wrote it
+```
+
+**So that function answered 0.0 for every key that exists**, at 24 call
+sites, and the engine said so in the one way this file records as easy to
+ignore: `Warning: 'resultat' is not initialized` -- a *warning*, which BGT
+shows in a modal dialog and waits on, so an unattended compile stops there
+rather than reporting it.
+
+One line fixes it, the same `temp_bound[off] = (self._pos(), self.stmt_count)`
+the other three sites carry. **Swept before and after**: an out-argument
+copy-back emitted *before* its own call is 1 of 1 on this title and 0
+anywhere else, and the suite passes.
+
+**And `bgt oracle` has the shape now**, which is what says the fix is about
+the engine rather than about one title: `guarded_dictionary_read` is two
+guards returning a constant and then a `store.get(key, value)`, so the slot
+is reused exactly as `dgetn`'s is. It answers **37.5** with the fix and **0**
+without it, which is the whole defect in one value -- 55/55 against 54/55.
+None of the previous 53 shapes reached it, because none of them reused the
+out slot for an earlier return.
+
 ### ...and neither is its SIGNEDNESS, which the instruction set names
 
 The round trip's census, run again after the two fixes above, put a new
@@ -2456,6 +2506,31 @@ Three things about that are worth keeping:
   exit arrive together. Reading the exit code first threw the report away,
   and Psycho Strike's 33 errors came back as `compiled cleanly`. The text
   is parsed before the exit code is believed.
+- **...and the SECOND report window used to wipe the first.** The same
+  failure one window later, and it survived that fix for as long as nobody
+  compiled a project whose only diagnostic was a warning. A warning-only
+  compile shows the diagnostics and then a `Compilation Result` window
+  saying the executable was written, which carries none -- and the driver
+  assigned `$text` per window, so the second overwrote the first.
+  `bgt compile` therefore answered `compiled cleanly` on Crazy Party, whose
+  own compile reports `Warning: 'resultat' is not initialized` -- which is
+  how **four** clean verdicts on that title were collected before somebody
+  compiled it by hand and pasted the warning back. The engine was read
+  correctly every time and the answer was thrown away afterwards.
+
+  Report text accumulates now, de-duplicated because the same window is
+  read every 150 ms until it is dismissed, and panes are joined with a
+  **blank line**: the report window carries the diagnostics in one pane and
+  "Compiled a debug version..." in another, and a single newline between
+  them made the success pane the tail of the last diagnostic's message.
+  `parse` closes a wrapped message at a blank line for the same reason --
+  its docstring always said the records are blank-line separated, and it
+  was skipping blank lines instead of ending a record on one.
+
+  `tests/test_recovery.py` pins all four: the accumulation, the
+  de-duplication, both blank-line joins, and the absence of the old
+  per-window assignment. The behaviour itself needs the engine, so the test
+  reads the driver's source -- the same way the `$Switch` test does.
 - **One compiler at a time, and say so when it could not run.** `bgt.exe` is
   a GUI program read through the accessibility tree, and two of them at once
   do not both get read: checking two titles in parallel here gave one real

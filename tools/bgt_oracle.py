@@ -403,6 +403,26 @@ int out_parameter()
     return got;
 }
 
+// A dictionary read behind two guards that return a constant, which is what
+// makes the slot REUSED: the compiler puts both early return values and the
+// `?&out` argument in one slot, so the synthesised out local's copy-back is
+// positioned by whichever write the slot last had -- and that one is inside
+// a guard the call is not in. Crazy Party's `dgetn` is the shape, and it
+// answered 0 for every key that exists at 24 call sites. The only sign was
+// a WARNING, which BGT shows in a modal dialog rather than reporting.
+double guarded_dictionary_read(dictionary@ store, string key)
+{
+    if (@store == null) {
+        return 0.0;
+    }
+    if (!store.exists(key)) {
+        return 0.0;
+    }
+    double value;
+    store.get(key, value);
+    return value;
+}
+
 // A literal holding bytes above 0x7F. Emitted as characters into a UTF-8
 // file, one byte becomes two: the length is the whole test, and it is how
 // Super Egg Hunt's 32-byte pack key stopped opening its own sounds -- a
@@ -698,6 +718,10 @@ void main()
     report += "guarded_skipped=" + guarded_increment(1) + "|";
     report += "do_while=" + do_while_loop() + "|";
     report += "out_parameter=" + out_parameter() + "|";
+    dictionary store;
+    store.set("here", 37.5);
+    report += "guarded_dict_hit=" + guarded_dictionary_read(store, "here") + "|";
+    report += "guarded_dict_miss=" + guarded_dictionary_read(store, "gone") + "|";
     report += "high_byte_literal=" + high_byte_literal() + "|";
     report += "for_with_continue=" + for_with_continue() + "|";
     report += "nested_break_continue=" + nested_break_continue() + "|";

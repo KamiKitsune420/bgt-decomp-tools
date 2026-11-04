@@ -45,3 +45,11 @@ tests/nvgt/fixtures/build/
 
 # Agent worktrees: a checkout of this repo inside itself, never content.
 .claude/worktrees/
+
+# Game folders: archives to work from and recovered projects to read. Kept
+# out by name as well as by extension, because a recovered project is mostly
+# `.bgt` source and `git add -A` would otherwise pull in gigabytes of it
+# along with the game files beside it.
+games/
+*.bgt
+!tests/**/*.bgt
