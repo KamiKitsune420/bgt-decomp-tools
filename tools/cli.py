@@ -619,7 +619,40 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return _run(bgt_validate.main, forwarded)
 
 
+def _names_from(path: str) -> list:
+    with open(path, encoding="utf-8") as fh:
+        return [line.strip() for line in fh if line.strip()
+                and not line.startswith("#")]
+
+
 def cmd_pack(args: argparse.Namespace) -> int:
+    if args.pack_action == "rebuild":
+        #: handled before the parse below, which loads every payload --
+        #: the packs worth rebuilding are the ones too big for that
+        if not args.out:
+            return _fail("rebuild needs --out <pack>")
+        if bool(args.drop_from) == bool(args.keep_from):
+            return _fail("rebuild needs exactly one of --drop-from and "
+                         "--keep-from")
+        try:
+            names = _names_from(args.drop_from or args.keep_from)
+            summary = bgt_pack.rebuild(
+                args.pack, args.out,
+                drop=names if args.drop_from else None,
+                keep=names if args.keep_from else None)
+        except (bgt_pack.PackError, OSError) as exc:
+            return _fail(str(exc))
+        print("%s: kept %d entries, dropped %d, %.1f MB -> %.1f MB"
+              % (os.path.basename(args.out), summary["kept"],
+                 summary["dropped"], os.path.getsize(args.pack) / 1e6,
+                 summary["pack_bytes"] / 1e6))
+        if summary["unmatched"]:
+            print("%d name(s) matched no entry, so they changed nothing: %s"
+                  % (len(summary["unmatched"]),
+                     ", ".join(summary["unmatched"][:6])))
+            return 1
+        return 0
+
     try:
         version, entries = bgt_pack.parse(args.pack)
     except (bgt_pack.PackError, OSError) as exc:
@@ -837,12 +870,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_lift)
 
     p = sub.add_parser("pack", help="inspect or extract an SFPv1 asset pack")
-    p.add_argument("pack_action", choices=("list", "extract"), metavar="list|extract")
+    p.add_argument("pack_action", choices=("list", "extract", "rebuild"),
+                   metavar="list|extract|rebuild")
     p.add_argument("pack")
     p.add_argument("-o", "--outdir", default="extracted")
     p.add_argument("--key", help="AES-256 key as 64 hex characters")
     p.add_argument("--password", help="derive the key from this password")
     p.add_argument("--limit", type=int, default=20, help="entries to list")
+    p.add_argument("--out", help="rebuild: the pack to write")
+    p.add_argument("--drop-from", help="rebuild: a file of entry names to drop, "
+                                      "one per line")
+    p.add_argument("--keep-from", help="rebuild: a file of entry names to keep, "
+                                      "one per line")
     p.set_defaults(func=cmd_pack)
 
     p = sub.add_parser("crack", help="search a module for a pack password")

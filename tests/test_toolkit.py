@@ -15,12 +15,15 @@ Run:  python tests/test_toolkit.py     (or: python -m pytest tests/ -q)
 """
 
 import hashlib
+import io
 import os
 import shutil
 import struct
 import sys
 import inspect
 import tempfile
+
+import pytest
 
 try:                                   # after `pip install -e .`
     from bgtdecomp import (as_disasm, as_lift, as_module, as_opcodes,
@@ -897,6 +900,73 @@ def test_pack_build_roundtrips_through_parse():
         assert not entries[0].encrypted
     finally:
         os.unlink(path)
+
+
+def test_pack_rebuild_streams_and_keeps_bytes_verbatim():
+    """`rebuild` drops entries without holding the pack in memory.
+
+    `build` and `replace` assemble the whole result as one `bytes`, so neither
+    can rewrite a shipped pack -- Crazy Party's is 372 MB. A tiny `chunk`
+    forces the streaming path, and the kept payloads have to come back byte
+    for byte, flags included: a rebuild re-encodes nothing, which is also why
+    an encrypted entry needs no key.
+    """
+    src = _write_temp(bgt_pack.build([
+        ("keep/a.ogg", b"aaaaaaaaaa"), ("gone/b.ogg", b"bbb"),
+        ("keep/c.ogg", bgt_pack.encrypt_payload(b"secret", b"k" * 32))]))
+    out = _write_temp(b"")
+    try:
+        summary = bgt_pack.rebuild(src, out, drop=["gone/b.ogg"], chunk=3)
+        assert summary["kept"] == 2 and summary["dropped"] == 1
+        assert summary["unmatched"] == []
+        _version, entries = bgt_pack.parse(out)
+        assert [e.name for e in entries] == ["keep/a.ogg", "keep/c.ogg"]
+        assert entries[0].data == b"aaaaaaaaaa"
+        assert entries[1].encrypted
+        assert entries[1].decrypt(b"k" * 32) == b"secret"
+
+        # keep= is the complement of drop=
+        other = _write_temp(b"")
+        try:
+            bgt_pack.rebuild(src, other, keep=["keep/a.ogg", "keep/c.ogg"])
+            assert (io.open(out, "rb").read() == io.open(other, "rb").read())
+        finally:
+            os.unlink(other)
+    finally:
+        os.unlink(src)
+        os.unlink(out)
+
+
+def test_pack_rebuild_reports_a_name_that_matched_nothing():
+    """A typo in a drop list must not look like a successful trim.
+
+    Dropping a name the pack does not hold changes nothing, which is
+    indistinguishable from a trim that worked -- the quiet failure this
+    repository keeps recording. It is reported instead.
+    """
+    src = _write_temp(bgt_pack.build([("a", b"1"), ("b", b"22")]))
+    out = _write_temp(b"")
+    try:
+        summary = bgt_pack.rebuild(src, out, drop=["b", "nosuchentry"])
+        assert summary["kept"] == 1 and summary["dropped"] == 1
+        assert summary["unmatched"] == ["nosuchentry"]
+    finally:
+        os.unlink(src)
+        os.unlink(out)
+
+
+def test_pack_rebuild_refuses_an_ambiguous_or_destructive_call():
+    src = _write_temp(bgt_pack.build([("a", b"1")]))
+    out = _write_temp(b"")
+    try:
+        for kwargs in ({}, {"keep": ["a"], "drop": ["a"]}):
+            with pytest.raises(bgt_pack.PackError):
+                bgt_pack.rebuild(src, out, **kwargs)
+        with pytest.raises(bgt_pack.PackError):
+            bgt_pack.rebuild(src, src, drop=["a"])
+    finally:
+        os.unlink(src)
+        os.unlink(out)
 
 
 def test_pack_trailing_bytes_are_reported_not_refused():

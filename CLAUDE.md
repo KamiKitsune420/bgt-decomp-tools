@@ -471,7 +471,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgtlib.py` | the chain as a library — `unpack_file(path)` returns every intermediate |
 | `bgt_unpack.py` | CLI: unpack one or more executables, report each layer, write bytecode |
 | `bgt_installer.py` | `bgt installer`: the game and its packs inside an Inno Setup installer, read rather than run |
-| `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries |
+| `bgt_pack.py` | SFPv1 asset packs — parse, list, verify a key, decrypt entries, and `bgt pack rebuild` one without the entries a trimmed game can never ask for, streamed so a 372 MB pack fits |
 | `as_module.py` | AngelScript module reader — dialects, enums, classes, function bodies, and every tail table through to EOF; the records that move by engine RELEASE are named profiles (`RECORD_PROFILES`), tried verified-first so a module that already lands on EOF cannot be re-described |
 | `as_early.py` | `bgt early`: the 2010 to 2012 module format, which is a different format rather than a third dialect -- five engine releases, all five titles read end to end AND recover, and the debug ones name their own source files |
 | `as_opcodes.py` | recovers `asBCInfo[]` from the executable and disassembles AngelScript bytecode |
@@ -4680,6 +4680,37 @@ Three things this turned up:
   string constants is joined to the game's folder rather than looked for in
   it. Both guards above are what make joining a module's string to a path
   safe.
+
+### Rebuilding a pack is not `build`, because `build` holds it all
+
+`build` serialises a pack as one `bytes` and `replace` calls
+`parse(load_data=True)` first, so **neither can rewrite a shipped pack**:
+Crazy Party's is 372 MB, and this machine has stopped runs for system memory
+five times in this file. `bgt_pack.rebuild` streams instead -- the entry table
+comes from `parse(load_data=False)`, which already carries each entry's
+offset, size and flags, and each kept payload is copied a chunk at a time.
+Nothing is re-encoded, so **an encrypted entry needs no key**.
+
+```bash
+bgt pack rebuild data.dat --out trimmed.dat --drop-from dead.txt
+```
+
+Two things it refuses rather than does. Writing over its own source, because
+a pack rewritten in place through a streaming read is a corrupted pack. And
+**a name that matched no entry is reported**, not ignored: dropping a name
+the pack does not hold changes nothing, which is indistinguishable from a
+trim that worked, which is the quiet failure this file keeps recording.
+
+`_entry_header` is shared with `build` so the layout has one definition --
+two writers of one format drift, and the drift is silent. `build` hardcoded
+`flags = 0`; a rebuild preserves each entry's own, because a verbatim copy
+is the whole point. (Nothing reads those flags today: encryption is marked
+by the payload's own `SWCR` magic, which is what `Entry.encrypted` tests.)
+
+**What it was for.** A battle-only Crazy Party cannot reach a track named
+after a minigame class that no longer exists, because that track was reached
+through the class's own `musiqueFond`. 377 of 2,425 entries, 196 MB of 372,
+and the pack and the two media folders are trimmed from one list.
 
 ### Extracting means decrypting, and the key is in the module
 

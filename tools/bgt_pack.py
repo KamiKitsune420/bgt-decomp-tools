@@ -202,19 +202,89 @@ def encrypt_payload(plaintext: bytes, key: bytes) -> bytes:
             + tag_for_key(key) + body)
 
 
+def _pack_header(count: int) -> bytes:
+    return PACK_MAGIC + struct.pack("<III", 1, count, 0)
+
+
+def _entry_header(name: Union[str, bytes], size: int, flags: int = 0) -> bytes:
+    """One entry's record, up to but not including its payload.
+
+    Shared with `rebuild` so the layout has one definition: two writers of one
+    format drift, and the drift is silent.
+    """
+    if isinstance(name, str):
+        name = name.encode("utf-8")
+    return PACK_MAGIC + struct.pack("<III", len(name), flags, size) + name
+
+
 def build(items: Iterable[Tuple[Union[str, bytes], bytes]]) -> bytes:
     """Serialise an SFPv1 pack from (name, data) pairs.
 
     `data` is written verbatim -- pass plaintext for an unencrypted entry, or the
     output of encrypt_payload() for an encrypted one. Round-trips through parse().
+
+    The whole pack is assembled in memory, which is fine for building one and
+    not for rewriting a shipped one: see `rebuild` for that.
     """
-    out = bytearray(PACK_MAGIC + struct.pack("<III", 1, len(items), 0))
+    items = list(items)
+    out = bytearray(_pack_header(len(items)))
     for name, data in items:
-        if isinstance(name, str):
-            name = name.encode("utf-8")
-        out += PACK_MAGIC + struct.pack("<III", len(name), 0, len(data))
-        out += name + data
+        out += _entry_header(name, len(data)) + data
     return bytes(out)
+
+
+def rebuild(path: str, out_path: str, keep: Optional[Iterable[str]] = None,
+            drop: Optional[Iterable[str]] = None,
+            chunk: int = 1 << 20) -> Dict[str, Any]:
+    """Copy a pack with some entries left out, WITHOUT holding it in memory.
+
+    `build` and `replace` assemble the result as one `bytes`, so neither can
+    rewrite a shipped pack: Crazy Party's is 372 MB, and this machine has
+    killed runs for memory more than once. This streams instead -- the entry
+    table comes from `parse(load_data=False)`, which already gives each
+    entry's offset, size and flags, and each kept payload is copied a chunk
+    at a time. Nothing is re-encoded, so an encrypted entry needs no key.
+
+    Exactly one of `keep` and `drop` is given, as entry names. **A name that
+    is in neither the pack nor the result is reported** rather than ignored,
+    because a typo in a drop list is otherwise a silent no-op that looks
+    exactly like a successful trim.
+
+    Returns a summary: how many entries were kept and dropped, the bytes
+    written, and any names that matched nothing.
+    """
+    if (keep is None) == (drop is None):
+        raise PackError("pass exactly one of keep= and drop=")
+    if os.path.abspath(path) == os.path.abspath(out_path):
+        raise PackError("rebuild writes a new pack; out_path must differ")
+
+    _version, entries = parse(path, load_data=False)
+    wanted = {str(n) for n in (keep if keep is not None else drop)}
+    names = {e.name for e in entries}
+    if keep is not None:
+        chosen = [e for e in entries if e.name in wanted]
+    else:
+        chosen = [e for e in entries if e.name not in wanted]
+
+    written = 0
+    with open(path, "rb") as src, open(out_path, "wb") as out:
+        out.write(_pack_header(len(chosen)))
+        for e in chosen:
+            out.write(_entry_header(e.name, e.size, e.flags))
+            src.seek(e.offset)
+            left = e.size
+            while left:
+                block = src.read(min(chunk, left))
+                if not block:
+                    raise PackError("entry %s: short read at %d bytes left"
+                                    % (e.name, left))
+                out.write(block)
+                left -= len(block)
+            written += e.size
+        total = out.tell()
+    return {"kept": len(chosen), "dropped": len(entries) - len(chosen),
+            "payload_bytes": written, "pack_bytes": total,
+            "unmatched": sorted(wanted - names)}
 
 
 def replace(path: str, replacements: Dict[str, bytes],
