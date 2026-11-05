@@ -334,8 +334,16 @@ def test_build_mode_runs_what_it_built():
     release` was the only way to ask it anything.
 
     Checked on the source, because the behaviour needs the engine: drive has
-    to own the launch, and it has to wait for the probe's table rather than
-    for the process.
+    to own the launch, and it has to wait for the PROBE TO EXIT.
+
+    This test used to assert the opposite -- that the file appearing is the
+    signal "not the process ending" -- and that was the defect, pinned.
+    BGT buffers a `file` until `close()`, so the table exists at zero bytes
+    from the first tick: waiting on it read an empty table off a probe that
+    was working perfectly, and drive then reported that the probe had not
+    reported. A check that lies about the one mode whose purpose is a
+    question a script run cannot answer is the same defect `_run_built` was
+    written to fix, one level down.
     """
     import inspect
 
@@ -347,9 +355,37 @@ def test_build_mode_runs_what_it_built():
     assert "cwd=project" in body, (
         "the script asks the engine for its pack by a relative name, so the "
         "project has to be the working directory")
-    assert "os.path.isfile(results)" in body, (
-        "the probe writes its table and exits, so the file appearing is the "
-        "signal -- not the process ending")
+    wait = body.split("while time.monotonic() < deadline:", 1)[1]
+    wait = wait.split("finally:", 1)[0]
+    assert "proc.poll() is not None" in wait, (
+        "the probe flushes its table in its own close(), so the loop has to "
+        "wait for the process to exit")
+    assert "os.path.isfile(results)" not in wait, (
+        "the table exists at zero bytes from the first tick, so the file "
+        "appearing is not the signal")
+
+
+def test_a_clean_build_run_is_not_reported_as_a_window():
+    """`_run_built`'s success outcome must not be `started`.
+
+    `started` is what `bgt_compile` reports when a script drew a window, and
+    drive prints that as "a window opened, so the run was cut short. Drive a
+    function that does not draw one." Returning it for a clean run made every
+    successful `--build` read as that failure -- advice about a problem the
+    run did not have, on a project whose compiled build was answering
+    correctly.
+    """
+    import inspect
+
+    body = inspect.getsource(bgt_drive._run_built)
+    returns = [line.strip() for line in body.splitlines()
+               if line.strip().startswith("return ")]
+    assert returns, "no return statements found"
+    assert not any('"started"' in line for line in returns), (
+        "a clean --build run must not return the outcome drive prints as "
+        "'a window opened': %s" % returns)
+    assert any('"ran"' in line for line in returns), (
+        "the success outcome should say it ran: %s" % returns)
     assert "proc.kill()" in body, (
         "a probe whose watched expression draws a window waits on it")
     # ...and `drive` actually calls it, only in build mode

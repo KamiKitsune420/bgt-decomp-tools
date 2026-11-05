@@ -2222,9 +2222,36 @@ look like recovery defects and are the author's own developer path.
 
 `_run_built` starts the executable with the project as its working
 directory -- the script asks the engine for its pack by a relative name --
-and waits for the probe's **table** rather than for the process, because the
-probe writes its rows and exits. A probe that outlives the deadline is
-killed, and the rows are read either way.
+and waits for the **process to exit**, because the probe writes its rows and
+calls `exit()`. A probe that outlives the deadline is killed, and the rows
+are read either way.
+
+#### ...and it waited for the wrong signal, so it lied the other way
+
+That sentence read *"waits for the probe's table rather than for the
+process"* for one commit, and the table is not the signal: **BGT buffers a
+`file` until `close()`, so the table exists at zero bytes from the first
+tick.** So `_run_built` returned the moment the probe opened its output,
+read an empty table off a probe that was working perfectly, and `drive`
+reported `the probe did not report`.
+
+**And the outcome it returned on success was `started`**, which is what
+`bgt_compile` reports when a script *drew a window* -- so `drive` printed
+"a window opened, so the run was cut short. Drive a function that does not
+draw one." A clean run, reported as a failure, with advice about a problem
+it did not have. It is the defect this function was written to fix, one
+level down, and it shipped in the same commit as the fix.
+
+Found on the standalone Crazy Party battle build, where the compiled probe
+was answering correctly all along: run by hand it exits 0 and writes its
+table, and once the wait was on `proc.poll()` the same command answered
+`get_SCRIPT_COMPILED() 1`, `g_test 0`, `existeSon("bot/leviathan") 1`.
+
+**The test pinned the bug**, which is the part worth keeping.
+`test_build_mode_runs_what_it_built` asserted that the file appearing is the
+signal *"not the process ending"* -- the wrong claim, written confidently,
+locked in by its own assertion. A test's docstring is a claim about the
+engine and needs checking like any other.
 
 One honest limit, found immediately: the probe disarms `main`, so a game that
 opens its pack there has not opened it. `existeSon` then reads an unopened

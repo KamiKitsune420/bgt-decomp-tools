@@ -249,14 +249,24 @@ def read_results(path: str) -> List[Dict[str, str]]:
 def _run_built(executable, project, results, timeout):
     """Start the built probe and wait for its table. Returns an outcome.
 
-    The probe writes its rows and exits, so there is nothing to read from the
-    process: the file appearing is the signal. It is given the project as its
-    working directory, because the script asks the engine for its pack by a
-    relative name.
+    The probe writes its rows and calls `exit()`, so **the process exiting is
+    the signal** and the file appearing is not: BGT buffers a `file` until
+    `close()`, so the table exists at zero bytes from the first tick. Waiting
+    on it read an empty table off a probe that was working perfectly, and
+    `drive` then reported that the probe had not reported -- a check that
+    lied about the one mode whose purpose is a question a script run cannot
+    answer, which is the defect this function was written to fix, one level
+    down. It is given the project as its working directory, because the
+    script asks the engine for its pack by a relative name.
 
     The process is killed if it outlives the deadline. That is not a failure
     on its own -- a probe whose watched expression opens a window waits on it
     -- so the rows are read either way and the caller reports what it got.
+
+    The success outcome is `ran`, deliberately not `started`: `started` is
+    what `bgt_compile` reports when a script drew a window, and `drive`
+    prints that as "a window opened, so the run was cut short". Returning it
+    for a clean run made every successful `--build` read as that failure.
     """
     if not os.path.isfile(executable):
         return "nobuild"
@@ -269,11 +279,9 @@ def _run_built(executable, project, results, timeout):
         return "nodriver"
     try:
         while time.monotonic() < deadline:
-            if os.path.isfile(results):
-                # written in one go, but give the write a moment to land
-                time.sleep(0.2)
-                break
             if proc.poll() is not None:
+                # the table is flushed by the probe's own close(), so it is
+                # complete once the process is gone
                 break
             time.sleep(0.1)
     finally:
@@ -283,7 +291,7 @@ def _run_built(executable, project, results, timeout):
             except OSError:
                 pass
             proc.wait()
-    return "started" if os.path.isfile(results) else "timeout"
+    return "ran" if os.path.isfile(results) else "timeout"
 
 
 def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
