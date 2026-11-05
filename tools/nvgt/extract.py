@@ -477,6 +477,32 @@ def extract(source: Path, raw_payload: bool = False,
     return extract_data(Path(source).read_bytes(), raw_payload, key, iv)
 
 
+# How far past the last PE section the legacy fixed-size field may sit. The
+# block before it is a Poco varint pack count and, in some builds, a spare
+# byte; 64 is far more room than any observed layout needs.
+LEGACY_SIZE_FIELD_SEARCH = 64
+
+
+def _legacy_size_offsets(data: bytes, base: int) -> list[int]:
+    """Candidate offsets for the legacy size field, best first.
+
+    An offset whose declared size runs exactly to EOF is preferred, since
+    that is what the Windows packager writes; the others follow so a build
+    that appends a trailer is still reachable.
+    """
+    exact, loose = [], []
+    for skip in range(LEGACY_SIZE_FIELD_SEARCH + 1):
+        offset = base + skip
+        if offset + 4 > len(data):
+            break
+        size = struct.unpack_from("<I", data, offset)[0] ^ 0xA5B4
+        remaining = len(data) - offset - 4
+        if not 0 < size <= remaining or size % 16:
+            continue
+        (exact if size == remaining else loose).append(offset)
+    return exact + loose
+
+
 def extract_data(data: bytes, raw_payload: bool = False,
                  key: bytes | None = None, iv: bytes | None = None) -> tuple[NvgtInfo, bytes]:
     """Decode bytes with the complete executable context for bound profiles."""
@@ -489,8 +515,16 @@ def extract_data(data: bytes, raw_payload: bool = False,
         info.packaging_profile = custom_crypto.PROFILE
         return info, stream
     if not raw_payload and data[:2] == b"MZ":
-        offset = payload_offset(data)
-        if offset + 4 <= len(data):
+        base = payload_offset(data)
+        # The fixed-size field is not always exactly at the section end: some
+        # builds prefix the appended block with an embedded-pack count, and
+        # Crazy Party beta82's carries one spare byte besides, putting the
+        # field at +2. Candidates are trialled rather than assumed, because
+        # the decrypt is self-verifying -- AES, then the pad byte, then a
+        # COMPLETE zlib stream -- so a wrong offset cannot pass. The exact
+        # fits are tried first: on Windows the payload runs to EOF, so the
+        # size should equal the bytes that follow the field.
+        for offset in _legacy_size_offsets(data, base):
             size = struct.unpack_from("<I", data, offset)[0] ^ 0xA5B4
             if 0 < size <= len(data) - offset - 4 and size % 16 == 0:
                 try:
