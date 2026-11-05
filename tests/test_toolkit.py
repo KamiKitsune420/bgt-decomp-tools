@@ -937,6 +937,43 @@ def test_pack_rebuild_streams_and_keeps_bytes_verbatim():
         os.unlink(out)
 
 
+def test_pack_rebuild_carries_the_footer_over():
+    """The trailing bytes are the GAME's business even if the engine ignores them.
+
+    `parse` reports bytes after the last entry because `pack_file` reads
+    exactly `entry_count` entries and stops -- a fact about the engine. Crazy
+    Party's own script then checks the last 32 bytes of `data.dat` against a
+    constant and refuses to start without them: "The file data.dat is
+    probably corrupted." A rebuild that dropped them passed every check in
+    this toolkit and was dead on arrival in the game.
+    """
+    src = _write_temp(bgt_pack.build([("a", b"1"), ("b", b"22")]) + b"F" * 32)
+    out = _write_temp(b"")
+    try:
+        summary = bgt_pack.rebuild(src, out, drop=["b"], chunk=7)
+        assert summary["footer_bytes"] == 32
+        assert summary["footer_dropped"] == 0
+        with open(out, "rb") as fh:
+            assert fh.read()[-32:] == b"F" * 32
+        _version, entries = bgt_pack.parse(out)
+        assert [e.name for e in entries] == ["a"]
+        assert bgt_pack.parse.trailing == 32
+
+        bare = _write_temp(b"")
+        try:
+            dropped = bgt_pack.rebuild(src, bare, drop=["b"], footer=False)
+            assert dropped["footer_bytes"] == 0
+            assert dropped["footer_dropped"] == 32, (
+                "dropping the footer has to be reported, not silent")
+            bgt_pack.parse(bare)
+            assert bgt_pack.parse.trailing == 0
+        finally:
+            os.unlink(bare)
+    finally:
+        os.unlink(src)
+        os.unlink(out)
+
+
 def test_pack_rebuild_reports_a_name_that_matched_nothing():
     """A typo in a drop list must not look like a successful trim.
 

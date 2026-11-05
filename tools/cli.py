@@ -639,13 +639,20 @@ def cmd_pack(args: argparse.Namespace) -> int:
             summary = bgt_pack.rebuild(
                 args.pack, args.out,
                 drop=names if args.drop_from else None,
-                keep=names if args.keep_from else None)
+                keep=names if args.keep_from else None,
+                footer=not args.no_footer)
         except (bgt_pack.PackError, OSError) as exc:
             return _fail(str(exc))
         print("%s: kept %d entries, dropped %d, %.1f MB -> %.1f MB"
               % (os.path.basename(args.out), summary["kept"],
                  summary["dropped"], os.path.getsize(args.pack) / 1e6,
                  summary["pack_bytes"] / 1e6))
+        if summary["footer_bytes"]:
+            print("carried over a %d-byte footer" % summary["footer_bytes"])
+        if summary["footer_dropped"]:
+            print("DROPPED a %d-byte footer -- a game may check it (Crazy "
+                  "Party refuses to start without its own)"
+                  % summary["footer_dropped"])
         if summary["unmatched"]:
             print("%d name(s) matched no entry, so they changed nothing: %s"
                   % (len(summary["unmatched"]),
@@ -882,6 +889,9 @@ def build_parser() -> argparse.ArgumentParser:
                                       "one per line")
     p.add_argument("--keep-from", help="rebuild: a file of entry names to keep, "
                                       "one per line")
+    p.add_argument("--no-footer", action="store_true",
+                   help="rebuild: do not carry over the bytes after the last "
+                        "entry (a game may check them)")
     p.set_defaults(func=cmd_pack)
 
     p = sub.add_parser("crack", help="search a module for a pack password")

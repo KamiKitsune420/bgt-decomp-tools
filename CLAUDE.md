@@ -4701,6 +4701,38 @@ a pack rewritten in place through a streaming read is a corrupted pack. And
 the pack does not hold changes nothing, which is indistinguishable from a
 trim that worked, which is the quiet failure this file keeps recording.
 
+#### The trailing bytes are the GAME's business, and dropping them killed it
+
+`parse` reports bytes after the last entry rather than refusing them, and
+this file explains why: *"`pack::create` writes the entry count in the
+header and `pack_file` reads exactly that many, so the engine never looks
+past them -- a pack with a footer opens fine in the game."*
+
+Every word of that is true **about the engine**, and it is not a licence to
+drop them. `rebuild` did, `parse.trailing` on the result read 0, and I wrote
+down that this was fine because the engine ignores them. **Crazy Party's own
+script checks them**: `getDataHash` compares the file's size against a
+constant `g_dataHash` *and* its last 32 bytes against `g_dataFooter`, and
+`verifieDataHash` then refuses to start --
+
+```
+The file data.dat is probably corrupted. Try to re-download the game
+from an official source.
+```
+
+-- which is how it was reported, by somebody launching the game. The trimmed
+pack was byte-perfect by every check in this toolkit: 2,048 entries that all
+parsed, every battle sound resolving through the game's own `existeSon`, and
+0 of 121 bosses missing a cry. **None of it could see this**, because
+`verifieDataHash` is called from `main` and every probe disarms `main` --
+the honest limit this file already records for `bgt drive`, costing a real
+defect for the first time.
+
+So `footer` defaults to carrying them over, dropping them is reported rather
+than silent, and a trimmed pack needs `g_dataHash` reset to its new size.
+The lesson generalises past packs: **"the engine ignores it" is a fact about
+the engine, and the game is another program.**
+
 `_entry_header` is shared with `build` so the layout has one definition --
 two writers of one format drift, and the drift is silent. `build` hardcoded
 `flags = 0`; a rebuild preserves each entry's own, because a verbatim copy

@@ -235,7 +235,7 @@ def build(items: Iterable[Tuple[Union[str, bytes], bytes]]) -> bytes:
 
 def rebuild(path: str, out_path: str, keep: Optional[Iterable[str]] = None,
             drop: Optional[Iterable[str]] = None,
-            chunk: int = 1 << 20) -> Dict[str, Any]:
+            chunk: int = 1 << 20, footer: bool = True) -> Dict[str, Any]:
     """Copy a pack with some entries left out, WITHOUT holding it in memory.
 
     `build` and `replace` assemble the result as one `bytes`, so neither can
@@ -250,8 +250,17 @@ def rebuild(path: str, out_path: str, keep: Optional[Iterable[str]] = None,
     because a typo in a drop list is otherwise a silent no-op that looks
     exactly like a successful trim.
 
+    **The trailing bytes after the last entry are COPIED**, which is what
+    `footer` controls and why it defaults on. `parse` records them because
+    the engine never reads past the entry count -- and that is a fact about
+    the engine, not about the game. Crazy Party's own script checks the last
+    32 bytes of `data.dat` against a constant and refuses to start without
+    them: *"The file data.dat is probably corrupted."* A trimmed pack that
+    dropped them was byte-perfect by every check in this toolkit and dead on
+    arrival in the game, which somebody found by launching it.
+
     Returns a summary: how many entries were kept and dropped, the bytes
-    written, and any names that matched nothing.
+    written, the footer carried over, and any names that matched nothing.
     """
     if (keep is None) == (drop is None):
         raise PackError("pass exactly one of keep= and drop=")
@@ -259,6 +268,7 @@ def rebuild(path: str, out_path: str, keep: Optional[Iterable[str]] = None,
         raise PackError("rebuild writes a new pack; out_path must differ")
 
     _version, entries = parse(path, load_data=False)
+    trailing = parse.trailing          # read now: parse() is about to run again
     wanted = {str(n) for n in (keep if keep is not None else drop)}
     names = {e.name for e in entries}
     if keep is not None:
@@ -281,9 +291,22 @@ def rebuild(path: str, out_path: str, keep: Optional[Iterable[str]] = None,
                 out.write(block)
                 left -= len(block)
             written += e.size
+        carried = 0
+        if footer and trailing:
+            src.seek(os.path.getsize(path) - trailing)
+            left = trailing
+            while left:
+                block = src.read(min(chunk, left))
+                if not block:
+                    raise PackError("footer: short read at %d bytes left"
+                                    % left)
+                out.write(block)
+                left -= len(block)
+            carried = trailing
         total = out.tell()
     return {"kept": len(chosen), "dropped": len(entries) - len(chosen),
             "payload_bytes": written, "pack_bytes": total,
+            "footer_bytes": carried, "footer_dropped": trailing - carried,
             "unmatched": sorted(wanted - names)}
 
 
