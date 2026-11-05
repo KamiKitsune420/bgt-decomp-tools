@@ -3353,6 +3353,47 @@ method, so you should retrieve the error code before making any other
 calls"* -- and *"not affected by calls to any of your own functions or
 methods"*.
 
+#### ...and that declined class HAS an instance, in BGT's own library
+
+This said the engine-state class had none. It has one, and it is in a file
+every BGT game includes. `sound_pool_item::update` snapshots
+`get_sound_storage()`, switches the storage to the item's pack, loads, and
+restores -- and the recovery reads the snapshot **after** the switch, so it
+saves and restores `packname` and the restore is a no-op:
+
+```
+BGT's own source:   string old_storage = get_sound_storage();
+                    set_sound_storage(packname);
+                    handle.load(filename);
+                    set_sound_storage(old_storage);
+
+the recovery:       set_sound_storage(packname);
+                    handle.load(filename);
+                    soundStorage = get_sound_storage();
+                    set_sound_storage(soundStorage);
+```
+
+So the pool leaves the engine's sound storage pointed at one item's pack, and
+every later load that expects the default pack reads from the wrong one. It
+reaches any title whose `sound_pool` is **not** substituted for the engine's
+own source -- which this file records as the normal case, since
+`_why_not_stock` declines `sound_pool` wherever a game edited it.
+
+**The rule it wants is as narrow as a fold rule gets, and decidable from the
+names**: a call named `get_X` goes stale through a call named `set_X`. The
+engine registers the pairs -- `get_sound_storage`/`set_sound_storage`,
+`get_sound_master_volume`/`set_sound_master_volume`,
+`get_user_agent`/`set_user_agent`, `get_search_range`/`set_search_range`,
+`get_allow_diagonals`/`set_allow_diagonals` -- so the set is read rather than
+guessed, and `get_sound_master_volume` is probeable in `bgt oracle` with no
+pack and no audible output.
+
+**Not done, and the reason is evidential rather than doubt.** It is a fold
+change, and this file records three of them that passed on three titles and
+broke the fourth; the standard it sets is a five-title measurement, and only
+one title's executable is on this machine. Recorded with the rule shape and
+the oracle shape so the next attempt starts from them.
+
 That is a **precisely documented invalidation rule** for the one class of
 staleness this file declines to model. `_stale_fold` ends with *"A bare
 call's result can still go stale through engine state -- `reserve_slot()`
@@ -5648,6 +5689,75 @@ deleted call, a high byte written as a character -- each come back, in
 into a copy of Paladin's real tree reports it by body and value. Every
 audit also prints how much it declined, because that number is the
 difference between "nothing lost" and "nothing looked at".
+
+### ...and it could not see a GLOBAL accessor call either
+
+The same hole as `bgt_audit.invisible_in_source`'s, one file over, and this
+file already records closing it there: `_noise` dropped **every** name
+beginning `get_` or `set_`, which is right for a property accessor -- written
+`pool.pan_step`, so it needs a receiver -- and wrong for a global, which both
+texts call by name. BGT registers `set_sound_storage` and
+`set_sound_decryption_key` as ordinary globals, and this file's own words for
+that pair are *"the difference between a recovery with sound and one
+without"*.
+
+**It cost a real finding.** An NVGT port of this corpus carries BGT's own
+`sound_pool_item::update`, and the recovery had folded the snapshot past the
+call it guards:
+
+```
+BGT's own source:   string old_storage = get_sound_storage();
+                    set_sound_storage(packname);
+                    handle.load(filename);
+                    set_sound_storage(old_storage);
+
+the recovery:       set_sound_storage(packname);
+                    handle.load(filename);
+                    soundStorage = get_sound_storage();
+                    set_sound_storage(soundStorage);
+```
+
+Read after the switch it saves and restores `packname`, so the restore is a
+no-op and the pool leaves the engine's sound storage pointed at one item's
+pack. **This comparison scored that body identical to the engine's own
+source**, because both `get_sound_storage` and `set_sound_storage` were
+invisible to it.
+
+#### It is a LIST, because the receiver test was measured and is worse
+
+The obvious cure is `bgt_audit`'s: ask whether the call has a receiver, and
+apply the accessor rule only then. Measured on Crazy Party it reports **12
+more differing bodies and not one of them real**, because BGT's library
+source calls a class's own methods **without `this.`** where the decompiler
+always writes it -- nine `audio_form` bodies (`get_list_position`,
+`set_primary`, `get_cancel_button`), `logger::parse_time`'s nine
+`get_DATE_*`/`get_TIME_*` property reads, which BGT's source spells
+`DATE_DAY`, and `sound_pool`'s own `get_total_distance`. A receiver test is
+symmetric only where both texts agree on whether to write the receiver, and
+these two texts do not.
+
+**And the authority cannot supply the set either**, which is worth knowing
+before reaching for it: a registration string carries no owner -- this file
+says so about every constructor being registered as `f` -- so
+`bgt_api.registered()` returns `get_DATE_DAY` and `get_volume` in one flat
+list of 188 accessor-prefixed names with nothing to separate the globals from
+`sound`'s and `vector`'s methods.
+
+So `ACCESSOR_GLOBALS` names the three that are **spelled as a call with no
+receiver in both texts**, which is what keeps the comparison symmetric.
+Measured against the baseline:
+
+| | compared | identical | close | differs | literals |
+|---|---|---|---|---|---|
+| lifter, before | 160 | 140 | 6 | 14 | 141 |
+| lifter, after | 160 | **140** | 6 | 14 | 141 |
+| decompiler, before | 153 | 133 | 7 | 13 | 135 |
+| decompiler, after | 153 | **132** | **8** | 13 | 135 |
+
+**Exactly one body moves, on one path, and it is the defect** -- the lifter
+path is unchanged because that body already differed there for another
+reason. Against the receiver test's 12 false rows, that is the whole
+argument.
 
 ### `bgt_libcheck.calls` could not see a method called on an indexed receiver
 

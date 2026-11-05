@@ -294,7 +294,39 @@ def library_functions(include_dirs: Sequence[str]) -> Dict[str, List[str]]:
 # comparing
 # --------------------------------------------------------------------------
 
+#: The engine's registered GLOBAL functions that carry an accessor prefix and
+#: are spelled as a call, with no receiver, in BGT's own library source as well
+#: as in a recovery -- so counting them keeps the comparison symmetric.
+#:
+#: The prefix rule below is right for a property accessor, which is written
+#: `pool.pan_step` and so needs a receiver, and wrong for a global, which both
+#: texts call by name. `bgt_audit.invisible_in_source` already records these as
+#: the pair whose loss is "the difference between a recovery with sound and one
+#: without", and the same hole was open here. It cost a real finding: an NVGT
+#: port of this corpus had BGT's own `sound_pool_item::update` with the
+#: `get_sound_storage()` snapshot folded PAST the `set_sound_storage(packname)`
+#: it guards -- so the save/restore was a no-op -- and this comparison scored
+#: that body identical to the engine's own source.
+#:
+#: It is a LIST and not `owned`-style receiver test, which was tried and
+#: measured: asking only whether the call has a `.` before it reported **12
+#: more differing bodies on Crazy Party and not one of them real**, because
+#: BGT's library source calls a class's own methods without `this.` where the
+#: decompiler always writes it -- nine `audio_form` bodies
+#: (`get_list_position`, `set_primary`, `get_cancel_button`), `logger`'s nine
+#: `get_DATE_*`/`get_TIME_*` property reads, which BGT's source spells
+#: `DATE_DAY`, and `sound_pool`'s own `get_total_distance`. A registration
+#: string carries no owner, so `bgt_api.registered` cannot tell a global from
+#: a method and cannot supply this set either; these three are named because
+#: both texts spell them the same way.
+ACCESSOR_GLOBALS = frozenset((
+    "get_sound_storage", "set_sound_storage", "set_sound_decryption_key",
+))
+
+
 def _noise(name: str) -> bool:
+    if name in ACCESSOR_GLOBALS:
+        return False
     return (name in KEYWORDS or name in RESERVED or name in TYPE_NAMES
             or name in OPERATOR_METHODS
             or name.startswith(("get_", "set_", "_beh_", "$beh")))

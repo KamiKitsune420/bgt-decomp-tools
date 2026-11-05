@@ -34,13 +34,14 @@ import tempfile
 import unittest
 
 try:                                   # after `pip install -e .`
-    from bgtdecomp import as_disasm, as_write, bgt_audit
+    from bgtdecomp import as_disasm, as_write, bgt_audit, bgt_libcheck
 except ImportError:                    # straight from a checkout
     TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
     sys.path.insert(0, TOOLS)
     import as_disasm
     import as_write
     import bgt_audit
+    import bgt_libcheck
 
 
 # --------------------------------------------------------------------------
@@ -266,6 +267,33 @@ void prepare_audio()
         body = _body("{ global_interacts[slot].add_event(find(x)); }")
         self.assertEqual(bgt_audit.text_calls(body),
                          {"add_event": 1, "find": 1})
+
+    def test_libcheck_sees_a_GLOBAL_accessor_call(self):
+        """The same hole as `invisible_in_source`'s, one file over.
+
+        `bgt_libcheck._noise` dropped every name beginning `get_` or `set_`,
+        which is right for a property accessor -- `pool.volume` needs a
+        receiver -- and wrong for a global, and BGT registers
+        `set_sound_storage` and `set_sound_decryption_key` as globals. It
+        cost a real finding: an NVGT port of this corpus had BGT's own
+        `sound_pool_item::update` with the `get_sound_storage()` snapshot
+        folded PAST the `set_sound_storage(packname)` it guards, so the
+        save/restore was a no-op -- and the comparison scored that body
+        identical to BGT's own source.
+        """
+        body = ("{ string old = get_sound_storage();"
+                " set_sound_storage(packname); handle.load(f);"
+                " set_sound_storage(old); }")
+        self.assertEqual(
+            bgt_libcheck.calls(body),
+            ["get_sound_storage", "set_sound_storage", "load",
+             "set_sound_storage"])
+
+    def test_libcheck_still_hides_a_METHOD_accessor(self):
+        """A property accessor is written `pool.pan_step`, so keeping it in
+        would report a difference that is a spelling difference."""
+        self.assertEqual(bgt_libcheck.calls("{ x = pool.get_volume(); }"), [])
+        self.assertEqual(bgt_libcheck.calls("{ pool.set_pan_step(1); }"), [])
 
     def test_literals_come_from_the_raw_text_at_scrubbed_offsets(self):
         body = _body('{ // not a "literal"\n a = "x\\xacy"; b = "two"; }')
