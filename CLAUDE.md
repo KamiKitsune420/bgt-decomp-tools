@@ -3525,6 +3525,7 @@ compared byte for byte against Python:
 | `string_hash(s, 2, true)` | raw SHA-512, 64 bytes, NULs and all |
 | `string_reverse(s)` | reverses **bytes**, not characters |
 | `string_base64_encode(s)` | standard alphabet, standard `=` padding |
+| `string_base64_decode(s)` | **skips every byte outside the alphabet** -- see below |
 | `string_mid(s, start, count)` | **1-based**: `(s, 5, 4)` of `0123456789abcdef` is `4567` |
 
 `string_mid` is the one worth the trouble. Nothing in a decompiled body can
@@ -3533,6 +3534,108 @@ settle 1-based against 0-based -- both read perfectly -- so every recovered
 off by one in a way that only shows up in the output. The same probe shape
 settles any other primitive the same way, and it is cheaper than arguing
 about it.
+
+#### `string_base64_decode` SKIPS what it cannot read, and NVGT's STOPS
+
+The one primitive in that table whose answer differs between the two engines
+-- and it decides whether a ported game can open its own pack, because
+`string_base64_decode` is what seeds the computed pack keys in Manamon 1 and
+The Gate.
+
+**Neither source can settle it.** NVGT ships Poco as a prebuilt library, so
+only `Base64Decoder.h` is on disk -- three copies of it, and **no `.cpp`
+anywhere on the machine** -- and the header establishes two alphabets
+(`IN_ENCODING`, `IN_ENCODING_URL`) selected by an `options` argument through
+`_pInEncoding` while saying nothing about invalid characters, whitespace or
+padding, which is the half that matters. BGT's is x86. So both engines were
+asked, by the probe shape above, over one case list emitted twice so the two
+probes cannot drift apart.
+
+**BGT's rule is proven rather than described.** A model of *skip every byte
+outside the standard alphabet -- padding, whitespace, NULs and junk alike --
+then decode whatever symbols remain, dropping a trailing partial group*
+reproduces **32 of 32** of its answers. So `QQ==QQ==` is decoded as `QQQQ`,
+giving `41 04 10`, and `QU!D` as `QUD`, giving `41 40`.
+
+**NVGT stops at the first byte that is neither whitespace nor an alphabet
+symbol**, and discards the group it was in -- so it returns less than BGT,
+usually nothing at all. Whitespace is the one class the two agree on, both
+skipping it. **No simple model reproduces NVGT's answers**, the best being 27
+of 32, and that is the useful half: "near enough" is not a safe assumption
+about this primitive, so a port needs the behaviour asked rather than
+reasoned about.
+
+At NVGT's decode default, **24 of the 32 cases agree**. Seven of the eight
+that do not are every form of embedded junk, and the eighth is a real game's
+own seed, below:
+
+| input | BGT | NVGT, decode default |
+|---|---|---|
+| `QU!D` | `4140` | empty |
+| `QU-D` | `4140` | empty |
+| `QU_D` | `4140` | empty |
+| `QUJD\x00QUJD` | `414243414243` | `414243` |
+| `\x00QUJD` | `414243` | empty |
+| `QQ==QQ==` | `410410` | `4141` |
+| `QUJD==` | `414243` | `41424300` -- **an extra NUL** |
+
+**And NVGT's two defaults do not match each other**, read out of its own
+registration in `pocostuff.cpp`: encode defaults to `STRING_BASE64_DEFAULT`
+(padded) and **decode** defaults to `STRING_BASE64_PADLESS`. So the column
+above is the one a port gets writing `string_base64_decode(s)` with no second
+argument, and option 0 against option 2 is its own difference -- `"QQ"` is
+`""` under 0 and `"A"` under 2.
+
+##### The known-answer check: it reaches the PACK
+
+A difference between two primitives is a statement about primitives. This is
+the one that matters, and the seed is **Manamon 1's own**, read out of
+`rpg.exe`'s string table rather than constructed -- 119 bytes, and it begins
+with a NUL:
+
+```
+\x00\x00able to\x00\x00learn\x00\x00unrecognized alphanumeric string\x00
+storyline\x000x80000000\x00tower\x000x00000000\x00irgjeoijeiorjgiojriorjegiore\x00\x00
+```
+
+| | |
+|---|---|
+| BGT | 71 bytes |
+| NVGT, all four options | **empty** |
+
+Run through the game's own chain -- 218 rounds of SHA-512, reversed at every
+84th past 100 -- BGT's bytes reach **iteration 111**, whose AES key the pack's
+own tag accepts: `285d062b449baf4cc7cc95a9d3686413`, which is the figure this
+file already records for that title, reproduced from the other direction.
+NVGT's empty string opens nothing in 240 iterations. The selection rule is
+deliberately not modelled, for the reason `harvest_hashchain` does not model
+it either: a candidate costs one AES block, so every iteration is offered and
+the pack says which.
+
+**So a naive NVGT port of Manamon 1 or The Gate cannot open its own pack**,
+and the symptom is `Decryption failed because the key was incorrect` with
+nothing pointing at base64.
+
+##### What it does NOT reach: a wire format round-trips
+
+The Crazy Party battle port is the control, and it is the case this file would
+otherwise have called latent: that port has 26 encode and 13 decode sites, all
+of them the **netplay wire format** -- a nickname, a deck packet, an inventory
+pack, and `setGraineRandom`, which is the RNG seed `synchroRandom` feeds to
+`random_set_state`.
+
+Both ends are NVGT and an encoder only ever emits canonical padded base64, so
+the claim that port rests on is the round trip rather than the tolerance, and
+it was asked the same way: all 256 byte values, a 1,024-byte deck-sized blob,
+an empty string, an embedded NUL and an accented nickname all come back byte
+for byte, across the mismatched defaults, and **no encoding holds a space or a
+newline** -- which the wire needs too, since a message is split on spaces.
+`setLineLength(0)` in NVGT's encoder is what guarantees that, read from its
+source and then confirmed by behaviour.
+
+What is left is a truncated or hostile packet, where BGT would skip the junk
+and NVGT returns empty, so a name arrives blank rather than garbled. That is
+the whole exposure, in a netplay path nobody has tested.
 
 ### The engine registers itself, and the binary is the longer list
 
@@ -4856,6 +4959,14 @@ fully determined by the file in front of it. The same negative result this
 file records for Super Egg Hunt, one level deeper -- and the same lesson:
 **a search over candidates that cannot contain the answer is the most
 convincing kind of wrong.**
+
+**And that seed is where a PORT of this title dies**, which is worth knowing
+here rather than only in the engine-semantics section: the literal opens with
+a NUL and carries spaces, BGT's `string_base64_decode` skips both, and NVGT's
+stops at the first one and returns nothing -- so the whole chain runs over an
+empty string. See **`string_base64_decode` SKIPS what it cannot read, and
+NVGT's STOPS**, where the 119-byte literal is given in full and BGT's answer
+is checked against this pack's own tag.
 
 Two harvesters close it, and neither is a sweep.
 
@@ -15583,7 +15694,7 @@ together.
 
 ## What it will not do
 
-Guess at a difference in **meaning**. Three are named with every site, and
+Guess at a difference in **meaning**. Four are named with every site, and
 each is reported rather than rewritten:
 
 | | |
@@ -15591,6 +15702,7 @@ each is reported rather than rewritten:
 | `library::call` | returns `var@` in NVGT and `dictionary@` in BGT, so the result is not read with `.get(...)`. **All 212 of rage room's errors**, that title being a BASS wrapper |
 | `downloader`'s progress | a `float` in NVGT where BGT's `get_progress()` is used as a truth value -- written straight across, `!d.get_progress()` compiles and polls forever |
 | `network::request` | returns a `const network_event@`, so the handle it is assigned to has to be `const` too |
+| `string_base64_decode` | BGT **skips** every byte outside the alphabet and NVGT **stops** at the first one, so a seed carrying NULs or spaces decodes to nothing. It is the quietest of the four: the conversion compiles, runs, and cannot open its own pack -- see **`string_base64_decode` SKIPS what it cannot read** |
 
 A rewrite there would produce source that compiles and does something else,
 which this repository treats as the worst outcome available.
@@ -15825,8 +15937,10 @@ function out of the recovered bytecode rather than guessing - the raw disassembl
 clearer than the lifted output here, because the selection loop lifts poorly.
 
 Note `string_hash(data, algorithm=2, binary)` is **SHA-512**, verified against
-the engine along with `string_reverse`, `string_base64_encode` and
-`string_mid` -- see **What the documentation does not say, the engine will**.
+the engine along with `string_reverse`, `string_base64_encode`,
+`string_base64_decode` and `string_mid` -- see **What the documentation does
+not say, the engine will**, where the decoder is the one whose answer differs
+from NVGT's and takes a ported game's pack key with it.
 
 Titles differ in whether they use one global key or a key per file - `tag_index()`
 shows which immediately, and that decides whether one password is enough.
