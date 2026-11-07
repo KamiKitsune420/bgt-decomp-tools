@@ -473,8 +473,48 @@ def _qualified(block: Dict[str, Any]) -> str:
     return "%s::%s" % (ns, block["name"]) if ns else block["name"]
 
 
+#: a table index is serialised through a SIGNED 16-bit field, so a module
+#: with more than 32,767 entries in a table writes every index above that as
+#: a negative number. The compiler's own overflow, faithfully serialised --
+#: not a corrupt operand -- so the honest reading is the low 16 bits.
+WRAP = 0x10000
+
+
 def _at(table: List[Any], i: int) -> Any:
-    return table[i] if 0 <= i < len(table) else None
+    """One table entry, or None.
+
+    A NEGATIVE index is read as an unsigned 16-bit one, but only where the
+    table is big enough to hold it. That guard is the whole of why this is
+    safe: in a table that cannot reach index 32,768 a negative can never be
+    a wrap, so it stays unresolved and a genuinely bad operand is still
+    reported as one. Every title in the corpus whose pool is small --
+    Psycho Strike 2,660 constants, Manamon 1 7,802, Manamon 2 10,181 --
+    is therefore untouched by construction rather than by measurement.
+
+    Crazy Party is the title that needs it: beta 77 carries 51,847 string
+    constants and beta 78 carries 52,792, so 423 and 435 `STR` operands in
+    their card-definition bodies came back negative and the literal was
+    lost. Those literals are the card TAG LISTS and passive effects --
+    `plante, -3, croc, 3` is a damage modifier -- so a disassembly that
+    drops them is missing what the card does, and it did so while
+    reporting 98.8% of operands resolved.
+
+    Proven rather than assumed, on beta 78's `ajouteCarte`: 435 operands
+    are negative, `v + 0x10000` lands inside the pool for every one of
+    them, and NO non-negative operand in that body reaches 32,768 -- so a
+    high index cannot be written any other way.
+    """
+    if 0 <= i < len(table):
+        return table[i]
+    #: only a value a SIGNED WORD could hold is a candidate. A signed 16-bit
+    #: field spans -32768..32767, so an index below -32768 did not come from
+    #: one and wrapping it would invent an entry -- which the test for this
+    #: pins, because the first version of the rule did exactly that.
+    if -(WRAP // 2) <= i < 0 and len(table) > WRAP // 2:
+        j = i + WRAP
+        if 0 <= j < len(table):
+            return table[j]
+    return None
 
 
 def _quote(s: bytes, limit: int = 60) -> str:

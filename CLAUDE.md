@@ -1401,6 +1401,52 @@ said the field *could* be a function index, a consistency check said it was not,
 and only the binary said which — a field that is off by one looks exactly like a
 field that means something else.
 
+### A table index above 32,767 is written NEGATIVE, and the literal was lost
+
+A table index goes through a **signed 16-bit** field, so a module with more
+than 32,767 entries in a table writes every index above that as a negative
+number. `_at` refused those outright, so the entry was dropped -- while the
+disassembler went on reporting a high resolution rate, which is the shape
+this file keeps recording: 98.8% of operands resolved and the missing 1.2%
+were the ones that mattered.
+
+**Crazy Party is the title that needs it, and it is the biggest in the
+corpus by string count**: beta 77 carries **51,847** string constants and
+beta 78 carries **52,792**, against Manamon 2's 10,181 and Psycho Strike's
+2,660. In their card-definition bodies 423 and 435 `STR` operands came back
+negative, hiding 274 and 282 distinct literals -- and those literals are the
+card **tag lists and passive effects**:
+
+```
+-13989 -> 51547 -> 'contact, main, ephemere'
+-13980 -> 51556 -> 'plante, -3, croc, 3'        <- a damage modifier
+-13985 -> 51551 -> 'immunite'
+```
+
+So a disassembly of those bodies was missing what the cards DO.
+
+**Proven rather than assumed**, on beta 78's `ajouteCarte`: 435 operands are
+negative, `v + 0x10000` lands inside the pool for **every one** of them, and
+**no non-negative operand in that body reaches 32,768** -- so a high index
+cannot be written any other way. With the wrap read, that body goes from
+98.8% to **100.0% of operands resolved**.
+
+**The guard is what makes it safe, and it is the rule rather than a
+threshold.** Only a value a signed word could hold is a candidate
+(-32768..-1), and only where the table is big enough to reach the wrapped
+index. In a table that cannot reach 32,768 a negative is a genuinely bad
+operand and still reports as one, so every title with a small pool is
+untouched **by construction** rather than by measurement. The first version
+of the rule omitted the signed-word bound and would have wrapped -60000 to
+5536, inventing an entry; its own test caught that.
+
+**It did not harm the recovered port**, which is worth separating from the
+defect: `bgt_asir` hands the operand to the newer engine's reader rather
+than to `as_disasm`, and all **274 of 274** of beta 77's hidden literals are
+present in the recovered Crazy Party source. So this is a defect in the
+`bgt disasm` and `bgt lift` reading path alone, and the recovery path was
+right about every one of them.
+
 ## Lifting
 
 `as_lift.py` turns the instruction stream into statements with a symbolic stack

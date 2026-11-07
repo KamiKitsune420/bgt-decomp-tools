@@ -3184,3 +3184,32 @@ def test_a_short_payload_raises_rather_than_writing_half_a_sound():
             raise AssertionError("a short payload was accepted")
     finally:
         os.unlink(path)
+
+
+def test_a_table_index_may_be_a_SIGNED_16_bit_wrap():
+    """A module with more than 32,767 entries in a table writes every index
+    above that as a NEGATIVE number, because the field is a signed 16-bit
+    one. Refusing it loses the entry while reporting a high resolution rate.
+
+    Crazy Party is the title that needs this: beta 77 carries 51,847 string
+    constants and beta 78 carries 52,792, and the operands that came back
+    negative are the card TAG LISTS and passive effects, so the lost
+    literals were what the cards DO.
+
+    Both directions matter. The wrap applies only where the table could
+    hold the wrapped index; in a small table a negative is a genuinely bad
+    operand and must stay unresolved, which is what keeps every title with
+    a small pool untouched.
+    """
+    big = ["s%d" % i for i in range(52792)]
+    # 52628 serialised through a signed word is -12908
+    assert as_disasm._at(big, -12908) == big[52628]
+    assert as_disasm._at(big, 7) == big[7]
+
+    small = ["a", "b", "c"]
+    assert as_disasm._at(small, -1) is None, (
+        "a negative index in a table that cannot reach 32768 is not a wrap")
+    assert as_disasm._at(small, 99) is None
+
+    # and a negative that does not land inside even a big table is refused
+    assert as_disasm._at(big, -60000) is None
