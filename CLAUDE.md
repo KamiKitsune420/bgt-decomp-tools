@@ -2743,12 +2743,12 @@ for the `for` headers it now writes.
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
 | cs server | 9,713 | 0 | 0 | yes | 3,060 | **yes** |
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
+| Psycho Strike | 23,935 | 0 | 0 | yes | 6,421 | no -- **`elias`**, which no stock BGT registers |
 | The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
 | Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
+| Manamon 2 | 160,305 | 0 | 0 | yes | 51,016 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
 | Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
-| Psycho Strike | -- | -- | -- | -- | -- | **not on this machine any more** |
-| Manamon 2 | -- | -- | -- | -- | -- | **not on this machine any more** |
 
 **The last column is new and it is the stronger claim.** "Compiled cleanly"
 was what this table used to carry, and a compile-only check never runs a
@@ -13792,16 +13792,38 @@ The call count falls by exactly three, which is `bgt apicheck` being right
 rather than a lost call: an operator rendered as syntax is not a call, the
 same way `opIndex` is not.
 
-## Where Manamon 2 stands, honestly
+## Where Manamon 2 stands: THIRTY MINUTES, and it was never a hang
 
-It completes and it takes hours. The two fixes above it take the worst body
-from 219 seconds to 59 and make the progress visible, and they do not
-change the shape of the problem: **the average body costs about a third of
-a second and there are 9,924 of them**, because `_body` re-simulates a
-function up to five times while each pass discovers more.
+**`bgt recover` on it takes 30 minutes 33 seconds and finishes**, on the
+committed tree, and this section said "hours" until the run that produced
+that figure landed. The hours estimate came from watching a run that had
+the whole of this evening's other work competing for the machine --
+measuring a contended run and reporting it as the cost is the same mistake
+this file records about `strings` not being installed, in a new costume.
 
-Measured on the committed tree, with other work competing for the machine:
-1,559 of roughly 5,800 declarations in eighty minutes. The profile after
+| | |
+|---|---|
+| files, source lines | 1,642 and **160,305** |
+| unmodelled opcodes, residual gotos, dangling gotos, unbalanced files, dangling `else` | **0** |
+| split | **verified** |
+| calls read back | **51,016** against its own build's declarations |
+| bodies given up on | **1** -- down from the 3 this file records |
+| `bgt recover` on Psycho Strike, re-measured beside it | 23,935 lines, 0 gotos, verified split, 6,421 calls, **0 bodies given up on** |
+| needs a newer engine | `weakref`, `ecdh`, `encryption`, `decryption`, `decryption_key`, `tts_voice::speak_to_sound` |
+
+So the title this document has carried as `--` for want of its runtime
+measures again, and the three figures its standings row used to quote --
+9,924 bodies, 1,604 classes, 454 globals -- are confirmed from the same
+run. **Two titles come off that `--`**: Psycho Strike is back as well,
+because its own executable is in this batch, and its figures here are
+measured on the committed tree rather than inherited -- 23,935 lines where
+this file last recorded 23,646, and 6,421 calls where it recorded 6,462,
+both from one run. Paladin's executable is still not here.
+
+**The two fixes above do not change the shape of the cost**, which is
+worth separating from the wall clock: the average body is about a third of
+a second and there are 9,924 of them, because `_body` re-simulates a
+function up to five times while each pass discovers more. The profile after
 the fixes says where the rest is, for whoever takes it next:
 
 | `create_kiarre`, 68,692 instructions | seconds |
