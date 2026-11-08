@@ -172,6 +172,24 @@ BEHAVIOURS = {
     "_beh_2_": "destructor", "$beh2": "destructor",
     "_beh_3_": "factory", "$beh3": "factory",
 }
+#: ...and the numbering the generation before BGT 1.3 uses, which is a
+#: DIFFERENT MAP rather than one extra entry: its `_beh_1_` is the
+#: destructor and its `_beh_2_` is the FACTORY, where 1.3's `_beh_2_` is the
+#: destructor. So reading such a module with the names above does not merely
+#: leave `_beh_1_` opaque -- it renders every factory call as a destructor,
+#: which this file drops, so the construction disappears.
+#:
+#: The two cannot be told apart by name alone and are not guessed at: the
+#: reader answers it per build (`early_behaviours`), the same way
+#: `bgt_asir` does on the recovery path. The spellings are mutually
+#: exclusive in practice, which is the corroboration rather than the rule --
+#: a module that references `_beh_1_` never references `_beh_3_`, and the
+#: other way round, across every title in this corpus.
+EARLY_BEHAVIOURS = {
+    "_beh_0_": "constructor",
+    "_beh_1_": "destructor",
+    "_beh_2_": "factory",
+}
 OPERATORS = {
     "opAssign": "=", "opAdd": "+", "opSub": "-", "opMul": "*", "opDiv": "/",
     "opMod": "%", "opIndex": "[]", "opEquals": "==", "opCmp": "<=>",
@@ -481,7 +499,10 @@ class Lifter:
             lit = next((a for a in raw if a.startswith('"')), None)
             return lit if lit else "string()"
 
-        behaviour = BEHAVIOURS.get(name)
+        names = BEHAVIOURS
+        if self.mod.info.get("early_behaviours"):
+            names = dict(BEHAVIOURS, **EARLY_BEHAVIOURS)
+        behaviour = names.get(name)
         if behaviour == "destructor":
             return ""                                   # dropped, like FREE
         if behaviour == "constructor" or behaviour == "factory":
@@ -764,8 +785,14 @@ def _step(L: Lifter, emit, i: int, name: str, args: List[int],
     if name in ("FREE", "CHKREF", "SwapPtr",
                 "GETOBJ", "GETREF", "GETOBJREF", "RDSPtr", "ChkRefS",
                 "ChkNullV", "ChkNullS", "SUSPEND", "LINE", "ClrHi",
-                "PshNull", "CpyVtoR8", "SetListSize",
+                "PshNull", "SetListSize",
                 "SetListType", "AllocMem", "FREE_"):
+        # **`CpyVtoR8` is deliberately NOT here.** It was, ahead of its own
+        # handler below, so the handler could never see it: a 64-bit value
+        # moved into the value register was dropped, and the
+        # return-value detection that the `CpyVtoR4` branch does never fired
+        # for a function returning `double` or `int64`. Those read as a
+        # function with no `return` at all.
         return
 
     # -- moves ------------------------------------------------------------
