@@ -3479,3 +3479,46 @@ def test_a_release_module_names_none_so_nothing_is_claimed():
         bytes([0x6E, 0x63]) + b"game.bgt" + b"\x00" * 8) == []
     # ...and nothing that is not a string record at all.
     assert script_files.script_sections(b"\x01\x05" + bytes(range(60))) == []
+
+
+# ---------------------------------------------------------------------------
+# An unmodelled opcode has TWO spellings, and the count knew one
+# ---------------------------------------------------------------------------
+
+
+def test_the_unmodelled_count_sees_the_decompilers_spelling():
+    """`as_lift` writes `/* OPCODE ... */` and the decompiler -- which is the
+    path `bgt recover` takes -- writes `// NAME (unhandled)`, so on every
+    recovery this number was a tautology: 0 because it was looking for the
+    other tool's output.
+
+    It cost Aliens attack. That title emits **330** `// POP (unhandled)` and
+    reported `unmodelled opcodes 0` beside 0 bodies given up on, 0 residual
+    gotos and a verified split -- every free check passing on a recovery that
+    had dropped an instruction in 251 places.
+    """
+    text = ("void f() {\n"
+            "    // POP (unhandled)\n"
+            "    /* OPCODE 0x41 */\n"
+            "    // PUSH (unhandled)\n"
+            "}\n")
+    assert len(bgt_project._UNHANDLED.findall(text)) == 2
+
+
+def test_an_ordinary_comment_is_not_counted():
+    """A NAME is required rather than `.*`, so prose that happens to use the
+    word is not an opcode."""
+    text = "    x = 1;  // this case is unhandled for now\n"
+    assert bgt_project._UNHANDLED.findall(text) == []
+
+
+def test_the_count_adds_both_spellings_rather_than_choosing():
+    """A test about the SOURCE, because the number needs a module: the two
+    spellings are both real, so the count is a sum and not a fallback -- a
+    project whose lifter and decompiler each dropped one must report two."""
+    source = inspect.getsource(bgt_project)
+    line = next(l for l in source.splitlines() if '"passthrough":' in l)
+    whole = source[source.index(line):source.index(line) + 200]
+    assert "/* OPCODE" in whole
+    assert "_UNHANDLED" in whole
+    assert "+" in whole, "the two spellings are summed, not chosen between"

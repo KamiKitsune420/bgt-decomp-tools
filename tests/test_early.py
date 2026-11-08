@@ -32,6 +32,7 @@ if TOOLS not in sys.path:
 import pytest
 
 import as_early
+import bgt_asir
 from as_early import Early, Stop
 
 
@@ -773,3 +774,99 @@ def test_a_flags_field_is_not_read_as_an_offset():
     assert _offsets(24, [("a", "int", 16), ("b", "int", 16)]) == {}
     # A class with no declared size says nothing.
     assert _offsets(0, [("a", "int", 16)]) == {}
+
+
+# ---------------------------------------------------------------------------
+# A POINTER-sized operand is named differently by a 32-bit build
+# ---------------------------------------------------------------------------
+#
+# `PGA` is `asBCTYPE_DW_ARG` in a 2012 runtime and `asBCTYPE_QW_ARG` in the
+# engine `asreader` models, and **the field NAME is what every resolver
+# downstream reads**. So the operand was written to `dw_arg` and read from
+# `qw_arg`, which is 0 -- and `usedGlobalProps[0]` is `KEY_RETURN` in Aliens
+# attack, where 327 constructions were stored into that engine constant while
+# every free check reported the recovery perfect.
+#
+# `decode_early` had the fix and `decode` did not, which is the failure this
+# project keeps recording: two places answering one question with one of them
+# blind. `_field_layout` is the one answer now, and these pin it.
+
+
+def _reader():
+    """A Reader built without `__init__`, which is how the analysis tests
+    here reach a method that needs no module."""
+    return bgt_asir.Builder.__new__(bgt_asir.Builder)
+
+
+#: The bc_type numbers are looked up by NAME rather than written down, so a
+#: test cannot pin a number this reader does not mean.
+DW_ARG = next(k for k, v in as_early.BC_TYPE_NAMES.items()
+              if v == "asBCTYPE_DW_ARG")
+W_ARG = next(k for k, v in as_early.BC_TYPE_NAMES.items()
+             if v == "asBCTYPE_W_ARG")
+
+
+def test_a_dword_pointer_operand_lands_where_the_resolvers_read():
+    bgt = {"name": "PGA", "type": DW_ARG, "operands": 1, "dwords": 2}
+    bc_type, fields = _reader()._field_layout("PGA", bgt, "probe")
+    assert fields == ("qw_arg",), (
+        "a global pointer must land in the field TranslateFunction reads")
+    assert bc_type == "asBCTYPE_QW_ARG"
+
+
+def test_an_operand_that_is_not_a_pointer_keeps_its_own_field():
+    """Only the pointer-sized ones moved, so `PSF`'s slot is not relabelled
+    into somebody else's field."""
+    bgt = {"name": "PSF", "type": W_ARG, "operands": 1, "dwords": 1}
+    _bc, fields = _reader()._field_layout("PSF", bgt, "probe")
+    assert fields == ("w_arg",)
+
+
+def test_where_the_counts_disagree_the_earlier_operands_are_leading():
+    """The 2010 beta's `ADDSi` is the member offset alone where the newer form
+    is `(offset, typeid)`, and what a later AngelScript did was APPEND the
+    type id. Taken the other way round the offset landed in `dw_arg` where
+    every resolver reads `w_arg`, so every member access in that game
+    resolved to offset 0 -- which is `this`."""
+    newer = bgt_asir.BC_FIELDS[bgt_asir.NEWER_BC_TYPE["ADDSi"]]
+    assert len(newer) > 1
+    bgt = {"name": "ADDSi", "type": DW_ARG, "operands": 1, "dwords": 2}
+    _bc, fields = _reader()._field_layout("ADDSi", bgt, "probe")
+    assert fields == newer[:1]
+
+
+def test_both_decoders_ask_the_same_function():
+    """A test about the SOURCE, because the behaviour needs a module: the two
+    decoders drifting IS the bug, so neither may work the layout out for
+    itself."""
+    import inspect
+    source = inspect.getsource(bgt_asir.Builder)
+    rest = source.partition("def decode(")[2]
+    body, _, early = rest.partition("def decode_early(")
+    for name, text in (("decode", body), ("decode_early", early)):
+        assert "_field_layout(" in text, "%s must ask the shared helper" % name
+        assert "NEWER_BC_TYPE" not in text, "%s has its own copy" % name
+
+
+# ---------------------------------------------------------------------------
+# `POP 0` is the same instruction as `POP 1`
+# ---------------------------------------------------------------------------
+
+
+def test_pop_is_a_popptr_at_either_operand():
+    """The 2010-2012 builds write 1 and the 2012-03 one writes 0. That build
+    emits `POP` with no other operand -- 251 of 251 -- so there is no second
+    meaning to confuse it with, and every one sits where a `PopPtr` goes:
+    235 straight after a `REFCPY`, whose source is left on the stack for
+    exactly this, and the other 16 after a `CALLSYS` whose result nothing
+    reads.
+
+    Any OTHER operand is still left unhandled rather than guessed at, because
+    `POP 3` would really pop three.
+    """
+    import inspect
+    source = inspect.getsource(bgt_asir.Builder)
+    marker = 'ins.name == "POP"'
+    assert marker in source
+    window = source[source.index(marker):source.index(marker) + 300]
+    assert "ins.w_arg in (0, 1)" in window

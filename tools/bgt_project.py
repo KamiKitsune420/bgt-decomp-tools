@@ -2003,6 +2003,12 @@ def recover_any(exe_path: str, out_dir: str,
     return Recovered(engine_mod.NVGT, manifest=manifest, ignored=ignored)
 
 
+#: `// POP (unhandled)` -- the decompiler's spelling for an opcode it could
+#: not model. A NAME is required rather than `.*`, so an ordinary comment
+#: that happens to end in the word is not counted.
+_UNHANDLED = re.compile(r"//\s*[A-Za-z_]\w*\s*\(unhandled\)")
+
+
 def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] = None,
             make_zip: bool = True, compile_check: bool = False,
             timeout: float = 600.0, with_data: bool = True,
@@ -2243,7 +2249,25 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
         "globals": len(module.globals),
         "enums": len(module.enums),
         "lines": len(lines),
-        "passthrough": source.count("/* OPCODE"),
+        #: **An unmodelled opcode has TWO spellings and this counted one.**
+        #: `as_lift` writes `/* OPCODE ... */` and the decompiler -- which is
+        #: the path `bgt recover` takes -- writes `// NAME (unhandled)`, so
+        #: on every recovery this number was a tautology: 0 because it was
+        #: looking for the other tool's output.
+        #:
+        #: It cost Aliens attack. That title emits **330** `// POP
+        #: (unhandled)` and reported `unmodelled opcodes 0` beside 0 bodies
+        #: given up on, 0 residual gotos and a verified split -- every free
+        #: check passing on a recovery that had dropped an instruction in
+        #: 251 places. Swept across every recovery on this machine, it was
+        #: the only title affected, which is the one piece of luck in it.
+        #:
+        #: This file's own lesson, arriving in a third place: a count that
+        #: aggregates two causes hides the rarer one, and two spellings of
+        #: one thing is how. `bodies that failed` taught it, and so did
+        #: `$beh0` against `_beh_0_`.
+        "passthrough": (source.count("/* OPCODE")
+                        + len(_UNHANDLED.findall(source))),
         "body_errors": source.count("decompiler error"),
         #: ...of which the ones this repository is at fault for. A body
         #: given up on for a SHAPE is a counted limitation and names

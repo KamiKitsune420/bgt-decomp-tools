@@ -1063,6 +1063,46 @@ class Builder:
 
     # -- bytecode ----------------------------------------------------------
 
+    def _field_layout(self, name: str, bgt: Dict[str, Any],
+                      where: str) -> Tuple[str, Tuple[str, ...]]:
+        """Which field each of `name`'s operands lands in, and its bc_type.
+
+        **A POINTER-sized operand is named differently by a 32-bit build and
+        the 64-bit engine `asreader` models, and the field NAME is what every
+        resolver downstream reads.** `PGA` is `asBCTYPE_DW_ARG` in a 2012
+        runtime and `asBCTYPE_QW_ARG` there, so the operand was written to
+        `dw_arg` and read from `qw_arg` -- which is 0, so every global
+        pointer in Aliens attack resolved to `usedGlobalProps[0]`. That is
+        `KEY_RETURN` in that game, **327 times**, with the construction it
+        was storing landing on an engine constant.
+
+        The widths stay the build's -- it is the same value, stored narrower
+        -- and only the field it lands in comes from the newer reader, and
+        only where the two agree on how many operands there are. Where they
+        disagree the instruction really differs, and the earlier engine's
+        operands are the LEADING ones, because what a later AngelScript did
+        to those two instructions was append a type id.
+
+        **One answer for both decoders.** `decode_early` had this and
+        `decode` did not, which is the failure this project keeps recording:
+        two places answering one question with one of them blind. The
+        2012-03 generation is the one that goes through `decode`, so it was
+        the only build left reading a pointer out of an empty field.
+        """
+        bc_type = as_early.BC_TYPE_NAMES.get(bgt["type"])
+        if bc_type is None:
+            raise AdapterError(
+                "%s: %s has bytecode type %d, which is not an asEBCType"
+                % (where, name, bgt["type"]))
+        bc_type = LEGACY_BC_TYPE.get(name, bc_type)
+        newer = LEGACY_BC_TYPE.get(name, NEWER_BC_TYPE.get(name))
+        fields = BC_FIELDS[bc_type]
+        if newer is not None and len(BC_FIELDS[newer]) >= len(fields):
+            fields = BC_FIELDS[newer][:len(fields)]
+            if len(fields) == len(BC_FIELDS[newer]):
+                bc_type = newer
+        return bc_type, fields
+
     def decode(self, span: Tuple[int, int], count: int, where: str) -> List[Instr]:
         """Decode one function body into instructions.
 
@@ -1082,23 +1122,21 @@ class Builder:
             if self.early_opcodes:
                 # This build numbers its opcodes the generation before 1.3's,
                 # so its own table is the only authority for what 0x01 is --
-                # the equality check below would refuse the module. Only the
-                # NAMING moved: the operands are still stored the newer way,
-                # which is why this is `decode` and not `decode_early`.
+                # the equality check below would refuse the module. The
+                # operands are still stored the newer way, which is why this
+                # is `decode` and not `decode_early`; which FIELD each one
+                # lands in is a third question, and `_field_layout` is its
+                # one answer for both decoders.
                 name = bgt["name"]
-                bc_type = as_early.BC_TYPE_NAMES.get(bgt["type"])
-                if bc_type is None:
-                    raise AdapterError(
-                        "%s: %s has bytecode type %d, which is not an "
-                        "asEBCType" % (where, name, bgt["type"]))
+                bc_type, fields = self._field_layout(name, bgt, where)
             else:
                 name, bc_type, _size, _stack = asreader.OPCODES[op]
                 if name != bgt["name"]:
                     raise AdapterError(
                         "%s: opcode 0x%02X is %r here and %r there"
                         % (where, op, bgt["name"], name))
-            bc_type = LEGACY_BC_TYPE.get(name, bc_type)
-            fields = BC_FIELDS[bc_type]
+                bc_type = LEGACY_BC_TYPE.get(name, bc_type)
+                fields = BC_FIELDS[bc_type]
             # The check that makes the shared table safe: this build's own
             # operand count has to match the one the field layout implies, or
             # every instruction after this one is decoded at the wrong offset.
@@ -1147,11 +1185,7 @@ class Builder:
             # so both the name and the field layout come from the build's own
             # table, which is the only authority for it.
             name = bgt["name"]
-            bc_type = as_early.BC_TYPE_NAMES.get(bgt["type"])
-            if bc_type is None:
-                raise AdapterError("%s: %s has bytecode type %d, which is not "
-                                   "an asEBCType" % (where, name, bgt["type"]))
-            bc_type = LEGACY_BC_TYPE.get(name, bc_type)
+            bc_type, fields = self._field_layout(name, bgt, where)
             reads = as_early.BC_READS.get(bgt["type"])
             # ...but a POINTER-sized operand is named differently by a
             # 32-bit build and the 64-bit engine `asreader` models, and the
@@ -1165,23 +1199,14 @@ class Builder:
             # many operands there are. Where they disagree the instruction
             # really differs: Palace Punch-up's `ADDSi` takes one operand
             # where the newer takes two.
-            newer = LEGACY_BC_TYPE.get(name, NEWER_BC_TYPE.get(name))
-            fields = BC_FIELDS[bc_type]
-            if newer is not None and len(BC_FIELDS[newer]) >= len(fields):
-                #: **...and where the counts disagree the earlier engine's
-                #: operands are the LEADING ones**, because what a later
-                #: AngelScript did to these two instructions was append a
-                #: type id. The 2010 beta is the only build here where any
-                #: count disagrees: its `COPY` is the size alone and its
-                #: `ADDSi` the member offset alone, where the newer form is
-                #: `(offset, typeid)`. `COPY` was right by luck -- both
-                #: name their first operand `w_arg` -- and `ADDSi` was not:
-                #: its offset landed in `dw_arg` where every resolver reads
-                #: `w_arg`, so every member access in that whole game
-                #: resolved to offset 0, which is `this`.
-                fields = BC_FIELDS[newer][:len(fields)]
-                if len(fields) == len(BC_FIELDS[newer]):
-                    bc_type = newer
+            #: The 2010 beta is the only build here where an operand COUNT
+            #: disagrees: its `COPY` is the size alone and its `ADDSi` the
+            #: member offset alone, where the newer form is
+            #: `(offset, typeid)`. `COPY` was right by luck -- both name
+            #: their first operand `w_arg` -- and `ADDSi` was not: its
+            #: offset landed in `dw_arg` where every resolver reads `w_arg`,
+            #: so every member access in that whole game resolved to offset
+            #: 0, which is `this`. `_field_layout` carries the rule.
             if reads is None:
                 raise AdapterError("%s: %s has bytecode type %d, whose "
                                    "operand reads are not known"
@@ -1483,10 +1508,28 @@ class Builder:
                     # these and no `RDSPtr`.
                     ins.name = "RDSPtr"
                 elif (self.early_opcodes and ins.name == "POP"
-                        and ins.w_arg == 1):
-                    # One dword is one value on a 32-bit build. Every POP
-                    # in all five titles has this operand; another one
-                    # would be left unhandled rather than guessed at.
+                        and ins.w_arg in (0, 1)):
+                    # One dword is one value on a 32-bit build, so `POP 1`
+                    # discards one -- which is what the newer engine spells
+                    # `PopPtr`, with no operand at all.
+                    #
+                    # **And `POP 0` is the same instruction**, which cost
+                    # Aliens attack 330 dropped instructions: the 2010-2012
+                    # builds write 1 and the 2012-03 one writes 0, and the
+                    # guard was widened on evidence rather than on the
+                    # symptom. That build emits `POP` with **no other
+                    # operand** -- 251 of 251 -- so there is no second
+                    # meaning to confuse it with; and every one sits where
+                    # a `PopPtr` goes, 235 straight after a `REFCPY`, whose
+                    # source this file records as left on the stack for
+                    # exactly this, and the other 16 after a `CALLSYS`
+                    # whose result nothing reads.
+                    #
+                    # The newer engine's `PopPtr` takes no operand, so a
+                    # build that kept `POP`'s word field and stopped using
+                    # it writes whatever an unused field holds. Any OTHER
+                    # operand is still left unhandled rather than guessed
+                    # at: `POP 3` would really pop three.
                     ins.name = "PopPtr"
                 elif ins.name == "STR":
                     # STR's string index is a word operand here and a dword one

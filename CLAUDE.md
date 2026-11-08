@@ -16999,45 +16999,167 @@ Neither is the converter's doing. Both are identical in the recovered `.bgt`
 and in the converted `.nvgt`, and both are reproducible from the executable
 in one command.
 
-### Aliens attack: 330 unhandled `POP`s and 327 stores to a key CONSTANT
+### Aliens attack: EVERY global read as `KEY_RETURN` -- fixed
 
-A fresh `bgt recover` at HEAD passes every free check -- 5,766 lines, **0
-unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling
-gotos, a verified split** and 1,662 calls read back. Its text holds:
+A fresh `bgt recover` passed every free check -- 5,766 lines, **0 unmodelled
+opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling gotos, a verified
+split** and 1,662 calls read back. Its text held:
 
 | | |
 |---|---|
 | `// POP (unhandled)` | **330** |
 | assignments to an engine key constant | **327** -- `KEY_RETURN = ...` 259 times, `KEY_NUMPADENTER` 36, `KEY_SPACE` 20 |
 
-and the shape is one generated global initialiser repeated:
+and nothing in that game's code was readable at all:
 
 ```
-nss_net __nvgt_global_init_39() {
-    nss_net net;
-    KEY_RETURN = nss_net();      <- the construction, stored to a CONSTANT
-    // POP (unhandled)
-    return net;                   <- ...and nothing ever wrote `net`
-}
+getpolls = KEY_RETURN.get(string("http://www.nsstudiosweb.com/poll.txt"));
+KEY_RETURN.open("c:\\windows\\system32\\alapoll.exe", "rb");
+pollfile = string_decrypt(KEY_RETURN.read(0.0), "a10000000b...");
+if (... || (KEY_RETURN != 0)) {
+    KEY_RETURN.speak_interrupt_wait(string("There are no polls ..."));
 ```
 
-So every global of a script class in that title is initialised to nothing,
-and the store lands on an engine constant instead. **It compiles in neither
-engine**, which is what makes it findable at all.
+which is now
 
-**The two counts being nearly equal is the diagnosis.** Opcodes 0 and 1 are
-`POP` and `PUSH` in that build and `PopPtr` and `PshGPtr` in 1.3 -- which
-this file already records, and which `early_opcodes` exists for. What it
-does not record is that **the renames live in `as_early.decode_early`, and
-Aliens Attack does not go through `as_early`**: it is read by `as_module`
-under the `2012-03` profile. So `bgt_asir` renames `POP 1` to `PopPtr` only
-where `w_arg == 1`, and `PUSH` -- the prologue's stack reservation, which
-`decode_early` skips outright -- is not skipped on this path at all.
+```
+getpolls = net.get(string("http://www.nsstudiosweb.com/poll.txt"));
+postpoll.open("c:\\windows\\system32\\alapoll.exe", "rb");
+pollfile = string_decrypt(postpoll.read(0.0), "a10000000b...");
+if (... || checkneterror) {
+    v.speak_interrupt_wait(string("There are no polls ..."));
+```
 
-`unmodelled opcodes 0` is reported while 330 instructions are emitted as
-`// POP (unhandled)`, so **that count does not see what this path could not
-model.** A count that aggregates two causes hides the rarer one, which is
-this file's own lesson about `bodies that failed` arriving in a new place.
+**Every global in that whole title**, resolved to `usedGlobalProps[0]`.
+
+#### The first diagnosis was wrong, and the right one is a field NAME
+
+This file had it as the `POP`/`PUSH` rename living in `as_early` and not on
+the `as_module` path. That is half of it -- the half that drops an
+instruction -- and it is **not** what read a global as a key constant. The
+two counts being nearly equal is a coincidence of this title's code shape,
+and reading it as the diagnosis is the mistake this file keeps recording:
+two numbers moving together is not a cause.
+
+What it is, read out of the initialiser's own bytecode:
+
+```
+PUSH 1 ; CALL 70 ; STOREOBJ 1          construct an `nss_net`
+PshVPtr 1
+PGA 26                                  push the address of global 26
+REFCPY 10 ; POP 0                       copy the handle into it
+FREE 1 ; RET
+```
+
+`usedGlobalProps[26]` **is** `net`, so the table is right, the operand is
+right and the plain reading is right. The operand was in the wrong **field**:
+
+> **...and a POINTER operand is named narrowly by a 32-bit build.**
+> `asEBCType` itself differs between a 32- and a 64-bit build for a
+> pointer-sized operand, and **the field NAME is what every resolver
+> downstream reads.**
+
+-- which this file already records, and records the fix for, **in
+`decode_early`**. Aliens Attack goes through `decode`, which took both the
+name and the field layout from the build's own table, so `PGA` landed in
+`dw_arg`; `bgt_asir`'s pre-shift writes `qw_arg`, deliberately and
+correctly, so the resolver read `qw_arg` = 1 and `(1 - 1) / 2` is **index
+0**, which in that game is `KEY_RETURN`.
+
+So this is *"two places answering one question with one of them blind"* for
+the umpteenth time, and the cure is the one this file always prescribes:
+`_field_layout` is the single answer and both decoders ask it. The 2012-03
+generation is the one that goes through `decode`, so it was the only build
+left reading a pointer out of an empty field.
+
+#### `POP 0` is the same instruction as `POP 1`
+
+The other half, and it is widened on evidence rather than on the symptom.
+The guard accepted `POP 1` and said so -- *"Every POP in all five titles has
+this operand; another one would be left unhandled rather than guessed at"* --
+which was true of `as_early`'s five titles and not of a sixth generation.
+
+| | |
+|---|---|
+| this build's `POP` operands | **0, and nothing else** -- 251 of 251 |
+| what precedes it | **235 `REFCPY`**, whose source this file records as left on the stack for exactly this, and 16 `CALLSYS` whose result nothing reads |
+| the newer engine's `PopPtr` | takes no operand at all, so a build that kept the word field and stopped using it writes whatever an unused field holds |
+
+Both of those are the `PopPtr` positions, and there is no second operand to
+confuse it with. Any OTHER operand is still left unhandled rather than
+guessed at, because `POP 3` would really pop three.
+
+#### ...and the count that should have shouted about it years ago
+
+`unmodelled opcodes` reported **0** beside 330 dropped instructions, and the
+reason is a spelling: `as_lift` writes `/* OPCODE ... */` and the
+**decompiler** -- which is the path `bgt recover` takes -- writes
+`// NAME (unhandled)`. The counter looked for the lifter's, so on every
+recovery it was a tautology.
+
+Swept across every recovery on this machine, Aliens Attack is the only title
+with any, which is the one piece of luck in it. The count is the sum of both
+spellings now, and a NAME is required rather than `.*` so an ordinary comment
+that happens to use the word is not an opcode.
+
+That is the third place this file has recorded one lesson: **a count that
+aggregates two causes hides the rarer one**, and two spellings of one thing
+is how. `bodies that failed` taught it, and so did `$beh0` against
+`_beh_0_`.
+
+#### What the three cost
+
+| | before | after |
+|---|---|---|
+| stores to an engine key constant | **327** | **0** |
+| `// POP (unhandled)` | **330** | **0** |
+| generated `__nvgt_global_init_N` helpers | 120 | **0** -- each was "construct this and store it", folded onto the declaration |
+| source lines | 5,766 | 4,662 |
+| `bgt audit --calls` | 25 bodies, 25 values, 3048 declined | **identical** |
+| `bgt audit` literals | 5 bodies | **4** |
+| `bgt audit` constants | 0 | 0 |
+| converted, `nvgt -c` | 2,076 errors | **630** |
+
+**The call audit being identical is the check that matters**: nothing was
+lost. The three fewer calls `bgt apicheck` reads back are constructions now
+spelled as declarations, which is this file's own rule -- a declaration is
+not a call.
+
+And the globals come out as the source wrote them: `nss_net net;` and
+`file postpoll;`, where 120 generated helpers stood.
+
+**Nothing else in the corpus moves.** Measured against a frozen copy of the
+committed tree, title by title and file by file:
+
+| title | reader | lines | calls | files differing |
+|---|---|---|---|---|
+| Palace Punch-up | `decode_early` | 3,200 | 823 | **0** |
+| Perilous Hearts | `decode_early` | 14,862 | 3,314 | **0** |
+| The Gate | `decode` | 33,987 | 8,681 | **0** |
+| Psycho Strike | `decode` | 23,935 | 6,421 | **0** |
+| cs server | `decode` | 9,834 | 3,023 | **0** |
+
+Five titles **byte-identical** across both readers, which is what says
+`decode_early` and the newer path are untouched -- the change reaches the
+`early_opcodes` branch of `decode`, and the 2012-03 generation is the only
+profile that sets it.
+
+#### What is LEFT on that title, and it is pre-existing
+
+630 errors, 600 of them one shape: **426 `tmpN = <global>;` statements with
+no declaration.** They are the borrowed-handle alias this file records --
+`tmp4 = drown;` before `drown[0].set_volume(0.0)`, where the index
+expression already reads the global and the alias is dead -- and
+`_borrowed_handle` does not see them because this generation emits the
+**unfused** `PSF 4 ; REFCPY` where 1.3 emits `RefCpyV`, which names its slot
+in an operand.
+
+`HANDLE_SLOT_OPS` already reads that unfused form for the handle-witness
+question, so there is a place for it. It is **426 statements identical
+before and after** these three fixes, so it is pre-existing and was merely
+invisible: every operand read `KEY_RETURN`, so nobody could read the output
+to notice. It is a change to the shared decompiler path and wants the
+five-title measurement every one of those gets.
 
 ### Palace Punch-up: `string@`, in the 2010 beta alone
 
@@ -17708,14 +17830,20 @@ merge folds `(A op B)` into the stored slot at its `CpyVtoV4`, so an `if`, a
 ternary or an expression reading it later sees the whole value -- guarded to a
 bool destination so a uint ternary still goes to the value-merge).
 
-**Two titles' RECOVERIES are wrong, and a conversion is what said so.**
-Aliens attack emits 330 `// POP (unhandled)` and stores 327 constructions
-into an engine key constant, while reporting 0 unmodelled opcodes; Palace
-Punch-up's recovery declares `string@` locals, which are invalid in both
-engines. Both pass every free check, both are diagnosed in full under
-**NVGT's compiler is a free check on the BGT RECOVERY**, and neither is
-fixed -- they are reader changes and want the five-title measurement every
-reader change here gets.
+**Aliens attack's recovery is FIXED** -- every global in that title read as
+`KEY_RETURN`, because a pointer operand is named `DW_ARG` by a 32-bit build
+and read from `qw_arg`, and `decode` took the field layout from the build
+where `decode_early` already took it from the newer reader. Written up in
+full under **Aliens attack: EVERY global read as `KEY_RETURN`**.
+
+**What is left on it is 426 undeclared `tmpN` aliases**, pre-existing and
+unchanged by that fix: the borrowed-handle fold looks for `RefCpyV` and this
+generation emits the unfused `PSF v ; REFCPY`. A shared-path change, so it
+wants the five-title measurement.
+
+**Palace Punch-up's recovery declares `string@` locals**, which are invalid
+in both engines -- 281 of its 588 conversion errors, and the 2010 beta is
+the only title with any. Not run down.
 
 **Perilous Hearts' 12 are read and 10 are the RECOVERY's.** Two are engine
 gaps the converter names with their sites -- `open_sound_device` and
