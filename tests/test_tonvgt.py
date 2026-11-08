@@ -669,3 +669,68 @@ class GlobalVariableConflictTests(unittest.TestCase):
                       encoding="utf-8") as handle:
                 handle.write("class log {\n    int n;\n}\n")
             self.assertIsNone(bgt_to_nvgt.global_variable(out, "log"))
+
+
+class StringifiedNumberTests(unittest.TestCase):
+    """BGT takes a tone_synth FREQUENCY as text and NVGT takes the number.
+
+        BGT    bool freq_ms(string& in, double& in)
+        NVGT   bool freq_ms(double freq, int ms)
+
+    Both engines take a note NAME as a string, so it is the `freq*` family
+    alone -- BGT's own API is inconsistent here and NVGT fixed it. A game
+    therefore writes `freq_ms(("" + freq), 40.0)`, stringifying a double it
+    already had, and unwrapping that is exact. The `ms` argument needs
+    nothing: AngelScript converts the double with no warning, which was
+    measured on the real `cs` server rather than assumed.
+    """
+
+    SOURCE = ("void f()\n{\n"
+              "    tone_synth synth;\n"
+              "    double freq;\n"
+              "    string name;\n"
+              '    synth.freq_ms(("" + freq), 40.0);\n'
+              '    synth.freq(("" + 440), 1.0);\n'
+              '    synth.freq_ms(("" + name), 40.0);\n'
+              "    synth.freq_ms(name, 40.0);\n"
+              "    synth.freq(880, 1.0);\n"
+              '    synth.note_ms("C4", 40.0);\n'
+              "}\n")
+
+    def setUp(self):
+        types = bgt_to_nvgt.declared_types([("g.nvgt", self.SOURCE)])
+        self.out, self.notes = bgt_to_nvgt.apply_stringified_numbers(
+            self.SOURCE, types, {})
+
+    def test_a_stringified_number_is_unwrapped(self):
+        self.assertIn("synth.freq_ms(freq, 40.0);", self.out)
+        self.assertIn("synth.freq(440, 1.0);", self.out)
+
+    def test_a_stringified_STRING_is_left_alone_and_reported(self):
+        """`"" + x` is only a stringified number when `x` is one. Unwrapping
+        a real concatenation would hand the engine the wrong thing."""
+        self.assertIn('synth.freq_ms(("" + name), 40.0);', self.out)
+        self.assertTrue(any("left alone 2 time" in n for n in self.notes))
+
+    def test_a_note_takes_a_string_in_BOTH_engines(self):
+        self.assertIn('synth.note_ms("C4", 40.0);', self.out)
+
+    def test_an_argument_that_is_already_a_number_is_not_reported(self):
+        """The scan restarts after each rewrite, so without this a site the
+        pass had just FIXED came back as one it had left alone -- `freq_ms`
+        reported 3 left alone where 2 are."""
+        self.assertIn("synth.freq(880, 1.0);", self.out)
+        self.assertFalse(any("left alone 3 time" in n for n in self.notes))
+
+    def test_the_first_argument_is_bracket_matched(self):
+        """An argument may hold a comma of its own."""
+        text = '    synth.freq_ms(("" + f(a, b)), 40);\n'
+        span = bgt_to_nvgt._first_argument(text, text.index("("))
+        self.assertEqual(text[span[0]:span[1]], '("" + f(a, b))')
+
+    def test_a_leading_paren_need_not_wrap_the_whole_expression(self):
+        """`(a) + (b)` starts with `(` and ends with `)` and encloses
+        nothing -- a mistake this file records costing a title's `while`
+        statements."""
+        self.assertTrue(bgt_to_nvgt._wraps_whole('("" + freq)'))
+        self.assertFalse(bgt_to_nvgt._wraps_whole("(a) + (b)"))

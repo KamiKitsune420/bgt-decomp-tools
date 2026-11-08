@@ -649,6 +649,169 @@ def apply_const_handles(text: str, types: Dict[str, str],
     return text, notes
 
 
+#: Calls whose FIRST argument is text in BGT and a number in NVGT, with the
+#: receiver's type.
+#:
+#: BGT's own `tone_synth` is inconsistent and NVGT fixed it. Both engines take
+#: a note NAME as a string -- `note`, `note_ms`, `note_bend`, `note_bend_ms`
+#: -- and BGT takes a FREQUENCY as a string too, where NVGT takes the number:
+#:
+#:     BGT    bool freq_ms(string& in, double& in)
+#:     NVGT   bool freq_ms(double freq, int ms)
+#:
+#: so a game passes `freq_ms(("" + freq), 40.0)`, stringifying a double it
+#: already had. Unwrapping that is exact, and the `ms` argument needs nothing:
+#: AngelScript converts the double to an int with no warning, which was
+#: measured rather than assumed.
+STRINGIFIED_NUMBER_ARGS = {
+    "freq": ("tone_synth",),
+    "freq_ms": ("tone_synth",),
+    "freq_bend": ("tone_synth",),
+    "freq_bend_ms": ("tone_synth",),
+}
+
+#: The types whose value a `"" +` was hiding. A cast spelled as a call --
+#: `double(x)` -- counts, because that is how the recovery writes a conversion.
+NUMERIC_TYPES = frozenset("""int uint int8 int16 int64 uint8 uint16 uint64
+float double""".split())
+
+
+def _numeric_expression(expr: str, scrubbed: str, types: Dict[str, str],
+                        members: Dict[str, Dict[str, str]],
+                        at: int) -> bool:
+    """Whether `expr` is provably a number rather than text.
+
+    `"" + x` is only a stringified NUMBER when `x` is one: `"" + name` where
+    `name` holds a string is an ordinary concatenation, and unwrapping it
+    would hand the engine the wrong thing.
+    """
+    expr = expr.strip()
+    if re.fullmatch(r"[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?f?", expr):
+        return True
+    cast = re.match(r"([A-Za-z_]\w*)\s*\(", expr)
+    if cast and cast.group(1) in NUMERIC_TYPES:
+        return True
+    chain = re.fullmatch(r"([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*)",
+                         expr)
+    if chain is None:
+        return False
+    kind = nearest_type(scrubbed, chain.group(1), at) or types.get(chain.group(1))
+    if kind is not None and chain.group(2):
+        kind = resolve_chain(kind, chain.group(2), members)
+    if kind is None:
+        return False
+    return _receiver_kind(kind) in NUMERIC_TYPES
+
+
+def _wraps_whole(expr: str) -> bool:
+    """Whether a leading `(` is matched by the LAST character.
+
+    `(a) + (b)` starts with `(` and ends with `)` and encloses nothing, so
+    stripping the pair would change what the expression means -- which is a
+    mistake this file records costing a whole title's `while` statements.
+    """
+    depth = 0
+    for pos, char in enumerate(expr):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+            if depth == 0:
+                return pos == len(expr) - 1
+    return False
+
+
+def _first_argument(text: str, open_paren: int) -> Optional[Tuple[int, int]]:
+    """The span of the first argument of the call whose `(` is at `open_paren`.
+
+    Bracket-matched rather than split on a comma, because an argument may hold
+    one of its own -- `freq_ms(("" + f(a, b)), 40)`.
+    """
+    depth = 0
+    start = open_paren + 1
+    for pos in range(open_paren, len(text)):
+        char = text[pos]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+            if depth == 0:
+                return start, pos
+        elif char == "," and depth == 1:
+            return start, pos
+    return None
+
+
+def apply_stringified_numbers(text: str, types: Dict[str, str],
+                              members: Dict[str, Dict[str, str]]
+                              ) -> Tuple[str, List[str]]:
+    """Unwrap `("" + x)` where NVGT wants the number `x`."""
+    notes: List[str] = []
+    for call, kinds in STRINGIFIED_NUMBER_ARGS.items():
+        done = 0
+        declined = 0
+        while True:
+            #: The scan restarts after each rewrite, so a site already fixed
+            #: is seen again and would be counted as declined every round --
+            #: `freq_ms` reported 3 left alone where 2 are. Only the LAST
+            #: pass, which rewrites nothing, is the one that counts.
+            declined = 0
+            scrubbed = _scrub(text)
+            pattern = re.compile(
+                r"(?<![\w.])([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*)\."
+                + re.escape(call) + r"\s*\(")
+            moved = False
+            for match in pattern.finditer(scrubbed):
+                root, middle = match.group(1), match.group(2)
+                kind = (nearest_type(scrubbed, root, match.start())
+                        or types.get(root))
+                if kind is not None and middle:
+                    kind = resolve_chain(kind, middle, members)
+                if kind is None or _receiver_kind(kind) not in kinds:
+                    continue
+                span = _first_argument(scrubbed, match.end() - 1)
+                if span is None:
+                    continue
+                arg = text[span[0]:span[1]]
+                inner = arg.strip()
+                #: one layer of the recovery's own parentheses
+                if inner.startswith("(") and _wraps_whole(inner):
+                    inner = inner[1:-1].strip()
+                #: **A first argument that is already a number is already
+                #: right**, and saying nothing about it is the difference
+                #: between a report and noise: the scan restarts after each
+                #: rewrite, so without this a site this pass had just FIXED
+                #: came back as one it had left alone.
+                if _numeric_expression(inner, scrubbed, types, members,
+                                       match.start()):
+                    continue
+                stringify = re.match(r'^""\s*\+\s*(.+)$', inner, re.S)
+                if stringify is None:
+                    declined += 1
+                    continue
+                value = stringify.group(1).strip()
+                if not _numeric_expression(value, scrubbed, types, members,
+                                           match.start()):
+                    declined += 1
+                    continue
+                text = text[:span[0]] + value + text[span[1]:]
+                done += 1
+                moved = True
+                break
+            if not moved:
+                break
+        if done:
+            notes.append("%s(\"\" + n) -> %s(n), %d time%s: NVGT takes the "
+                         "frequency as a NUMBER where BGT takes it as text"
+                         % (call, call, done, "" if done == 1 else "s"))
+        if declined:
+            notes.append("%s left alone %d time%s: its first argument is text "
+                         "NVGT wants as a number, and this one is not provably "
+                         "a stringified number -- read it by hand"
+                         % (call, declined, "" if declined == 1 else "s"))
+    return text, notes
+
+
 def apply_typed_renames(text: str, types: Dict[str, str],
                         members: Optional[Dict[str, Dict[str, str]]] = None
                         ) -> Tuple[str, List[str]]:
@@ -1137,6 +1300,8 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
         notes += copy_notes
         text, const_notes = apply_const_handles(text, types, members)
         notes += const_notes
+        text, num_notes = apply_stringified_numbers(text, types, members)
+        notes += num_notes
         if notes:
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)

@@ -16700,19 +16700,20 @@ Measured on every title that can be measured here:
 | Super Egg Hunt | 14 | **compiled cleanly** | |
 | Battle of the Hunter | 20 | **compiled cleanly** | |
 | constant velocity | 17 | **compiled cleanly** | |
+| **cs server** | 35 | 14 -> **compiled cleanly** | 9,834 lines of a networked game server |
 | Paladin of the Sky | 59 | **72 -> 1 error** | the `datastream@`/`file@` return, reported with its site |
 | Manamon 1 | 806 | **1 error**, in 82,157 lines | `class sleep`, which NVGT has as a function |
-| cs server | 35 | 14 -> **1 error** | `tone_synth::freq_ms`, a signature difference |
 | Psycho Strike | 73 | **2 errors** | `elias`, and `class log` |
 | The Gate | 178 | **3 errors** | the same two |
-| Perilous Hearts | 19 | 12 errors | the funcdef naming, and a missing `create_map` |
+| Perilous Hearts | 19 | 12 errors | 2 engine gaps the converter names, and **10 the recovery's own** |
 | Palace Punch-up | 10 | 595 -> **588 errors** | **the recovery's own**, below |
 | Aliens attack | 10 | 2 -> **2076 errors** | **the recovery's own**, below |
 | rage room | 48 | 212 errors | `library::call` returning `var@`, in a title that is a BASS wrapper |
 
-**Three titles compile cleanly and three more are within two errors**, and
-every error left on those six is an engine difference the converter names
-rather than guesses at.
+**Four titles compile cleanly and three more are within three errors**, and
+every error left on those seven is an engine difference the converter names
+rather than guesses at. The biggest of the four is a 9,834-line networked
+game server.
 
 **Paladin's 72 -> 1 is one question answered**: what type a method is being
 called ON, when the receiver is an array element, a member of one, or a
@@ -16878,6 +16879,39 @@ filled from somewhere else and stay correct -- Palace Punch-up's
 `@local_7 = network_event()` is left alone and still works. Code that writes
 THROUGH the handle stops compiling, which is a visible failure rather than a
 silent one, and that is the acceptable direction.
+
+### An argument that is TEXT in one engine and a NUMBER in the other
+
+BGT's own `tone_synth` is inconsistent and NVGT fixed it. Both engines take
+a note NAME as a string, and BGT takes a FREQUENCY as a string too:
+
+| | BGT | NVGT |
+|---|---|---|
+| `note`, `note_ms`, `note_bend`, `note_bend_ms` | `string` first | `string` first |
+| `freq`, `freq_ms`, `freq_bend`, `freq_bend_ms` | **`string` first** | **`double` first** |
+
+So a game stringifies a double it already had --
+`progress_synth.freq_ms(("" + freq), 40.0)` -- and unwrapping that is exact.
+**The `ms` argument needs nothing**, which was measured rather than assumed:
+AngelScript converts the double to an int with no warning, and the patch was
+tried both ways on the real `cs` server before the narrower one was taken.
+
+Three things keep it to what is provable:
+
+- **`"" + x` is only a stringified number when `x` IS one.** A string there
+  is an ordinary concatenation and unwrapping it would hand the engine the
+  wrong thing, so the value's type is resolved -- a literal, a numeric cast
+  spelled as a call, or a chain the project declares. Anything else is
+  reported with its count and left alone.
+- **The first argument is bracket-matched**, not split on a comma, because an
+  argument may hold one of its own.
+- **An argument that is ALREADY a number is not reported at all.** The scan
+  restarts after each rewrite, so without that a site the pass had just fixed
+  came back as one it had left alone -- `freq_ms` reported 3 left alone where
+  2 are, which is the difference between a report and noise.
+
+**It is the whole of what was left on the `cs` server**: 1 error to
+`compiled cleanly`, at one call site, and no other title moves by a line.
 
 **Some accessors are a plain PROPERTY there**, so the brackets come off as
 well as the prefix. NVGT registers `network_event`'s members with
@@ -17683,11 +17717,14 @@ engines. Both pass every free check, both are diagnosed in full under
 fixed -- they are reader changes and want the five-title measurement every
 reader change here gets.
 
-**Two converter rows are open and small.** The `cs` server's one error is
-`tone_synth::freq_ms(string, const double)`, a signature difference not yet
-read; Perilous Hearts has 12, mostly the funcdef naming this file records
-(`menu_callback` where `pathfinder_callback` belongs) plus a missing
-`create_map`. Neither has been run down.
+**Perilous Hearts' 12 are read and 10 are the RECOVERY's.** Two are engine
+gaps the converter names with their sites -- `open_sound_device` and
+`pathfinder::create_map`, neither of which NVGT registers. The other ten are
+the 2011 generation's own: the funcdef placeholder resolved to the module's
+`menu_callback` where the callee's signature says `pathfinder_callback`; a
+handle compared with the literal `0` where this file's own rule says a zero
+meeting a reference type is `null`, twice; a `const int` assigned to a
+`surface[]@`; and a body that does not return on every path.
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified
