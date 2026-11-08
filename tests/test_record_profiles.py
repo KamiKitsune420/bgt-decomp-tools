@@ -17,6 +17,7 @@ Run:  python -m pytest tests/test_record_profiles.py -q
 """
 
 import os
+import re
 import sys
 
 import pytest
@@ -76,6 +77,24 @@ def test_a_reader_given_nothing_reads_the_verified_records():
     not -- has to get the reading that ten titles in this corpus land on."""
     r = as_module.Reader(b"\x00\x00", as_module.TAGGED, pos=1)
     assert r.records == as_module.RECORDS_13
+
+
+def test_every_field_the_reader_reads_is_declared():
+    """The field names in `Reader` have to be the field names in the table.
+
+    `test_every_profile_answers_every_field` compares each profile against
+    `RECORDS_13`, so it is blind to a field missing from ALL of them -- which
+    is a `KeyError` out of the middle of a parse the first time a module
+    reaches it. That is not hypothetical: a field added to `function()` and
+    to no profile took Aliens Attack from landing exactly on EOF to "neither
+    reader could parse this module", and the set-equality test above passed
+    throughout. This reads the source for what is actually looked up.
+    """
+    with open(as_module.__file__, encoding="utf-8") as fh:
+        source = fh.read()
+    read = set(re.findall(r'self\.records\["([a-z_]+)"\]', source))
+    assert read, "no self.records lookups found -- has the reader changed shape?"
+    assert read <= set(as_module.RECORDS_13), sorted(read - set(as_module.RECORDS_13))
 
 
 def test_the_two_profiles_really_differ():

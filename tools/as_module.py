@@ -198,28 +198,111 @@ RECORDS_13 = {
     #: the compiler put there and means nothing to a reader. Read out of
     #: that build's own `TranslateFunction` at 0x418F6E.
     "alloc_callee_script_only": False,
+    #: Whether a function signature carries its NAMESPACE immediately after
+    #: the name. 1.3 writes it last, after the owner and the traits byte;
+    #: the generation before it writes it first. Aliens Attack (2012-03) is
+    #: the first build here that writes it first while reading 1.3's
+    #: sign-flag encoded integer, so this is its own field rather than part
+    #: of `datatype_early`. Its `menu_callback` is what shows it:
+    #:
+    #:     6e 0d "menu_callback"   the name
+    #:     00                      the namespace, empty    <- here
+    #:     40 42                   eu(token) = 66 = int
+    #:     00 00                   two flag bytes
+    #:     02                      two parameters
+    #:
+    #: Read with the namespace last, that leading 00 is taken for 1.3's
+    #: "a token follows" marker, the token for a back-reference index, and
+    #: the parameter count comes out 0 on a funcdef that has two.
+    "sig_namespace_first": False,
+    #: Whether a funcType-1 body writes `variableSpace` before the object
+    #: variables and `objVariablesOnHeap` after them. 1.3 writes both. The
+    #: 2012-03 engine writes neither: its object-variable entry is three
+    #: fields, the third being that variable's own on-heap flag, and the
+    #: count straight after the list is `objVariableInfo`.
+    #:
+    #: `sound_pool_item`'s factory stub is the record that pins it --
+    #: `PUSH 1 ; PSF 1 ; ALLOC 0,2 ; LOADOBJ 1 ; RET 0`, then
+    #:
+    #:     01                      one object variable
+    #:     6f 72 00 00             its type: sound_pool_item
+    #:     01 01                   position 1, on the heap
+    #:     00                      objVariableInfo count       <- no room
+    #:     00 00 00                line numbers, traits, variables
+    #:     72 07                   the script section, by back-reference
+    #:
+    #: and the next record's 'f' follows immediately. There is exactly one
+    #: byte spare between the object variable and the four zero counts, so
+    #: only one of the three candidate fields can be there, and `reset`
+    #: settles which: its count is 2 and the two triples that follow give
+    #: program positions 19 and 24, which are also two of the 23 line-number
+    #: positions in the same body.
+    "body_scalar_fields": True,
+    #: Whether a template type-info's subtype is written the way the
+    #: generation before 1.3 writes it: 's' then a whole TypeInfo then one
+    #: byte, 'h' for a handle and 'o' for a value, or 't' then four raw
+    #: bytes for a primitive. 1.3 writes a tag and then a DataType.
+    #: `array<T>`, the owner of `resize` in Aliens Attack's usedFunctions,
+    #: is `61 'a' | 72 34 | 73 | 73 6e 01 "T" | 6f` -- the template, its
+    #: name by back-reference, the subtype marker, the subtype's own
+    #: type-info, and the value byte.
+    "template_subtype_early": False,
+    #: Whether the OPCODE NUMBERING is the generation before 1.3's, so an
+    #: instruction's name and operand shape have to come from this build's
+    #: own `asBCInfo[]` rather than from the table `asreader` models. It is
+    #: a separate question from how the operands are STORED: Aliens Attack
+    #: stores them 1.3's way -- an instruction count and encoded operands --
+    #: and numbers them the old way, where `0x00` is `POP` and `0x01` is
+    #: `PUSH` against the newer `PopPtr` and `PshGPtr`. Counted: its table
+    #: has 202 entries and 16 disagree with the newer numbering, Perilous
+    #: Hearts' 202 and 22, and Psycho Strike's 200 and none.
+    "early_opcodes": False,
 }
 
 #: Screaming Strike's engine (2012-07-24, 394 registered names): 1.3's
-#: format everywhere
-#: this reader does not say otherwise -- the same sign-flag encoded integer,
-#: the same signature order with the namespace last, the same tail sections
-#: in the same order -- with these seven records the generation before it.
-RECORDS_2012 = {
-    "debug_byte": False,
-    "datatype_early": True,
-    "global_init_gate": True,
-    "template_subtype_count": False,
-    "debug_sections": False,
-    "traits_last": False,
-    "section_per_record": True,
-    "token_shift": 4,
-    "early_behaviours": True,
-    "alloc_callee_script_only": True,
-}
+#: format everywhere this reader does not say otherwise -- the same
+#: sign-flag encoded integer, the same signature order with the namespace
+#: last, the same tail sections in the same order -- with these nine records
+#: the generation before it.
+#:
+#: **Derived from `RECORDS_13` rather than written out in full.** Two
+#: parallel dicts of the same keys is two places to keep in step, and the
+#: drift is not silent here -- it is a `KeyError` from the middle of a parse
+#: the first time a module reaches a field one of them lacks, which is how
+#: adding a field to 1.3's copy and not to this one took Aliens Attack from
+#: landing exactly on EOF to "neither reader could parse this module".
+RECORDS_2012 = dict(
+    RECORDS_13,
+    debug_byte=False,
+    datatype_early=True,
+    global_init_gate=True,
+    template_subtype_count=False,
+    debug_sections=False,
+    traits_last=False,
+    section_per_record=True,
+    token_shift=4,
+    early_behaviours=True,
+    alloc_callee_script_only=True,
+)
+
+#: Aliens Attack's engine (NS Studios, 2012-03-09, 322 registered names):
+#: Screaming Strike's profile and three records more from the generation
+#: before it. It sits one month after Antony (2012-02-05, 312 names), which
+#: `as_early` reads, and four months before Screaming Strike -- so it is the
+#: build that **dates the sign-flag encoded integer**, which this file had as
+#: "between February and July 2012" and is now between 5 February and 9
+#: March 2012. Everything `as_early` reads about Antony still holds here
+#: except the integer, the bytecode (an instruction count with encoded
+#: operands, as 1.3 writes it) and the tail's section list.
+RECORDS_2012_03 = dict(RECORDS_2012,
+                       sig_namespace_first=True,
+                       body_scalar_fields=False,
+                       template_subtype_early=True,
+                       early_opcodes=True)
 
 #: Tried in order, verified first.
-RECORD_PROFILES = (("1.3", RECORDS_13), ("2012-07", RECORDS_2012))
+RECORD_PROFILES = (("1.3", RECORDS_13), ("2012-07", RECORDS_2012),
+                   ("2012-03", RECORDS_2012_03))
 
 
 class Reader:
@@ -504,6 +587,37 @@ class Reader:
             subs = []
             for _ in range(n):
                 sub = self.raw(1)[0]
+                if self.records["template_subtype_early"]:
+                    # 's' then a whole TypeInfo then one byte -- 'h' for a
+                    # handle, 'o' for a value -- or 't' then four raw bytes
+                    # for a primitive. Shaped as a data type, because that is
+                    # what a template argument is to everything downstream.
+                    if sub == 0x73:
+                        of = self.type_info()
+                        handle = self.raw(1)[0]
+                        if handle not in (0x68, 0x6F):
+                            raise ParseError(
+                                "a template subtype's handle byte at 0x%X is "
+                                "0x%02X, which is neither 'h' nor 'o'"
+                                % (self.p - 1, handle))
+                        subs.append({"token": 5, "type": of,
+                                     "handle": handle == 0x68, "const": False,
+                                     "reference": False, "readonly": False})
+                    elif sub == 0x74:
+                        # The primitive's token, as an ENCODED integer -- the
+                        # 2011 builds write four raw bytes here and `as_early`
+                        # reads those, but this build writes an eu, which is
+                        # the same change as its integer encoding. `keyslist`
+                        # in Aliens Attack is `05 'a' r52 't' 40 42`, and
+                        # `40 42` is 66, this build's `int`, giving the
+                        # `int[]` the name says. Read as four raw bytes it is
+                        # 0x40420000, and the two flag bytes it swallows take
+                        # the global's initialiser with them.
+                        subs.append({"typeid": self.eu()})
+                    else:
+                        raise ParseError("bad template subtype tag 0x%02X "
+                                         "at 0x%X" % (sub, self.p - 1))
+                    continue
                 # 's' introduces a whole ReadDataType, in BOTH dialects -- and
                 # that data type is very often a one-byte back-reference, which
                 # is what makes the alternative ("tag plus one encoded value")
@@ -639,6 +753,11 @@ class Reader:
             return {"name": name.decode("latin1"), "funcType": None,
                     "params": [], "owner": None}
 
+        # The generation before 1.3 writes the namespace here rather than
+        # last. See `sig_namespace_first`.
+        ns_first = (self.string().decode("latin1")
+                    if self.records["sig_namespace_first"] else None)
+
         ret = self.data_type()
         nparams = self.eu()
         if not 0 <= nparams <= 0x100:
@@ -672,7 +791,13 @@ class Reader:
 
         owner = self.type_info()
         traits = 0
-        if owner is not None:
+        if self.records["sig_namespace_first"]:
+            # Already read, above the return type; a non-null owner still
+            # closes the record with its traits byte.
+            ns = ns_first
+            if owner is not None:
+                traits = self.raw(1)[0]
+        elif owner is not None:
             traits = self.raw(1)[0]              # traits byte: private/protected/const
             ns = None
         elif func_type == 4 and self.dialect != TAGGED:   # a funcdef with no owner
@@ -718,7 +843,8 @@ class Reader:
         the dialect: the older reader writes three, Manamon 1 writes two.
         """
         rec["instructions"], rec["body"] = self.bytecode()
-        rec["stackNeeded"] = self.eu()
+        if self.records["body_scalar_fields"]:
+            rec["stackNeeded"] = self.eu()
 
         nobj = self.eu()
         if not 0 <= nobj <= 1 << 16:
@@ -729,7 +855,7 @@ class Reader:
             objvars.append((ti, self.eu(), self.eu()) if self.objvar_three
                            else (ti, self.eu()))
         rec["objVars"] = objvars
-        if nobj > 0:
+        if nobj > 0 and self.records["body_scalar_fields"]:
             self.eu()                            # objVariablesOnHeap
 
         ninfo = self.eu()
@@ -788,15 +914,14 @@ class Reader:
         parameters live, and a name read before the offset makes them 0 and
         garbage instead.
         """
-        if not self.debug_info:
-            return
-        count = self.eu()
-        if not 0 <= count <= 1 << 20:
-            raise ParseError("implausible line-number count %d" % count)
-        # Pairs: a program position, then the line packed with its column as
-        # `line | col << 20`. `puck::puck` opens at position 0, line 6,
-        # column 7.
-        rec["lineNumbers"] = [self.eu() for _ in range(count)]
+        if self.debug_info:
+            count = self.eu()
+            if not 0 <= count <= 1 << 20:
+                raise ParseError("implausible line-number count %d" % count)
+            # Pairs: a program position, then the line packed with its column
+            # as `line | col << 20`. `puck::puck` opens at position 0, line
+            # 6, column 7.
+            rec["lineNumbers"] = [self.eu() for _ in range(count)]
 
         if not self.records["traits_last"]:
             # The 2013 engine closes the line numbers with the traits byte and
@@ -804,7 +929,18 @@ class Reader:
             # immediately after the loop at 0x41ABE4. 1.3 writes it after the
             # variables instead, which is why `_script_body_legacy` reads it
             # there and this does not.
+            #
+            # **It is not a debug field**, which is why it is read outside the
+            # guard above: the engine closes the funcType-1 branch with it
+            # whether or not the build kept its debug information. Returning
+            # before it left every body of a RELEASE build of such an engine
+            # one byte short -- invisible until River Raiders, because the one
+            # earlier sample of this generation, Screaming Strike, is a DEBUG
+            # build.
             rec["traits"] = self.raw(1)[0]
+
+        if not self.debug_info:
+            return
 
         if self.records["debug_sections"]:
             count = self.eu()
@@ -834,9 +970,16 @@ class Reader:
         rec["variables"] = variables
 
     def debug_tail(self, rec: Dict[str, Any]) -> None:
-        """The debug fields that follow the traits byte. See `debug_head`."""
-        if not self.debug_info:
-            return
+        """The debug fields that follow the traits byte. See `debug_head`.
+
+        **The one-string form is not a debug field**, so it is read whether or
+        not the build kept its debug information -- the engine writes it at
+        the join after the funcType switch, outside the branch that tests it,
+        and a release build carries an empty string rather than nothing. The
+        same correction as the traits byte in `debug_head`, found the same
+        way: River Raiders is the first RELEASE build of a generation whose
+        only earlier sample, Screaming Strike, is a debug one.
+        """
         if self.records["section_per_record"]:
             # One string and nothing else, read at the join after the
             # funcType switch (0x41ADBB), so a funcdef carries an empty one
@@ -853,6 +996,8 @@ class Reader:
                     "no source file -- the body before it desynchronised"
                     % (at, text[:40]))
             rec["scriptSection"] = section
+            return
+        if not self.debug_info:
             return
         rec["scriptSection"] = self.string()
         rec["declaredAt"] = self.eu()
@@ -1571,6 +1716,7 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
     return {"debug_byte": r.records["debug_byte"],
             "token_shift": r.records["token_shift"],
             "early_behaviours": r.records["early_behaviours"],
+            "early_opcodes": r.records["early_opcodes"],
             "alloc_callee_script_only":
                 r.records["alloc_callee_script_only"],
             "enums": enums, "classes": classes, "classes_declared": declared,
@@ -1703,6 +1849,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "start": start, "records": release,
             "token_shift": walk["token_shift"],
             "early_behaviours": walk["early_behaviours"],
+            "early_opcodes": walk["early_opcodes"],
             "alloc_callee_script_only": walk["alloc_callee_script_only"],
             # The module's own first byte -- unless the build writes no such
             # byte, in which case there is nothing to report and a 0 here

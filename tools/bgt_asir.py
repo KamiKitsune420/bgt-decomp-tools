@@ -291,6 +291,9 @@ NEWER_BC_TYPE = {name: bc_type
 #: assignment to the array itself: `this.items = local_1;
 #: this.items = arg0;` where `sound_pool::play_stationary_extended` is
 #: filling in the fields of `items[slot]`.
+#: The array template's internal name, in both spellings a BGT build gives
+#: it: `array` from BGT 1.0 on, `_builtin_array_` in the 2010 beta.
+ARRAY_TEMPLATE = ("array", "_builtin_array_")
 EARLY_BEHAVIOURS = {0: "$beh0", 1: "$beh2", 2: "$beh3", 4: "$addref",
                     10: "opIndex"}
 
@@ -518,6 +521,14 @@ class Builder:
         #: copy-construction.
         self.early_behaviours = bool(info.get("early")
                                      or info.get("early_behaviours"))
+        #: ...and whether the opcode NUMBERING is that generation's, which
+        #: is a third separate question. Aliens Attack (2012-03) stores its
+        #: operands 1.3's way and numbers its opcodes the old way, so the
+        #: name and the operand shape come from its own table while the
+        #: reading stays the newer one. Taking the two together decoded
+        #: `PUSH` as `PshGPtr` and refused the module outright.
+        self.early_opcodes = bool(info.get("early")
+                                  or info.get("early_opcodes"))
         #: ...and whether an `ALLOC`'s callee operand is worth reading at
         #: all for a type the module does not declare. Carried on the
         #: module, because the decompiler is where the arity is used.
@@ -580,7 +591,17 @@ class Builder:
             # (`string[]@ string_split(const string& in, const string& in,
             # bool)`, read out of bgt.exe). Written `array<string>` it is
             # "Identifier 'array' is not a data type".
-            if ref["name"] == "array" and not ref.get("namespace"):
+            #
+            # **And the template's own NAME is a per-build field**, like the
+            # string factory's and the template factory stub's. The 2010 beta
+            # calls it `_builtin_array_` -- 7 occurrences in Palace
+            # Punch-up's runtime, where `array` does not appear at all, while
+            # that same runtime registers `string[]@ find_files(...)`, so the
+            # source syntax is `T[]` there too. Known by one name only, the
+            # other build's arrays came out as
+            # `_builtin_array_<sound> preloads(50);`, which is "Expected
+            # identifier" and then "Instead found '<'".
+            if ref["name"] in ARRAY_TEMPLATE and not ref.get("namespace"):
                 ti.template_syntax = "suffix"
         elif kind == "subtype":
             ti = TypeInfo(kind="subtype", name=ref["name"],
@@ -1058,10 +1079,24 @@ class Builder:
             bgt = self.opcodes.get(op)
             if bgt is None:
                 raise AdapterError("%s: unknown opcode 0x%02X" % (where, op))
-            name, bc_type, _size, _stack = asreader.OPCODES[op]
-            if name != bgt["name"]:
-                raise AdapterError("%s: opcode 0x%02X is %r here and %r there"
-                                   % (where, op, bgt["name"], name))
+            if self.early_opcodes:
+                # This build numbers its opcodes the generation before 1.3's,
+                # so its own table is the only authority for what 0x01 is --
+                # the equality check below would refuse the module. Only the
+                # NAMING moved: the operands are still stored the newer way,
+                # which is why this is `decode` and not `decode_early`.
+                name = bgt["name"]
+                bc_type = as_early.BC_TYPE_NAMES.get(bgt["type"])
+                if bc_type is None:
+                    raise AdapterError(
+                        "%s: %s has bytecode type %d, which is not an "
+                        "asEBCType" % (where, name, bgt["type"]))
+            else:
+                name, bc_type, _size, _stack = asreader.OPCODES[op]
+                if name != bgt["name"]:
+                    raise AdapterError(
+                        "%s: opcode 0x%02X is %r here and %r there"
+                        % (where, op, bgt["name"], name))
             bc_type = LEGACY_BC_TYPE.get(name, bc_type)
             fields = BC_FIELDS[bc_type]
             # The check that makes the shared table safe: this build's own
@@ -1441,13 +1476,14 @@ class Builder:
                     # slot number as the argument count: `this(local_8, <?>,
                     # <?>, ...)` nine times over, in 20 of Paladin's errors.
                     ins.w_arg2, ins.w_arg = ins.w_arg, 0
-                elif self.early and ins.name in ("RDS4", "RDS8"):
+                elif self.early_opcodes and ins.name in ("RDS4", "RDS8"):
                     # A pointer dereference, under the name this
                     # AngelScript gave it. Antony declares `RDSPtr` and
                     # neither of these; every build before it declares
                     # these and no `RDSPtr`.
                     ins.name = "RDSPtr"
-                elif self.early and ins.name == "POP" and ins.w_arg == 1:
+                elif (self.early_opcodes and ins.name == "POP"
+                        and ins.w_arg == 1):
                     # One dword is one value on a 32-bit build. Every POP
                     # in all five titles has this operand; another one
                     # would be left unhandled rather than guessed at.
