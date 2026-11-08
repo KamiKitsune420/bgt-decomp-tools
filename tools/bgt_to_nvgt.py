@@ -122,6 +122,35 @@ SEMANTIC: Dict[str, str] = {
     "request":
         "NVGT's `network::request` returns a `const network_event@`, so the "
         "handle it is assigned to has to be `const` too.",
+    "generate_computer_id":
+        "NVGT's `bgt_compat.nvgt` answers this with "
+        "`generate_system_fingerprint`, which is a different number on the "
+        "same machine -- so a ported game cannot validate a registration key "
+        "the player already holds, and says nothing about why. BGT's own "
+        "answer is `bgt computerid`, and it is the same algorithm in every "
+        "engine from 1.3 to the 2019 fork.",
+    "string_compress":
+        "NVGT's `bgt_compat.nvgt` answers this with `string_deflate`, which "
+        "is zlib, where BGT's is its own LZ77 with a trailing "
+        "\" <uncompressed length>\" -- the same codec as the module "
+        "container. So a ported game cannot read a file its BGT build "
+        "wrote, and the save path of a title that compresses before "
+        "encrypting fails at the decrypt with no mention of compression.",
+    "string_decompress":
+        "The other half of `string_compress`: NVGT's shim is `string_inflate` "
+        "and BGT's format is LZ77 plus a trailing decimal length, so an old "
+        "save decompresses to nothing rather than reporting a bad format.",
+    "serialize":
+        "BGT writes a dictionary as `base64(key)` NUL `<type byte>` "
+        "`<value text>` NUL per entry, with type 1 int, 2 double written "
+        "\"%f\", 3 base64 of the string and 4 bool \"1\"/\"0\" -- and "
+        "arrays and nested dictionaries dropped silently. NVGT's "
+        "`dictionary::serialize` is its own format, so a ported game cannot "
+        "read a save its BGT build wrote.",
+    "deserialize":
+        "The other half of `serialize`, and the one that fails quietly: a "
+        "blob in BGT's format leaves NVGT's dictionary empty rather than "
+        "reporting a bad save, so a loaded game silently starts over.",
 }
 
 #: `T name`, `T@ name`, `T[] name`, `T@[] name` -- a declaration, as the
@@ -527,6 +556,39 @@ def find_nvgt(explicit: Optional[str] = None) -> Optional[Nvgt]:
 _INCLUDE = re.compile(r'(#include\s*)(["<])([^">]+)\.bgt([">])')
 
 
+#: Which `SEMANTIC` names an NVGT build answers in BGT's own format already, and
+#: the symbol in `bgt_compat.nvgt` that says so. A fork carrying BGT's exact
+#: compression, dictionary wire format and computer id routes the shim to these,
+#: so the difference is real of upstream NVGT and resolved there -- and reporting
+#: it anyway would send somebody to fix what is already fixed.
+EXACT_SHIMS: Dict[str, Tuple[str, ...]] = {
+    "string_compress": ("bgt_string_compress",),
+    "string_decompress": ("bgt_string_decompress",),
+    "serialize": ("bgt_serialize",),
+    "deserialize": ("bgt_serialize",),
+    "generate_computer_id": ("bgt_generate_computer_id",),
+}
+
+
+def exact_shims(nvgt: Optional[Nvgt]) -> Set[str]:
+    """The names this NVGT's own `bgt_compat.nvgt` already answers exactly.
+
+    Asked of the file rather than assumed from a version, for the reason every
+    other question here is asked of the authority: the answer is a property of
+    the build in hand, and there is more than one NVGT.
+    """
+    if nvgt is None:
+        return set()
+    path = os.path.join(nvgt.include, "bgt_compat.nvgt")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return set()
+    return {name for name, symbols in EXACT_SHIMS.items()
+            if all(symbol in text for symbol in symbols)}
+
+
 def convert_text(text: str, renames: Dict[str, str]) -> Tuple[str, List[str]]:
     """One script's text, converted. Returns (text, what was renamed).
 
@@ -666,12 +728,15 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
     #: ...and the differences in MEANING, with every site, because a person
     #: decides these and a tool that rewrote them would be guessing.
     report["semantic"] = []
+    exact = exact_shims(nvgt)
+    report["exact_shims"] = sorted(exact)
     for path, text in scripts:
         for line, name in calls_in(text):
             if name in SEMANTIC:
                 report["semantic"].append(
                     {"name": name, "file": os.path.relpath(path, out),
-                     "line": line, "why": SEMANTIC[name]})
+                     "line": line, "why": SEMANTIC[name],
+                     "resolved": name in exact})
     report["semantic"].sort(key=lambda r: (r["name"], r["file"], r["line"]))
 
     if compile_it and nvgt is not None and entry is not None:
@@ -744,19 +809,33 @@ def summary(report: Dict[str, Any]) -> str:
         if len(conflicts) > 8:
             out.append("      ...and %d more" % (len(conflicts) - 8))
     semantic = report.get("semantic") or []
+    exact = set(report.get("exact_shims") or ())
     if semantic:
         kinds: Dict[str, int] = {}
         for row in semantic:
             kinds[row["name"]] = kinds.get(row["name"], 0) + 1
-        out.append("  %-22s %d site(s) whose MEANING differs, not spelling:"
-                   % ("read these by hand", len(semantic)))
-        for name, count in sorted(kinds.items()):
-            first = next(r for r in semantic if r["name"] == name)
-            out.append("      %s  (%d site%s, first %s:%d)"
-                       % (name, count, "" if count == 1 else "s",
-                          first["file"], first["line"]))
-            for chunk in _wrap(SEMANTIC[name], 66):
-                out.append("          %s" % chunk)
+        open_kinds = {n: c for n, c in kinds.items() if n not in exact}
+        done_kinds = {n: c for n, c in kinds.items() if n in exact}
+        if open_kinds:
+            total = sum(open_kinds.values())
+            out.append("  %-22s %d site(s) whose MEANING differs, not spelling:"
+                       % ("read these by hand", total))
+            for name, count in sorted(open_kinds.items()):
+                first = next(r for r in semantic if r["name"] == name)
+                out.append("      %s  (%d site%s, first %s:%d)"
+                           % (name, count, "" if count == 1 else "s",
+                              first["file"], first["line"]))
+                for chunk in _wrap(SEMANTIC[name], 66):
+                    out.append("          %s" % chunk)
+        if done_kinds:
+            #: Named rather than dropped: a difference this NVGT resolves is
+            #: still a difference every other one has, so a project moved to a
+            #: stock build needs to know which ones were being answered for it.
+            out.append("  %-22s this NVGT already answers in BGT's own format: %s"
+                       % ("answered exactly",
+                          ", ".join("%s (%d site%s)"
+                                    % (n, c, "" if c == 1 else "s")
+                                    for n, c in sorted(done_kinds.items()))))
     unknown = report["unknown"]
     if unknown:
         out.append("  %-22s %d name(s) nothing here declares -- a difference in"

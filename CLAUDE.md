@@ -495,6 +495,7 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
 | `bgt_validate.py` | run the whole pipeline over several titles and compare, stage by stage |
 | `bgt_ghidra.py` | find/install Ghidra + a JDK, install extensions, drive headless decompiles |
+| `bgt_computer_id.py` | `bgt computerid`: BGT's own `generate_computer_id`, bit for bit -- the value a game checks a registration key against, so a port that computes anything else cannot validate a key the player already holds. `--verify` asks the engine and compares |
 | `bgt_kdf.py` | BGT's password → AES-key derivation for encrypted asset packs |
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
 | `engine.py` | `bgt identify`: BGT or NVGT, decided by each engine's own verifying layer |
@@ -555,6 +556,7 @@ bgt audit    recovered/ game.exe          # ...and did it LOSE a value?
 bgt signatures recovered/                 # ...and does the text say something odd?
 bgt roundtrip game.exe recovered/game.exe # ...and does it COMPILE BACK to the same thing?
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
+bgt computerid "my game" --verify         # ...and does a PORT get the same computer id?
 ```
 
 Extending the reader means reading `asCReader` out of the binary, and the Ghidra
@@ -618,6 +620,7 @@ python tests/test_toolkit.py        # the BGT known-answer tests alone
 compiler driver and the project writer — `tests/test_integration.py` the checks
 that join the two halves (embedded-pack walk, NVGT packs, engine
 identification, the two integer codecs agreeing),
+`tests/test_computer_id.py` the stages of `generate_computer_id` that do not touch the machine, against five of the engine's own answers and the components they were measured with,
 `tests/test_installer.py` the Inno Setup reader (filter vectors computed from
 the documented rule rather than from an encoder written as this decoder's
 inverse, and a synthetic installer built around a game whose bytes hold no
@@ -3699,6 +3702,189 @@ source and then confirmed by behaviour.
 What is left is a truncated or hostile packet, where BGT would skip the junk
 and NVGT returns empty, so a name arrives blank rather than garbled. That is
 the whole exposure, in a netplay path nobody has tested.
+
+### Three formats a PORT has to reproduce, and all three are now read
+
+`string_base64_decode` above is one primitive whose difference between the two
+engines breaks a game. Three more are worse, because they are not primitives
+but **formats**, and NVGT's `bgt_compat.nvgt` shimmed each one with its own
+equivalent:
+
+| BGT | what `bgt_compat.nvgt` answered with | what that costs |
+|---|---|---|
+| `generate_computer_id` | `generate_system_fingerprint` | a different number, so a registration key the player already holds never validates |
+| `string_compress` | `string_deflate` (zlib) | a ported game cannot read a file its BGT build wrote, or write one that build can read |
+| `serialize` | `dictionary::serialize` | the same, for every save |
+
+Each failure is the shape this file keeps recording: the port compiles, runs,
+and silently cannot read its own old data. And each reaches real titles --
+`generate_computer_id` is in Psycho Strike, The Gate, Manamon 1 and Manamon 2;
+`string_compress` and `serialize` in Paladin; `serialize` in all five of those.
+Only Super Egg Hunt calls none of them.
+
+All three are read now, and the authority is the engine rather than the
+disassembly: each was checked by asking `bgt.exe` and comparing.
+
+#### `generate_computer_id`, bit for bit
+
+```
+s  = drive_geometry()                 "%I64d%u%u%u%u" of PhysicalDrive0
+s += hardware_only ? " " : volume()   "%u" of C:'s serial, or "" if it is 0
+s += application_id
+s += cpu()                            "%u%u" of CPUID.1.EAX and CPUID.1.EDX
+s += total_physical_memory()          "%I64d" of ullTotalPhys
+d  = sha1(s)                          ...with each state word LITTLE-endian
+a  = 0x7FFF; for i,b in d: a *= (int8)b; if i == 4: a -= (int8)d[1]
+o  = base64(d) with its "=" padding stripped
+srand(a); thirteen draws discarded
+for i in o: if rand() % 10 + 1 > 6: swap(o[i], o[0])
+```
+
+Read out of `bgt.exe` 1.3 at `0x004962D0`, with the four components at
+`0x0048D6C0`, `0x0048D7F0`, `0x0048D640` and `0x0048D790`, the SHA-1 at
+`0x00496190` and the base64 at `0x00495DA0` -- which is the same function
+`string_base64_encode` is registered on, so the alphabet needed no separate
+check.
+
+**Four of those steps are ones a plausible guess gets wrong, and each is
+invisible from outside**: every wrong answer is still 27 characters of valid
+base64.
+
+- **The digest's words are little-endian.** The engine assigns its five SHA-1
+  state dwords to the output string as they sit in memory, so every group of
+  four bytes is reversed against a standard digest. The two hold *the same
+  bytes*, so no length, alphabet or character-multiset check can tell them
+  apart -- which is how it was found: the multiset matched and the id did not.
+- **`rand()` is Visual C++'s**, so the shuffle needs that generator's
+  constants. Another CRT returns the right characters in the wrong order.
+- **The drive component is GEOMETRY, not a serial.** The help file says the
+  non-hardware half uses "the hard drive serial assigned by the operating
+  system when the drive was last formatted", and that is the *volume* serial;
+  the hardware half is `IOCTL_DISK_GET_DRIVE_GEOMETRY`, which a reformat does
+  not change. So the documentation describes one of the two components and
+  reads as though it described both.
+- **`BytesPerSector` is pushed and never consumed.** The engine pushes five
+  values and the format reads four, so the last falls off the end of the
+  varargs. Counting it in changes every id on every machine.
+
+**Checked against the engine, 44 of 44.** `bgt computerid --verify` writes a
+probe that asks `generate_computer_id` for fifteen application ids with both
+flags, runs it, and compares -- 30 of 30, and 44 of 44 on a wider table
+including a one-character id, a 64-character one, an id of digits and one
+holding a `%` sequence, since the components go through `sprintf`.
+
+**One algorithm across the whole shipped corpus.** Every engine on this
+machine from 2014-06-01 onwards carries all seven constants -- `0x7FFF`, the
+`imul`, the `i == 4` subtraction, `srand`, the thirteen draws, `% 10 + 1` and
+`> 6` -- and that includes both VGStorm forks:
+
+| engine | the variant |
+|---|---|
+| BGT 1.0 (2010-12-30) | **`FeatureSet`** |
+| BGT 1.3, Super Egg Hunt, Paladin (2014-06-01) | `\\.\PhysicalDrive0` |
+| Psycho Strike (2015-04), The Gate (2015-10) | `\\.\PhysicalDrive0` |
+| Manamon 1 (2017-03), Manamon 2 (2019-11) | `\\.\PhysicalDrive0` |
+
+**BGT 1.0's answer is a different number**, and this toolkit does not compute
+it: that build has no `\\.\PhysicalDrive0` and reads the CPU's `FeatureSet`
+registry value instead. That value is **not** `CPUID.1.EDX` -- on this machine
+it is `0x311B3DFF` against `0xBFCBFBFF` -- so it is the kernel's own feature
+mask and changes with the Windows version. A key issued for a 1.0 game is not
+a key for a 1.3 one.
+
+**And the byte-pattern test that said the forks differed was the weak
+instrument**, not a finding. Searching for 1.3's exact `b9 0a 00 00 00 f7 f9
+42 83 fa 06` finds stock 1.3 and its games and misses all four VGStorm
+builds -- which is a newer MSVC allocating different registers, as reading
+Manamon 1's own `0x004544C0` shows: the same `0x7FFF`, the same `cmp esi, 4`,
+the same `mov esi, 0xd`, the same `idiv` by 10 and `cmp edx, 6`, with `edi`
+where 1.3 uses a stack slot. The constants are the signature; the bytes are
+not.
+
+#### `string_compress` is BGT's own LZ77, and this toolkit already had it
+
+No zlib, no bzip2, no library strings at all: `string_compress` is the **same
+codec as the module container** -- one escape byte, literals, `(length,
+distance)` matches as big-endian base-128 varints, and a trailing
+`" <uncompressed length>"`. `bgtlib.lz77_split` and `bgtlib.lz77_decompress`
+decode the engine's output unchanged, on all five recorded cases.
+
+Three details of the *encoder* were read out of its output, and each is one a
+guess gets wrong:
+
+- **the escape is the LOWEST byte value absent from the input**, and `0x00`
+  when every value occurs. So a blob holding a NUL opens with `0x01`, and one
+  holding all 256 values opens `00 00 00` -- the escape, then the first byte
+  escaped.
+- **a match may not overlap the cursor**: its length is capped at its
+  distance. So fifty `a`s compress as a doubling (4 from 4 back, 8 from 8
+  back, 16, 18) rather than as one run at distance 1.
+- **the minimum match is four bytes**, so `"aaaaaa"` is six literals and
+  `"ababab"` is six literals while `"abababab"` is four plus a match.
+
+With those, a plain maximal-match encoder -- longest `L` with `L <= d`,
+smallest `d` on a tie -- reproduces BGT's output **byte for byte on all
+twelve recorded cases**, the awkward ones included: the empty string (`" 0"`,
+with no escape byte at all), the string of every byte value, and the two whose
+shortest repeat is below the minimum.
+
+**`bgt_repack.lz77_compress` is not that encoder**, and this file's note that
+it "compresses slightly worse than BGT's" now has a cause: it allows
+overlapping matches and takes the first long one a 3-byte hash offers. Making
+it exact would remove the caveat that a repacked executable is not
+byte-identical to the original, and it is **not done here** -- it is a change
+to a path with its own round-trip measurement, and the exact rule is O(n*d)
+where that path handles a 4.7 MB module. Recorded with its twelve cases so
+the next attempt starts from them.
+
+#### `serialize` is base64 keys and text values
+
+```
+entry := base64(key) NUL <type byte> <value text> NUL
+```
+
+concatenated with nothing between them -- the value's terminating NUL is the
+separator, and it is unambiguous because a key and a string value are both
+base64 and a number is digits.
+
+| type | what | written as |
+|---|---|---|
+| 1 | an integer | decimal, signed or unsigned as the stored type is |
+| 2 | a double | `"%f"` -- **six decimals** |
+| 3 | a string | base64 of its bytes, so an embedded NUL survives |
+| 4 | a bool | `"1"` or `"0"` |
+
+**An array or a nested dictionary is DROPPED**, with no entry and no error:
+serialising a dictionary holding an array returns an empty string. And the
+`"%f"` is a real precision loss -- `0.0000001` serialises as `0.000000`, so a
+port that writes more digits produces a save BGT reads differently.
+
+#### What the toolkit does with it
+
+`bgt computerid` is the algorithm, and `--verify` is the check that says it is
+right:
+
+```bash
+bgt computerid "super egg hunt"              # this machine's id for that game
+bgt computerid appone --components           # ...and the four components
+bgt computerid --verify                      # ask bgt.exe 30 times and compare
+```
+
+`tests/test_computer_id.py` pins every stage that does not touch the machine
+-- the digest's word order, the checksum's signed bytes and 32-bit wrap, the
+Visual C++ generator against *its* documented sequence (41, 18467, 6334,
+26500, 19169 after `srand(1)`, which is an authority outside BGT), the
+thirteen draws and the swap -- plus five of the engine's own answers against
+the components they were measured with. Keeping both halves is the point:
+without the components the answers mean nothing, and without the answers the
+components are a dump.
+
+And `bgt tonvgt` reports all three as differences in **meaning**, with their
+sites, rather than rewriting them -- 32 sites in Paladin alone. It also
+**asks the NVGT in hand** whether that build already answers them exactly,
+because a fork can, and reporting it anyway would send somebody to fix what
+is already fixed.
+
 
 ### The engine registers itself, and the binary is the longer list
 

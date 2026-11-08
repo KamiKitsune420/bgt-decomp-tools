@@ -63,7 +63,8 @@ from typing import List, Optional
 
 try:                      # installed as a package
     from . import (as_disasm, as_early, as_lift, as_module, as_opcodes, as_write,
-                   bgt_api, bgt_apicheck, bgt_audit, bgt_compile, bgt_crack,
+                   bgt_api, bgt_apicheck, bgt_audit, bgt_compile,
+                   bgt_computer_id, bgt_crack,
                    bgt_rename, bgt_roundtrip, bgt_signatures, bgt_to_nvgt,
                    bgt_ghidra, bgt_oracle, bgt_drive,
                    bgt_libcheck, bgt_pack, bgt_project, bgt_repack,
@@ -86,6 +87,7 @@ except ImportError:       # run directly from a checkout
     import bgt_oracle
     import bgt_drive
     import bgt_compile
+    import bgt_computer_id
     import bgt_crack
     import bgt_ghidra
     import bgt_project
@@ -496,6 +498,17 @@ def cmd_gui(args: argparse.Namespace) -> int:
 def cmd_compile(args: argparse.Namespace) -> int:
     """Everything after `bgt compile` is handled by bgt_compile's own parser."""
     return _run(bgt_compile.main, args.rest, prog="bgt compile")
+
+
+def cmd_computerid(args: argparse.Namespace) -> int:
+    """BGT's own `generate_computer_id`, which a port has to reproduce exactly.
+
+    A game checks its registration key against this value, so a conversion
+    that computes anything else cannot validate a key the player already
+    holds -- and it fails silently, because every wrong answer is still 27
+    plausible characters. `--verify` asks the engine and compares.
+    """
+    return _run(bgt_computer_id.main, args.rest, prog="bgt computerid")
 
 
 def cmd_verbs(args: argparse.Namespace) -> int:
@@ -1137,6 +1150,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the game's exe, for its own opcode table")
     p.set_defaults(func=cmd_early)
 
+    p = sub.add_parser("computerid",
+                       help="this machine's BGT computer id, as the engine "
+                            "computes it")
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="[application_id] [--hardware-only] [--components] "
+                        "[--verify]")
+    p.set_defaults(func=cmd_computerid)
+
     p = sub.add_parser("validate", help="run the pipeline over several titles")
     p.add_argument("exe", nargs="+")
     p.add_argument("--deep", action="store_true")
@@ -1149,7 +1170,8 @@ def build_parser() -> argparse.ArgumentParser:
 # Command groups whose own parsers own everything after the group name. argparse's
 # REMAINDER cannot capture a leading option, so `bgt nvgt --help` would be
 # rejected as an unknown top-level flag; these are dispatched before parsing.
-_PASSTHROUGH = {"nvgt": cmd_nvgt, "ghidra": cmd_ghidra, "files": cmd_files}
+_PASSTHROUGH = {"nvgt": cmd_nvgt, "ghidra": cmd_ghidra, "files": cmd_files,
+                "computerid": cmd_computerid}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

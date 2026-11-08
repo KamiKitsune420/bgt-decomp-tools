@@ -228,9 +228,59 @@ class SemanticDifferenceTests(unittest.TestCase):
     """
 
     def test_both_are_named_with_what_differs(self):
-        for name in ("call", "get_progress", "request"):
+        for name in ("call", "get_progress", "request",
+                     "generate_computer_id", "string_compress",
+                     "string_decompress", "serialize", "deserialize"):
             self.assertIn(name, bgt_to_nvgt.SEMANTIC)
             self.assertTrue(len(bgt_to_nvgt.SEMANTIC[name]) > 40)
+
+    def test_the_save_path_differences_are_all_reported(self):
+        """A recovered title's save path is `serialize` into `string_compress`
+        into `string_encrypt`, and `bgt_compat.nvgt` shims the first two with
+        a different format each. Both are the quiet kind: the port compiles,
+        runs, and cannot read what the original wrote -- so each has to be
+        reported with its sites rather than rewritten."""
+        for name in ("serialize", "deserialize", "string_compress",
+                     "string_decompress", "generate_computer_id"):
+            why = bgt_to_nvgt.SEMANTIC[name]
+            self.assertIn("BGT", why)
+
+    def test_an_nvgt_that_answers_exactly_is_asked_rather_than_assumed(self):
+        """A fork can carry BGT's own compression, dictionary format and
+        computer id, and then the difference is resolved there while it is
+        still real of every other build. So the question is put to the
+        `bgt_compat.nvgt` in hand, and a build that routes the shim to the
+        exact implementation is reported as answering rather than differing --
+        which stops a person being sent to fix what is already fixed."""
+        import tempfile
+
+        scratch = tempfile.mkdtemp(prefix="tonvgt_shims_")
+        include = os.path.join(scratch, "include")
+        os.makedirs(include)
+        compat = os.path.join(include, "bgt_compat.nvgt")
+
+        with open(compat, "w") as handle:
+            handle.write("string string_compress(string s) "
+                         "{ return string_deflate(s, 9); }\n")
+        nvgt = bgt_to_nvgt.Nvgt(os.path.join(scratch, "nvgt.exe"), include, None)
+        self.assertEqual(bgt_to_nvgt.exact_shims(nvgt), set())
+
+        with open(compat, "w") as handle:
+            for name in ("bgt_string_compress", "bgt_string_decompress",
+                         "bgt_serialize", "bgt_generate_computer_id"):
+                handle.write("// routes to %s\n" % name)
+        self.assertEqual(bgt_to_nvgt.exact_shims(nvgt),
+                         set(bgt_to_nvgt.EXACT_SHIMS))
+
+    def test_with_no_nvgt_nothing_is_claimed_as_answered(self):
+        """The stricter direction: an absent or unreadable compiler means the
+        difference is reported, not quietly suppressed."""
+        self.assertEqual(bgt_to_nvgt.exact_shims(None), set())
+
+    def test_every_exact_shim_is_a_semantic_difference(self):
+        """Otherwise the suppression would be keyed on a name nothing reports."""
+        for name in bgt_to_nvgt.EXACT_SHIMS:
+            self.assertIn(name, bgt_to_nvgt.SEMANTIC)
 
     def test_none_of_them_is_also_a_rename(self):
         """A name cannot be both rewritten and left to a person."""
