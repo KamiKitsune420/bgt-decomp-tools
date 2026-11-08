@@ -233,3 +233,31 @@ def test_a_new_folder_goes_where_the_field_points():
     # an empty name is "never mind", not a folder called ""
     assert target(here, "   ", fallback) == ""
     assert target(here, "", fallback) == ""
+
+
+def test_every_action_button_is_disabled_while_a_job_runs():
+    """There is no Stop button, so the controls disabling is the only thing
+    that keeps a second job off a half-written output folder -- and a button
+    left out of `busy()` stays live during a run and invites exactly that.
+
+    Enumerated rather than listed: an action button is one the frame keeps as
+    a `*_button` attribute, which is this window's own convention, so a new
+    one is covered without this test being edited. Browse and New-folder are
+    deliberately not action buttons -- they only fill in a text field, and
+    disabling them during a run would stop somebody lining up the next job.
+    """
+    app = wx.App()
+    try:
+        frame = bgt_gui.Frame()
+        actions = {name: value for name, value in vars(frame).items()
+                   if name.endswith("_button") and isinstance(value, wx.Button)}
+        assert len(actions) >= 6, "found no action buttons: %s" % sorted(actions)
+        frame.busy(True)
+        live = sorted(n for n, b in actions.items() if b.IsEnabled())
+        frame.busy(False)
+        dead = sorted(n for n, b in actions.items() if not b.IsEnabled())
+        frame.Destroy()
+    finally:
+        app.Destroy()
+    assert not live, "still clickable while a job runs: %s" % live
+    assert not dead, "left disabled after a job: %s" % dead

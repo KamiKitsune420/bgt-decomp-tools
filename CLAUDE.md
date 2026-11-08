@@ -495,6 +495,8 @@ bytecode is not x86, and `as_opcodes.py` disassembles it directly. (Reach for
 | `bgt_crack.py` | harvest candidate passwords from a module and test them against a pack |
 | `bgt_validate.py` | run the whole pipeline over several titles and compare, stage by stage |
 | `bgt_ghidra.py` | find/install Ghidra + a JDK, install extensions, drive headless decompiles |
+| `bgt_assets.py` -- in `bgt_project` | `bgt assets`: a game's packs and data files with NOTHING decompiled. The module is still read, because a pack is named by a string constant and its password is computed by the script, so neither is on disk to be found |
+| `nvgt/nvgt_compiler.py` | where NVGT is -- one answer for the whole toolkit. Three places used to disagree, and `libcheck` never looked in a built checkout at all, so it scored a different engine than `bgt tonvgt` compiled against |
 | `bgt_computer_id.py` | `bgt computerid`: BGT's own `generate_computer_id`, bit for bit -- the value a game checks a registration key against, so a port that computes anything else cannot validate a key the player already holds. `--verify` asks the engine and compares |
 | `bgt_kdf.py` | BGT's password → AES-key derivation for encrypted asset packs |
 | `bgt_string_crypt.py` | BGT's `string_encrypt` / `string_decrypt`, and the shared key setup |
@@ -557,6 +559,8 @@ bgt signatures recovered/                 # ...and does the text say something o
 bgt roundtrip game.exe recovered/game.exe # ...and does it COMPILE BACK to the same thing?
 bgt verbs --repoint                       # make double-clicking a .bgt use the BGT that can parse it
 bgt computerid "my game" --verify         # ...and does a PORT get the same computer id?
+bgt assets game.exe -o sounds/            # just the data, with nothing decompiled
+bgt nvgt recover game.exe -o out/ --compile   # the NVGT half, with the same check
 ```
 
 Extending the reader means reading `asCReader` out of the binary, and the Ghidra
@@ -16423,6 +16427,255 @@ question with a known answer available in one command, on a title whose
 every line can be read side by side -- which is what `bgt roundtrip` has
 been approximating with a rebuild. The two should agree, and checking that
 they do is the cheapest validation of the round trip there is.
+
+## The NVGT half, measured for the first time on this machine
+
+Reported as *"I don't think any nvgt game will start properly after
+decompiling, each one have a lot of errors"*. There is substance in it, and
+finding out how much needed three things first -- a compile check the NVGT
+side could run the way the BGT side does, one answer to where NVGT is, and
+the tests that were quietly not running.
+
+### The compiler-backed tests were SKIPPING, and were counted as passing
+
+`tests/nvgt/` has three harnesses that need an `nvgt.exe`, and each read
+`NVGT_COMPILER` from the environment. Nothing sets it here, so on a machine
+with NVGT built and installed they **skipped** -- and the suite reported
+`89 skipped` without anybody reading which.
+
+One of them is `test_roundtrip_behavior.py`, which **runs** a decompiled
+program and compares what it computes. It is the only check in this
+repository that can see a decompiler bug that compiles cleanly, its own
+docstring says so, and it had never run here.
+
+| | before | after |
+|---|---|---|
+| `test_roundtrip_behavior` | **all skipped** | 16 passed, **3 failed** |
+| `test_library_recovery` | 3 passed, 5 skipped | **6 passed**, 2 skipped |
+| `test_number_behavior` | skipped | skipped -- needs a game that is not here |
+
+So the answer to "how is the NVGT path doing?" was unavailable rather than
+good. The compiler is found rather than demanded now, and the include folder
+beside it is derived rather than demanded, which is what unskipped three more
+library checks.
+
+**This is the shape this file keeps recording**: *a check that cannot run is
+worse than no check, because it is counted.* It is written down here about the
+NVGT round-trip fixture already -- "inert through 774 lines of decompiler
+change" -- and the same sentence was true of the harness that holds it.
+
+### ...and WHERE NVGT is had three answers
+
+`bgt tonvgt` searched the checkout's `release/` first; `bgt nvgt libcheck`
+searched `C:\nvgt` and **never a checkout at all**; `bgt nvgt recover` made
+the caller name a path. On this machine the first two were byte-identical
+copies, so nothing showed -- until the checkout was rebuilt, after which
+`bgt tonvgt` compiled against one engine and `libcheck` scored another.
+
+`tools/nvgt/nvgt_compiler.py` is the one answer: `NVGT_COMPILER`, then the
+usual places, then `PATH`, and **None rather than a guess**, because a check
+that silently ran the wrong compiler reports a verdict about the wrong
+engine. All three callers and all three test harnesses go through it.
+
+### `bgt nvgt recover --compile`, which is the BGT side's spelling
+
+The NVGT path had `--check-with <path to nvgt.exe>`; the BGT path has
+`--compile`, which finds the compiler itself. Both exist now, `--compile` says
+which compiler it used, and the result is printed as a verdict line before
+the JSON -- that dict was the only output, so the one number a person wants
+was the hardest thing to find.
+
+### What the measurement found: two defects, one of them in a game that RAN
+
+#### A function returning an enum returned an `int`, and the project would not compile
+
+`shade choose(bool b) { return b ? shade_light : shade_dark; }` recovered as
+
+```
+int local_1;
+if (arg0) { local_1 = 2; } else { local_1 = 0; }
+return local_1;
+```
+
+which is `No conversion from 'int' to 'shade' available` -- AngelScript has no
+implicit int-to-enum conversion. **One function failed and the whole project
+failed with it**, which is exactly the report: a lot of errors.
+
+`_normalize_arg` already knew about an enum target and applied it only to an
+**inline** ternary. Once the structurer has made the ternary an `if`/`else`,
+what reaches the `return` is a bare slot name whose type is `int`, because an
+enum is an int in the bytecode. The explicit construction was put to the
+compiler before being emitted -- `shade(v)`, `shade v` and a mixture all
+compile and all answer 2 -- and it is kept to the module's **own** enums
+rather than to `kind in ("enum", "app")` as the ternary branch allows: `app`
+is any registered type, and wrapping a registered value type's name round an
+integer would compile into a constructor call that means something else.
+
+| | debug build | stripped build |
+|---|---|---|
+| before | **does not compile** | **does not compile** |
+| after | passes | compiles, **behaves identically** |
+
+#### A zero-argument call returning a value object writes the slot pushed before it
+
+The one that answers "will it start properly", and it was found by building a
+small NVGT game, running it, recovering it, and running that:
+
+```
+string line = n >= 0 ? enemies[n].describe() : "nothing near";
+bool killed = enemies[0].hurt(20);
+string blob = save_blob();
+...
+f.write("nearest=" + line + "\r\n");
+```
+
+The compiler puts the ternary's result and `save_blob()`'s into **one** scratch
+slot and copies each out to its own, so `line` and `blob` are two more slots.
+Nothing recorded the second write, so both copies folded back to the scratch
+slot's name and the recovered game printed `blob` where `line` belonged:
+
+| | the recovered game's own output |
+|---|---|
+| before | `nearest=       score       namenobodyenemies       ` |
+| after | `nearest=slime5 at 20, 35 with 10` |
+
+Those words are the save file's dictionary keys. The game **compiled, started
+and ran** -- 0 residual gotos, 0 decompiler errors, `nvgt -c passed` -- and
+printed rubbish, which is this file's worst failure shape and precisely what
+was reported.
+
+The write is the engine's own protocol and the predicate was already here:
+`_needs_out_ref` is "a value-object return takes a hidden caller-supplied
+out-ref", so `PSF v ; CALL string f()` fills `v`. The pre-pass recorded that
+for a behaviour and for the string factory, which are two instances of it, and
+not for the general case.
+
+**Two narrowings, and the second is by construction rather than by
+measurement.** A method's `PSF` immediately before the call is the
+**receiver**, not the return address -- the frame is `this` on top, then the
+return address, then the arguments -- so counting it made `a + b` decompose
+into one statement per `+`:
+
+```
+local_8 = ("loop_fire" + random(1, 2));
+local_7 = (local_8 + ".ogg");
+```
+
+three lines for one, on every title with string-building code. And because the
+arguments are pushed *after* the return address, a `PSF` immediately before
+the call is the return address only when the call takes **none**. So this
+reaches zero-argument receiver-less calls returning a value object --
+`save_blob()`, `get_sound_storage()` -- and nothing else.
+
+Measured, which is what that claim is worth:
+
+| title | lines | goto | split | calls read back | files differing |
+|---|---|---|---|---|---|
+| Super Egg Hunt | 5,218 | 0 | verified | 1,623 | **0 -- byte-identical** |
+| Battle of the Hunter | 11,005 | 0 | verified | 4,212 | **0 -- byte-identical** |
+| The Gate | 33,987 | 0 | verified | 8,681 | **0 -- byte-identical** |
+
+Three BGT titles untouched and one NVGT game fixed, which is what a correctly
+scoped change looks like by this file's own standard.
+
+And the over-broad version is kept here because it is the measurement that
+produced the narrowing: it took Battle of the Hunter to 11,017 lines and one
+differing file, every line of it a concatenation decomposed.
+
+**The Gate's 33,987 is not this change, and not the enum one either.** The
+standings carry 34,031 for it, and the difference is **stale rather than
+caused**: a recovery at HEAD with nothing of this session applied gives
+33,987 and 8,681 too, and the enum fix cannot have moved it -- that title
+declares 25 enums and the recovery holds **0** enum-construction sites, so
+the branch never fires. So the standings row needs re-deriving against a
+commit somewhere between where it was written and now, which is the thing
+this file keeps recording about a number and a claim about that number being
+two places to keep in step.
+
+### Two test assertions that needed reading rather than obeying
+
+- **`? 1 : 0)` on `mixed_slots` has EXPIRED rather than broken.** It pinned
+  the conversion that keeps a bool's value from being flattened by a numeric
+  declaration, and the slot-web analysis now splits the two definitions, so
+  the bool never reaches a slot and the body comes back as the source wrote
+  it: `if (in_box(arg0, arg1)) { local_1 += 1.0; }`. Demanding the wrapper
+  would now demand the workaround for a defect that no longer arises there.
+  Replaced with what still means something, and the behaviour comparison
+  above it is what actually guards it.
+- **The ternary inside an expression is a KNOWN rendering defect**, marked
+  expected-failure with its diagnosis rather than deleted or loosened. The
+  original bug was worse -- `10 + (c ? 3 : 7)` came back as `10 + 7` with an
+  empty `if`, a wrong answer -- and that is fixed; what is left is `int
+  local_1; if (...) ... return 10 + local_1;`, the same program in more lines.
+  **It renders that way in BOTH builds**, so it is not the webs analysis
+  declaring a stripped build's slot: the debug build, which has the names and
+  the positions, does the same. `_begin_value_merge` is not claiming a two-arm
+  merge whose arms are ordinary constants, and that is a structurer change,
+  which this repository holds to a five-title measurement.
+
+So the harness stands at **18 passed, 2 skipped, 1 xfailed, 0 failed**, from
+"all skipped" at the start of the day.
+
+### What the report was about that this does NOT fix
+
+The eight titles in `NVGT list.txt` that answer `no xproc10 trailer` are the
+**unverified packaging profile** case this file already records, not a
+decompiler problem -- an official NVGT release gets fresh packaging parameters
+per build and a profile is added only once it has been verified against
+samples. Three more (Redspot, 2d adventure rewrite, Bloodwar) fail inside the
+reader with a bad back-reference or an out-of-range encoded integer, which is
+the wrong `asCReader` generation and is a different job again.
+
+Those eleven never reached the decompiler, so "each one has a lot of errors"
+and "most of them would not open" are two reports that arrived as one.
+
+## `bgt assets`: a game's data, with nothing decompiled
+
+`bgt recover` brings the packs because a project without them is unplayable,
+and that made the data half reachable only by decompiling -- so somebody who
+wanted the sounds out of a 174,000-line title paid for the whole recovery to
+get them.
+
+```bash
+bgt assets game.exe -o sounds/            # packs, extracted, plus the data files
+bgt assets game.exe -o sounds/ --no-extract
+```
+
+The module is still read, and has to be: a pack is named by a **string
+constant** rather than by anything on disk, and its password is **computed by
+the script** rather than stored. So this is cheaper than a recovery, not
+independent of one -- and where the module cannot be read, what is left is the
+embedded pack and the files beside the executable, which is said in the notes
+rather than passed off as the whole answer.
+
+Measured on Super Egg Hunt: 7 packs found, the password `puppiesandpandas`
+recovered from the module, **344 of 344 entries out as valid Ogg**, and the
+game's own data files beside them -- with no decompiler run.
+
+`bgt_project.extract_assets` is one function and the CLI and the GUI are two
+callers of it, so anything the window reports can be reproduced in one
+command.
+
+## Two more buttons on the window
+
+- **Extract assets only**, the above.
+- **Name the locals**, which runs `bgt rename` over a recovered project. It
+  reads the OUTPUT folder rather than the executable, because that is what
+  `bgt rename` works on -- so it is the one button there that needs no game at
+  all, and it says so rather than letting somebody wonder why the executable
+  field is ignored. What it could not name, and shadowing the recovery already
+  had, are both reported: a slot this pass skipped is something a reader needs
+  to know before trusting the names that did change.
+
+**And `busy()` now disables every action button, enumerated rather than
+listed.** There is no Stop button, so the controls disabling is the only thing
+keeping a second job off a half-written output folder -- and a button left out
+of that list stays live during a run and invites exactly that. The test walks
+the frame for `*_button` attributes instead of naming them, so a new one is
+covered without the test being edited. Browse and New-folder are deliberately
+not action buttons: they only fill in a text field, and disabling them during
+a run would stop somebody lining up the next job.
+
 
 # Porting to NVGT, which can be compiled on every run
 

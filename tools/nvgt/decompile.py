@@ -1853,8 +1853,65 @@ class FuncDecompiler:
             #: exists to fold. It cannot reach a later engine, whose
             #: factory returns a reference and whose shape puts the `STR`
             #: between the `PSF` and the call.
+            #: **...and ANY call that returns a value object constructs into
+            #: the slot pushed before it**, which is the general case the two
+            #: tests above are each one instance of. `_needs_out_ref` is the
+            #: engine's own protocol: a value-object return takes a hidden
+            #: caller-supplied out-ref, so `PSF v ; CALL string f()` fills v.
+            #:
+            #: Unrecorded, that write is invisible to every "has this slot been
+            #: written since?" question, and a value copied out of the slot
+            #: stays readable past the call that overwrote it. A small NVGT
+            #: game written for this measurement is the shape:
+            #:
+            #:     string line = n >= 0 ? enemies[n].describe() : "nothing";
+            #:     string blob = save_blob();
+            #:     f.write("nearest=" + line);
+            #:
+            #: The compiler puts the ternary and `save_blob()`'s result in ONE
+            #: scratch slot and copies each out to its own -- so `line` and
+            #: `blob` are two slots -- and with the second write unseen both
+            #: copies folded back to the scratch slot's name. The recovered
+            #: game ran, and printed `blob` where `line` belonged: the
+            #: dictionary keys of the save file in place of the enemy's
+            #: description.
+            #:
+            #: The string factory is kept as its own test rather than folded
+            #: into this one: the 2010-2012 factory is registered as returning
+            #: a `string` by value and so is caught here, but the later one
+            #: returns a reference, and that spelling is what `STRING_FACTORIES`
+            #: is for.
+            #: **Only a call with no receiver**, because the `PSF` immediately
+            #: before a call is the receiver when there is one: the frame is
+            #: `this` on top, then the hidden return address, then the
+            #: arguments. So for `a + b` -- `opAdd`, a method returning a
+            #: value object -- the slot this sees is `a`, which the call
+            #: READS. Counted as a write it made every string concatenation
+            #: decompose into one statement per `+`:
+            #:
+            #:     local_8 = ("loop_fire" + random(1, 2));
+            #:     local_7 = (local_8 + ".ogg");
+            #:
+            #: -- the same program, three lines for one, on every title with
+            #: string-building code. A global function has no receiver, so
+            #: there the `PSF` really is the return address, and that is the
+            #: case the record was missing.
+            #:
+            #: **And the arguments narrow it further, by construction rather
+            #: than by measurement**: the frame is the return address and THEN
+            #: the arguments, so a `PSF` immediately before the call is the
+            #: return address only when the call takes none. So this reaches
+            #: zero-argument receiver-less calls returning a value object --
+            #: `save_blob()`, `get_sound_storage()` -- and nothing else, which
+            #: is why both BGT titles measured came out byte-identical.
+            returns_value_object = False
+            ref = getattr(nxt, "func_ref", None)
+            if (ref is not None and getattr(ref, "return_type", None) is not None
+                    and getattr(ref, "object_type", None) is None):
+                returns_value_object = _needs_out_ref(ref.return_type)
             constructs = (callee.startswith(("$beh", "_beh_"))
-                          or _is_string_factory(callee))
+                          or _is_string_factory(callee)
+                          or returns_value_object)
             if ((constructs and callee not in _DTOR_SPELLINGS)
                     or callee in _ASSIGN_OPS):
                 self.behaviour_writes.setdefault(
@@ -4748,6 +4805,36 @@ class FuncDecompiler:
             yes = self._normalize_arg(yes, dt)
             no = self._normalize_arg(no, dt)
             return Atom("call", f"({condition} ? {yes.text} : {no.text})", data_type=dt)
+        #: ...and the same target when the ternary was STRUCTURED AWAY. The
+        #: branch above only fires while the value is still one atom; once the
+        #: structurer has made it an `if`/`else` over a slot, what reaches the
+        #: use is a bare slot name whose type is `int`, because an enum is an
+        #: int in the bytecode and a stripped build records nothing better.
+        #:
+        #: `shade choose(bool b) { return b ? shade_light : shade_dark; }`
+        #: is the fixture's shape, and it recovered as
+        #:
+        #:     int local_1;
+        #:     if (arg0) { local_1 = 2; } else { local_1 = 0; }
+        #:     return local_1;
+        #:
+        #: -- which is `No conversion from 'int' to 'shade' available`, so the
+        #: whole project failed to compile over one function. AngelScript has
+        #: no implicit int-to-enum conversion and does accept the explicit
+        #: construction, which was put to the compiler before being emitted:
+        #: `shade(v)`, `shade v` and a mixture all compile and all answer 2.
+        #:
+        #: Kept to the module's OWN enums rather than `kind in ("enum", "app")`
+        #: as the ternary branch allows: `app` is any registered type, and
+        #: wrapping a registered value type's name round an integer would
+        #: compile into a constructor call that means something else.
+        if (dt.obj_type is not None and not dt.is_object_handle
+                and dt.obj_type.kind == "enum" and atom.kind != "const"
+                and not atom.ternary
+                and (source is None or source.obj_type is None)):
+            name = dt.obj_type.format_name()
+            if name and not atom.text.startswith(name + "("):
+                return Atom("call", f"{name}({atom.text})", data_type=dt)
         if dt.token_type == 67 and source and source.obj_type is None and source.token_type in (70, 77, 81, 94):
             return Atom("call", f"({atom.text} != 0)", data_type=dt)
         # ...and the other way. A stripped build records no type for a scalar

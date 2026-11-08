@@ -44,12 +44,13 @@ import threading
 import traceback
 
 try:                      # installed as a package
-    from . import bgt_compile, bgt_drive, bgt_project, engine
+    from . import bgt_compile, bgt_drive, bgt_project, bgt_rename, engine
 except ImportError:       # run directly from a checkout
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import bgt_compile
     import bgt_drive
     import bgt_project
+    import bgt_rename
     import engine
 
 try:
@@ -242,7 +243,19 @@ class Frame(wx.Frame):
         #: no window, so it is safe to press while somebody is listening to
         #: something else.
         self.drive_button = wx.Button(panel, label="Check it r&uns")
+        #: The data on its own. Recovering a large title to get at its sounds
+        #: is minutes of decompiling for somebody who wanted the audio, and
+        #: until now that was the only way: the packs come out of `recover`.
+        #: The module is still read, because a pack is named by a string
+        #: constant and its password is computed by the script.
+        self.assets_button = wx.Button(panel, label="Extract &assets only")
+        #: A release build names no local, so a recovery reads `local_4` and
+        #: `arg0`. `bgt rename` gives each one a name from what the code does
+        #: with it, and it runs on a recovered FOLDER rather than on a game --
+        #: so this takes the output folder, not the executable.
+        self.rename_button = wx.Button(panel, label="&Name the locals")
         for button in (self.identify_button, self.recover_button,
+                       self.assets_button, self.rename_button,
                        self.compile_button, self.drive_button):
             buttons.Add(button, 0, wx.RIGHT, 6)
         body.Add(buttons, 0, wx.TOP, 10)
@@ -259,6 +272,8 @@ class Frame(wx.Frame):
 
         self.identify_button.Bind(wx.EVT_BUTTON, self.on_identify)
         self.recover_button.Bind(wx.EVT_BUTTON, self.on_recover)
+        self.assets_button.Bind(wx.EVT_BUTTON, self.on_assets)
+        self.rename_button.Bind(wx.EVT_BUTTON, self.on_rename)
         self.compile_button.Bind(wx.EVT_BUTTON, self.on_compile)
         self.drive_button.Bind(wx.EVT_BUTTON, self.on_drive)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -296,7 +311,12 @@ class Frame(wx.Frame):
             wx.CallAfter(append)
 
     def busy(self, running: bool) -> None:
+        #: Every button, not a list that a new one can be left out of: there
+        #: is no Stop, so the controls disabling is the only thing that keeps
+        #: a second job off a half-written output folder. A button missing
+        #: from here stays live during a run and invites exactly that.
         for control in (self.identify_button, self.recover_button,
+                        self.assets_button, self.rename_button,
                         self.compile_button, self.drive_button,
                         self.exe, self.out,
                         self.compile_check, self.with_data,
@@ -422,6 +442,80 @@ class Frame(wx.Frame):
             return "Recovered %d files to %s" % (len(project.files), out)
 
         self.run("Recover project", job)
+
+    def on_assets(self, _event) -> None:
+        """A game's packs and data files, with nothing decompiled.
+
+        The same `bgt_project.extract_assets` the `bgt assets` command calls,
+        so anything this reports can be reproduced in one command -- which is
+        the rule the rest of this window follows.
+        """
+        path = self._need(self.exe, "a game executable")
+        if not path:
+            return
+        out = self._need(self.out, "an output folder")
+        if not out:
+            return
+        extract = self.extract_data.GetValue()
+        with_game_files = self.game_files.GetValue()
+
+        def job():
+            self.say("Extracting the assets of %s" % path)
+            done = bgt_project.extract_assets(
+                path, out, extract=extract, with_game_files=with_game_files,
+                progress=self.say)
+            self.say("")
+            for line in done.summary().splitlines():
+                self.say(line)
+            if not done.files:
+                return ("Nothing to extract: this game names no pack and has "
+                        "no data files beside it.")
+            return "Wrote %d file(s) to %s, with nothing decompiled" % (
+                len(done.files), out)
+
+        self.run("Extract assets", job)
+
+    def on_rename(self, _event) -> None:
+        """Give every local and parameter of a recovered project a name.
+
+        This one reads the OUTPUT folder rather than the executable, because
+        that is what `bgt rename` works on -- so it is the one button here
+        that does not need a game at all, and saying so is better than
+        letting somebody wonder why the executable field is ignored.
+        """
+        out = self._need(self.out, "a recovered project folder")
+        if not out:
+            return
+        if not os.path.isdir(out):
+            wx.MessageBox("%s is not a folder yet.\n\nRecover a project "
+                          "first: this names the locals in source that is "
+                          "already there." % out,
+                          "Nothing to rename", wx.OK | wx.ICON_WARNING, self)
+            return
+
+        def job():
+            self.say("Naming the locals in %s -- this re-lexes the whole "
+                     "project twice to check itself, so it is not instant"
+                     % out)
+            report = bgt_rename.rename_project(out)
+            self.say("")
+            self.say("named %d of %d slot(s)" % (report.named, report.slots))
+            for source, count in sorted(report.by_source.items(),
+                                        key=lambda kv: -kv[1]):
+                self.say("  %4d  %s" % (count, source))
+            for line in report.repairs:
+                self.say("  repaired: %s" % line)
+            #: Said rather than swallowed: a slot this pass could not name, and
+            #: shadowing the recovery already had, are both things a reader
+            #: needs to know about before trusting the names that DID change.
+            for line in report.problems:
+                self.say("  ! %s" % line)
+            for line in report.inherited:
+                self.say("  ! already shadowed before this ran: %s" % line)
+            return "Named %d of %d local and parameter slot(s)" % (
+                report.named, report.slots)
+
+        self.run("Name the locals", job)
 
     def on_compile(self, _event) -> None:
         if bgt_compile.find_compiler() is None:

@@ -13,8 +13,24 @@ from asreader import DataType, Function, Instr, TypeInfo
 ROOT = Path(__file__).resolve().parent / "fixtures"
 PROBE = Path(os.environ["NVGT_LIBRARY_PROBE"]) if os.environ.get("NVGT_LIBRARY_PROBE") else None
 TARGET = Path(os.environ["NVGT_BOPIT_EXE"]) if os.environ.get("NVGT_BOPIT_EXE") else None
-COMPILER = Path(os.environ["NVGT_COMPILER"]) if os.environ.get("NVGT_COMPILER") else None
-INCLUDES = Path(os.environ["NVGT_INCLUDE"]) if os.environ.get("NVGT_INCLUDE") else None
+#: Found rather than demanded. These tests used to need NVGT_COMPILER set
+#: by hand, so on a machine with NVGT plainly installed they SKIPPED -- and a
+#: check that cannot run is worse than no check, because it is counted. The
+#: finder is the toolkit's one answer, so this agrees with what `bgt tonvgt`
+#: compiles against and what `bgt nvgt libcheck` scores.
+import nvgt_compiler
+_found = nvgt_compiler.find_exe()
+COMPILER = Path(_found) if _found else None
+#: The include folder sits beside the compiler, so it is DERIVED rather than
+#: demanded -- the env var still wins for anyone pointing at a second copy.
+#: Without this the reuse check skipped on a machine with NVGT plainly
+#: installed, which is a check that cannot run being counted as one that did.
+_includes = os.environ.get("NVGT_INCLUDE")
+if not _includes and COMPILER is not None:
+    _beside = COMPILER.parent / "include"
+    if _beside.is_dir():
+        _includes = str(_beside)
+INCLUDES = Path(_includes) if _includes else None
 
 
 class ReferenceMetadataTests(unittest.TestCase):

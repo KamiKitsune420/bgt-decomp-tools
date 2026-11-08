@@ -15,6 +15,11 @@ import shutil
 import subprocess
 
 try:                      # installed as a package
+    from . import nvgt_compiler
+except ImportError:       # run directly from a checkout
+    import nvgt_compiler
+
+try:                      # installed as a package
     from .decompile import ModuleDecompiler, load_any
     from .inspect_exe import identity
     from .source_evidence import recovery_evidence
@@ -413,6 +418,11 @@ def generate_archive(input_path, archive_path, target_lines=800, progress=lambda
     return manifest
 
 
+def find_compiler(explicit=None):
+    """Locate nvgt.exe, or None with nothing guessed. See `nvgt_compiler`."""
+    return nvgt_compiler.find_exe(explicit)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input")
@@ -422,14 +432,35 @@ def main():
     parser.add_argument("--zip-only", action="store_true", help="Keep only the ZIP; --output is an archive filename")
     parser.add_argument("--check-with", metavar="NVGT_EXE",
                         help="Compile recovered source with this NVGT compiler in a disposable folder; does not run the game")
+    parser.add_argument("--compile", action="store_true",
+                        help="The same check, with the compiler found rather than "
+                             "named -- NVGT_COMPILER, then the usual places. This is "
+                             "the spelling `bgt recover` uses on the BGT side")
     args = parser.parse_args()
     if args.file_lines < 50:
         parser.error("--file-lines must be at least 50")
+    compiler = args.check_with
+    if args.compile and not compiler:
+        #: Found the same way `bgt tonvgt` finds it, so one question has one
+        #: answer: a toolkit that located NVGT for the converter and then asked
+        #: the user to name it again for the recovery would be two answers.
+        compiler = find_compiler()
+        if compiler is None:
+            parser.exit(1, "no NVGT compiler found -- pass --check-with <path to "
+                           "nvgt.exe>, or set NVGT_COMPILER, to get the check "
+                           "this flag is for\n")
+        print(f"Compiling the result with {compiler}")
     try:
         exporter = generate_archive if args.zip_only or Path(args.output).suffix.lower() == ".zip" else generate_project
-        manifest = exporter(args.input, args.output, args.file_lines, print, compiler=args.check_with)
+        manifest = exporter(args.input, args.output, args.file_lines, print, compiler=compiler)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"Recovery failed: {error}\n")
+    #: Say what the compiler said, in words, before the JSON. The BGT side's
+    #: `recover --compile` prints a verdict line and this printed only a dict,
+    #: so the one number a person wants was the hardest thing to find.
+    report = manifest.get("source_compilation")
+    if report:
+        print(f"nvgt -c  {report}")
     print(json.dumps(manifest["diagnostics"]))
     return 0
 

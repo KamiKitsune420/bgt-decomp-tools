@@ -511,6 +511,27 @@ def cmd_computerid(args: argparse.Namespace) -> int:
     return _run(bgt_computer_id.main, args.rest, prog="bgt computerid")
 
 
+def cmd_assets(args: argparse.Namespace) -> int:
+    """A game's DATA, with nothing decompiled.
+
+    `bgt recover` brings the assets because a project without them is
+    unplayable, which made the data half reachable only by decompiling -- so
+    somebody who wanted the sounds out of a 174,000-line title paid for the
+    whole recovery to get them. The module is still read, and has to be: a
+    pack is named by a string constant and its password is computed by the
+    script, so neither is on disk to be found.
+    """
+    try:
+        done = bgt_project.extract_assets(
+            args.exe, args.out, extract=not args.no_extract,
+            with_game_files=not args.no_game_files,
+            progress=(lambda m: print(" ", m)) if args.verbose else (lambda m: None))
+    except Exception as exc:                        # noqa: BLE001
+        return _fail("could not extract the assets: %s" % exc)
+    print(done.summary())
+    return 0
+
+
 def cmd_verbs(args: argparse.Namespace) -> int:
     """Which BGT the shell runs for a `.bgt` file, and optionally fix it.
 
@@ -1157,6 +1178,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="[application_id] [--hardware-only] [--components] "
                         "[--verify]")
     p.set_defaults(func=cmd_computerid)
+
+    p = sub.add_parser("assets",
+                       help="a game's packs and data files, with nothing "
+                            "decompiled")
+    p.add_argument("exe", help="the game's executable")
+    p.add_argument("-o", "--out", required=True, help="where to write them")
+    p.add_argument("--no-extract", action="store_true",
+                   help="copy the packs without unpacking their entries")
+    p.add_argument("--no-game-files", action="store_true",
+                   help="leave the game's other data files behind")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_assets)
 
     p = sub.add_parser("validate", help="run the pipeline over several titles")
     p.add_argument("exe", nargs="+")

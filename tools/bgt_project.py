@@ -1832,6 +1832,116 @@ def inline_prefix(order: List[str],
                 "section it calls empty")
 
 
+class ExtractedAssets(NamedTuple):
+    """What came out of a game when only its data was wanted."""
+
+    #: Every file written, relative to the output folder.
+    files: List[str]
+    #: One row per pack found, as `data_packs` describes them.
+    packs: List[Dict[str, Any]]
+    #: The pack passwords recovered from the module, for a person to keep.
+    passwords: List[str]
+    #: The game's own data files that were brought, and the ones refused.
+    game_files: List[str]
+    refused: List[str]
+    #: What could not be done, in words, for the report.
+    notes: List[str]
+
+    def summary(self) -> str:
+        lines = ["%d file(s) written" % len(self.files)]
+        for pack in self.packs:
+            lines.append("  %-28s %d entries, %.1f MB%s"
+                         % (pack.get("name", "?"), pack.get("entries", 0),
+                            pack.get("size", 0) / 1048576.0,
+                            ", %d encrypted" % pack["encrypted"]
+                            if pack.get("encrypted") else ""))
+        if self.passwords:
+            lines.append("  pack password(s): %s" % ", ".join(self.passwords))
+        if self.game_files:
+            lines.append("  %d of the game's own data file(s) brought in"
+                         % len(self.game_files))
+        for note in self.notes + self.refused:
+            lines.append("  ! %s" % note)
+        return "\n".join(lines)
+
+
+def extract_assets(exe_path: str, out_dir: str, extract: bool = True,
+                   with_game_files: bool = True,
+                   progress=lambda message: None) -> ExtractedAssets:
+    """A game's DATA, with nothing decompiled.
+
+    `bgt recover` brings the assets because a recovered project is unplayable
+    without them, and that made the data half reachable only by decompiling --
+    which on a large title is minutes of work for somebody who wanted the
+    sounds. This is the same steps without the decompiler: unpack, read the
+    module for the pack NAMES and the keys, extract, and bring the game's own
+    data files.
+
+    The module is still parsed, and it has to be: a pack is named by a string
+    constant rather than by anything on disk, and its password is computed by
+    the script rather than stored. So this is cheaper than a recovery, not
+    independent of one -- and where the module cannot be read, what is left is
+    the embedded pack and the files beside the executable, which is said in
+    the notes rather than passed off as the whole answer.
+    """
+    notes: List[str] = []
+    written: List[str] = []
+    packs: List[Dict[str, Any]] = []
+    passwords: List[str] = []
+    brought: List[str] = []
+    refused: List[str] = []
+    os.makedirs(out_dir, exist_ok=True)
+
+    progress("Unpacking %s" % os.path.basename(exe_path))
+    unpacked = bgtlib.unpack_file(exe_path)
+    module_path = os.path.join(out_dir, "_module.bin")
+    with open(module_path, "wb") as handle:
+        handle.write(unpacked.bytecode)
+
+    inside = embedded_pack(unpacked, out_dir)
+    if inside is not None:
+        packs.append(inside)
+        written.append(os.path.basename(inside["path"]))
+        progress("The executable carries a pack inside itself; written out")
+
+    module = None
+    try:
+        opcodes = as_opcodes.extract(exe_path)["table"]
+        module = bgt_asir.load(module_path, exe_path, opcodes=opcodes)
+    except Exception as exc:                       # noqa: BLE001 -- reported
+        notes.append("the module could not be read (%s), so a pack named only "
+                     "by a string constant could not be found: %s"
+                     % (type(exc).__name__, exc))
+
+    if module is not None:
+        progress("Looking for the packs this game opens")
+        for pack in data_packs(exe_path, module):
+            if not any(p.get("path") == pack.get("path") for p in packs):
+                packs.append(pack)
+
+    keys: Dict[bytes, bytes] = {}
+    if packs and module is not None:
+        progress("Recovering the pack passwords from the module")
+        keys, passwords = pack_keys(module_path, packs, progress)
+
+    if packs:
+        progress("Bringing %d pack(s)%s" % (len(packs),
+                                            " and extracting them" if extract else ""))
+        written += bring_data(packs, out_dir, extract=extract, keys=keys,
+                              module_path=module_path)
+
+    if with_game_files:
+        progress("Bringing the game's own data files")
+        brought, refused = bring_game_files(exe_path, out_dir, already=written)
+        written += brought
+
+    try:
+        os.remove(module_path)
+    except OSError:
+        pass
+    return ExtractedAssets(written, packs, passwords, brought, refused, notes)
+
+
 class Recovered(NamedTuple):
     """What `recover_any` produced, and which engine's half produced it.
 

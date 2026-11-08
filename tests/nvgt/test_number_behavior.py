@@ -16,7 +16,14 @@ from recover import generate_project
 
 ROOT = Path(__file__).resolve().parent / "fixtures"
 TARGET = Path(os.environ["NVGT_NUMBER_EXE"]) if os.environ.get("NVGT_NUMBER_EXE") else None
-COMPILER = Path(os.environ["NVGT_COMPILER"]) if os.environ.get("NVGT_COMPILER") else None
+#: Found rather than demanded. These tests used to need NVGT_COMPILER set
+#: by hand, so on a machine with NVGT plainly installed they SKIPPED -- and a
+#: check that cannot run is worse than no check, because it is counted. The
+#: finder is the toolkit's one answer, so this agrees with what `bgt tonvgt`
+#: compiles against and what `bgt nvgt libcheck` scores.
+import nvgt_compiler
+_found = nvgt_compiler.find_exe()
+COMPILER = Path(_found) if _found else None
 HARNESS = r'''
 int secret = 0, attempts = 0, best_score = 0;
 bool tts_default_interrupt = true;

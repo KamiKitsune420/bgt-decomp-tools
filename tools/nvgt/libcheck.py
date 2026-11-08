@@ -44,13 +44,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:                      # installed as a package
-    from . import asreader, decompile, recover
+    from . import asreader, decompile, nvgt_compiler, recover
 except ImportError:       # run directly from a checkout
     import asreader
     import decompile
+    import nvgt_compiler
     import recover
 
-DEFAULT_COMPILERS = (r"C:\nvgt\nvgt.exe", r"C:\Program Files\nvgt\nvgt.exe")
 KINDS = ("debug", "strip")
 
 HARNESS = """#include "{include}"
@@ -62,12 +62,11 @@ void main() {{
 
 
 def find_compiler(explicit: Optional[str]) -> Optional[Path]:
-    candidates = [explicit, os.environ.get("NVGT_COMPILER"), *DEFAULT_COMPILERS,
-                  shutil.which("nvgt")]
-    for c in candidates:
-        if c and Path(c).is_file():
-            return Path(c)
-    return None
+    """See `nvgt_compiler`. This used to search `C:\\nvgt` and never a built
+    checkout, so on a machine with both it scored a different engine than
+    `bgt tonvgt` compiled against."""
+    found = nvgt_compiler.find_exe(explicit)
+    return Path(found) if found else None
 
 
 def first_error(text: str) -> str:
@@ -160,7 +159,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="bgt nvgt libcheck", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="only these includes (file stems)")
-    ap.add_argument("--compiler", help="nvgt.exe (default: NVGT_COMPILER, then C:\\nvgt)")
+    ap.add_argument("--compiler", help="nvgt.exe, or the folder holding it (else NVGT_COMPILER, else the usual places)")
     ap.add_argument("--include", help="include folder (default: beside the compiler)")
     ap.add_argument("--keep", metavar="DIR",
                     help="work here and keep the bytecode and projects (default: a temp dir)")

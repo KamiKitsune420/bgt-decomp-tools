@@ -40,6 +40,15 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+try:                      # installed as a package
+    from .nvgt import nvgt_compiler
+except ImportError:       # run directly from a checkout
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), "nvgt"))
+    import nvgt_compiler
+
 #: Names the two engines spell differently. Each is read off NVGT's own
 #: registration rather than guessed, and the comment says where.
 RENAMES: Dict[str, str] = {
@@ -456,14 +465,9 @@ def calls_in(text: str) -> List[Tuple[int, str]]:
         out.append((scrubbed.count("\n", 0, match.start()) + 1, name))
     return out
 
-#: Where NVGT usually is. The checkout's `release/` holds the compiler, its
-#: `include/` and `bgt_compat.nvgt`; an installed copy has the same shape.
-DEFAULT_ROOTS = (
-    os.path.join(os.path.expanduser("~"), "Documents", "GitHub", "nvgt",
-                 "release"),
-    r"C:\nvgt",
-    r"C:\Program Files\nvgt",
-)
+#: Where NVGT usually is -- taken from `nvgt.nvgt_compiler`, which is the one
+#: answer the whole toolkit uses. Three copies of this list used to disagree.
+DEFAULT_ROOTS = nvgt_compiler.ROOTS
 
 
 class Nvgt:
