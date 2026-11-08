@@ -13700,6 +13700,131 @@ Measured: Palace Punch-up recovers to 3,147 lines, 0 residual gotos, a
 verified split, 823 calls read back, and **all ten `bgt signatures` shapes
 at 0**.
 
+## Three defects an independent code review found by reading
+
+A peer review of the whole of `tools/` arrived as a document rather than as
+a bug report, and three of its findings were verified and fixed. All three
+had been read out of the code rather than run, which is worth recording:
+each is in a path the corpus exercises constantly, and none of the five
+verification layers here had noticed.
+
+### A function returning a decimal returned the wrong value, on the lift path
+
+`CpyVtoR8` was in `as_lift`'s silent no-op tuple **above its own handler**,
+so the handler at the next branch could never see it. Two things followed
+from one line: a 64-bit value moved into the value register was dropped,
+and the `leads_to_exit` detection that puts a `return` where the source
+put it -- which the `CpyVtoR4` branch beside it does -- never fired for a
+function returning `double` or `int64`.
+
+Super Egg Hunt's `get_position` is the shape:
+
+```
+before:  ret = this.item_list.length();
+         v1 = ret;
+         v3 = double(v1);
+         return ret;                     <- the count, not the result
+after:   v1 = this.item_list.length();
+         return double(v1);
+```
+
+and a function whose two branches each return a different value came out
+assigning both into one slot and returning it at the end instead of
+returning in the branch it belongs to -- the guard-clause shape this file
+records at length, failing for one operand width only. **12 lines of Super
+Egg Hunt and 9 of Psycho Strike**, with passthrough and stack residue
+unchanged at 0.
+
+### ...and the same path numbered the old engines' behaviours as 1.3's
+
+`as_lift.BEHAVIOURS` knows `_beh_0_`, `_beh_2_` and `_beh_3_`. That is
+1.3's numbering, and the generation before it is **a different map rather
+than one missing entry**: its `_beh_1_` is the destructor and its
+`_beh_2_` is the FACTORY. So reading such a module with 1.3's names did
+not merely leave `_beh_1_` opaque -- it rendered every factory call as a
+destructor, which this path drops, so the construction disappeared.
+
+`early_behaviours` already answers which numbering a build uses, so it is
+used here now rather than guessed. The corroboration is that the two
+spellings are mutually exclusive across the corpus -- a module that
+references `_beh_1_` never references `_beh_3_`, and the other way round --
+but that is not the rule, because the rule has an authority.
+
+**The only title this reaches is Aliens Attack**, because `as_disasm` reads
+a module through `as_module` with no `as_early` fallback, so the
+2010-2012 generation cannot be lifted at all. And that one title has three
+further gaps on this path, recorded rather than chased: its token numbering
+is four below the IR's and `as_disasm` applies 1.3's two, so every `void`
+reads as `uint64`; its per-method `_beh_4_` AddRef has no handling, so it
+shows 49 times as `ret = this._beh_4_();`; and its factory has no owner, so
+the type it makes cannot be named. `bgt lift` does not support that
+generation, and now says so rather than implying it.
+
+### A class that overloads `*` read as `a.opMul(b)`
+
+Only `+` and `-` were rendered as operators. The other eleven binary
+overloads -- `*`, `/`, `%`, `&`, `|`, `^` and the three shifts, each with
+its reflected form -- came out as the internal method name.
+
+The names come from BGT's own language tutorial, which prints the whole
+set, and they are the same list `bgt_libcheck.OPERATOR_METHODS` already
+keeps for dropping an operator out of a call comparison -- so there is one
+authority for what the overloadable operators are rather than two.
+`opPow` is deliberately absent: the tutorial lists none, and `**` is an
+opcode in this engine rather than an overload.
+
+**Scope, measured:** of the fifteen BGT titles whose modules can be read
+here, exactly one overloads anything beyond `+` and `-`. Sketchbook Your
+World calls `opMul` twice and `opDiv` once; every other title's only
+operator method is `opAdd_r`, which was already rendered. So Super Egg Hunt
+and The Gate recover **byte-for-byte identically** and Sketchbook changes
+in three places.
+
+**And two of those three are inside the class's own operator functions**,
+which is the one place where writing the operator could pick a different
+function than the one the game called. So it was put to the compiler first,
+with both the `int` and the object overload present and the reflected forms
+beside them: `compiled cleanly`. The argument that it resolves to the
+sibling overload rather than recursing is sound, and the engine is the
+authority for it.
+
+The call count falls by exactly three, which is `bgt apicheck` being right
+rather than a lost call: an operator rendered as syntax is not a call, the
+same way `opIndex` is not.
+
+## Where Manamon 2 stands, honestly
+
+It completes and it takes hours. The two fixes above it take the worst body
+from 219 seconds to 59 and make the progress visible, and they do not
+change the shape of the problem: **the average body costs about a third of
+a second and there are 9,924 of them**, because `_body` re-simulates a
+function up to five times while each pass discovers more.
+
+Measured on the committed tree, with other work competing for the machine:
+1,559 of roughly 5,800 declarations in eighty minutes. The profile after
+the fixes says where the rest is, for whoever takes it next:
+
+| `create_kiarre`, 68,692 instructions | seconds |
+|---|---|
+| `run`/`step` -- the simulation, five passes | 42 |
+| `_block` -- the structurer's own rendering | 10 |
+| `FuncDecompiler.__init__`, five times | 5 |
+
+**The constructor is the cheap one left.** It walks the body four more
+times -- `_short_circuit_slots`, the sparse and dense switch patterns per
+instruction, the stored-constant types, the generated member initialisers
+-- and all of them are pure functions of the bytecode, exactly like the
+three that are now carried across passes. It is not done here because
+`_dense_switch_pattern` mutates `merged_switch_guards` as it goes, so
+carrying the result means carrying that too, and that is a refactor rather
+than a cache.
+
+**The five passes are the real cost and are not a performance problem.**
+Each one exists because the pass before it discovered something -- a
+reused slot, a duplicated bind, a construction site -- and this file
+records what each discovery is worth. Cutting them is a correctness
+question, not a speed one.
+
 ## A FIFTH generation: Aliens attack, and it dates the SIGN FLAG
 
 `Aliens attack.exe` (NS Studios, 2012) was reported as a recovery that
