@@ -57,6 +57,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import zipfile
 from dataclasses import dataclass, field
 from typing import (Any, Dict, List, NamedTuple, Optional, Sequence,
@@ -198,12 +199,32 @@ class _Splitter(decompile.ModuleDecompiler):
     here; the file each one lands in is decided afterwards.
     """
 
-    def __init__(self, module):
+    #: How long a declaration may take before the next one is announced.
+    #: A whole title is one `render()` call, so without this the step is
+    #: silent from start to finish -- and on Manamon 2 that is a quarter of
+    #: an hour in which "decompiling" is the last thing said, which reads as
+    #: a hang and was reported as one. Its `create_kiarre` is 68,692
+    #: instructions and takes about a minute on its own, so the name is
+    #: printed BEFORE the work rather than after it: what a reader needs to
+    #: see is which declaration it is sitting on.
+    REPORT_EVERY = 2.0
+
+    def __init__(self, module, progress=None):
         super().__init__(module)
         self.sections: List[Section] = []
+        self._progress = progress
+        self._done = 0
+        self._said = 0.0
 
     def _capture(self, kind: str, name: str, render,
                  declared_at: int = 0) -> None:
+        if self._progress is not None:
+            now = time.monotonic()
+            if now - self._said >= self.REPORT_EVERY:
+                self._said = now
+                self._progress("decompiling %s (%d declaration(s) done)"
+                               % (name, self._done))
+        self._done += 1
         start = len(self.lines)
         render()
         text = "\n".join(self.lines[start:]).strip("\n")
@@ -1897,7 +1918,7 @@ def recover(exe_path: str, out_dir: str, include_dirs: Optional[Sequence[str]] =
     module = bgt_asir.load(module_path, exe_path, opcodes=opcodes)
 
     progress("decompiling")
-    splitter = _Splitter(module)
+    splitter = _Splitter(module, progress=progress)
     source = splitter.render()
     sections = splitter.sections
 
