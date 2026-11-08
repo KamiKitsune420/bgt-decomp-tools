@@ -13731,9 +13731,41 @@ after:   v1 = this.item_list.length();
 and a function whose two branches each return a different value came out
 assigning both into one slot and returning it at the end instead of
 returning in the branch it belongs to -- the guard-clause shape this file
-records at length, failing for one operand width only. **12 lines of Super
-Egg Hunt and 9 of Psycho Strike**, with passthrough and stack residue
-unchanged at 0.
+records at length, failing for one operand width only.
+
+**The scope is much larger than the first two titles suggested**, and this
+section said "12 lines of Super Egg Hunt and 9 of Psycho Strike" until
+Manamon 1's run landed: that title changes **2,568 lines**. It returns
+`double` everywhere, because its stat formulas do, so the dead branch was
+dead for most of its arithmetic.
+
+Classified rather than counted, which is what says they are all the one
+shape: **123 `} else {` disappear**, **214 more `return` statements
+appear**, and 259 slot assignments go, for 314 fewer lines in all.
+`if (c) { v = x; } else { v = y; } return v;` is coming out as
+`if (c) { return x; } return y;` -- the rendering this file argues for at
+length, reached for the operand width that never got it. Passthrough and
+stack residue stay at 0 on all three titles.
+
+**And one of them returned the wrong variable outright.** A stat
+calculation in Manamon 1 ended `return a1;` -- a `bool` parameter -- where
+the computed value was in another slot:
+
+```
+before:  v3 = this.base;
+         } else {
+             v5 = this.stat_formula(a0);
+             v5 = this.additional_stat_calculation_operations(v5);
+             if (a1) { this.base = v5; }
+         }
+         return a1;
+after:   return this.base;
+         }
+         v5 = this.stat_formula(a0);
+         v5 = this.additional_stat_calculation_operations(v5);
+         if (a1) { this.base = v5; }
+         return v5;
+```
 
 ### ...and the same path numbered the old engines' behaviours as 1.3's
 
