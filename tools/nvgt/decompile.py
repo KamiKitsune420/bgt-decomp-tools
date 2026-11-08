@@ -1169,7 +1169,8 @@ def _member_array_sizes(c: TypeInfo) -> dict:
         for k, ins in enumerate(code):
             if ins.name not in ("CALL", "CALLSYS") or ins.func_ref is None:
                 continue
-            if ins.func_ref.name != "factstub" or not ins.func_ref.param_types:
+            if (ins.func_ref.name not in TEMPLATE_FACTORY
+                    or not ins.func_ref.param_types):
                 continue
             parameter = ins.func_ref.param_types[0]
             if parameter.obj_type is not None or parameter.is_reference:
@@ -1376,6 +1377,22 @@ def _default_last(arms):
     if index > 0 and not _ends_in_terminator(arms[index - 1][1]):
         return arms
     return arms[:index] + arms[index + 1:] + [(names, lines)]
+
+
+#: The generated template factory stub, in both spellings a BGT build gives
+#: it. `GenerateTemplateFactoryStub` calls it `factstub` in BGT 1.3 and in
+#: every build up to The Gate; VGStorm's 2017 fork calls it `$fact`, in the
+#: same move that renamed `_string_factory_` to `$str`, the list factory to
+#: `$list` and `%delegate_factory` to `$dlgte`.
+#:
+#: **Matching one spelling matches silently**, which is the fourth time this
+#: project has paid for that. Manamon 1 reaches this stub 85 times, and with
+#: only `factstub` known every one fell through to the generic call
+#: rendering -- which names the type the way a DECLARATION does, so
+#: `character@[]()` went into the source. That is a parse error ("Expected
+#: ';', instead found '@'"), 124 of them in the one title, and it went
+#: unreported because Manamon 1 had never been put to a compiler.
+TEMPLATE_FACTORY = ("factstub", "$fact")
 
 
 def _constructor_type(dt: DataType) -> str:
@@ -2860,10 +2877,33 @@ class FuncDecompiler:
         ti = dt.obj_type
         if ti is None or ti.kind in ("enum", "typedef"):
             return False
-        if any(ti is c or (ti.name == c.name and ti.namespace_ == c.namespace_)
-               for c in self.m.classes):
+        ids, names = self._script_class_index()
+        if id(ti) in ids or (ti.name, ti.namespace_) in names:
             return True
         return bool(ti.flags & 1 or ti.return_via_object_register)
+
+    def _script_class_index(self):
+        """`(identities, (name, namespace) pairs)` of the module's classes.
+
+        Memoised on the MODULE, because both callers run per instruction and
+        the list runs to four figures: Manamon 2 declares 1,604 classes, and
+        `_normalize_arg` scanning them for every argument it normalises was
+        **47.5 million comparisons in one body** -- 40 of the 128 seconds
+        `create_kiarre` took, which is the body that made that title look
+        like a hang. A `FuncDecompiler` is built five times per body by the
+        re-simulation, so the cache cannot live on `self`.
+
+        Identity is the primary key and the index is keyed on `id()`, which
+        is safe because the module holds every class for its own lifetime --
+        so no id can be reused while this cache exists.
+        """
+        index = getattr(self.m, "_script_class_index_cache", None)
+        if index is None or index[2] != len(self.m.classes):
+            index = ({id(c) for c in self.m.classes},
+                     {(c.name, c.namespace_) for c in self.m.classes},
+                     len(self.m.classes))
+            self.m._script_class_index_cache = index
+        return index[0], index[1]
 
     def _inherited_property(self, name: str) -> bool:
         """Is `name` a property this class inherits rather than declares?
@@ -4660,7 +4700,8 @@ class FuncDecompiler:
     def _normalize_arg(self, atom: Atom, dt: DataType) -> Atom:
         source = atom.data_type
         if (dt.is_object_handle and source and source.obj_type
-                and any(source.obj_type is cls for cls in self.m.classes) and not source.is_object_handle
+                and id(source.obj_type) in self._script_class_index()[0]
+                and not source.is_object_handle
                 and not atom.text.startswith("@")):
             return Atom(atom.kind, "@" + atom.text, data_type=dt)
         # Each arm of a ternary takes the target type: bool, or an enum whose
@@ -5250,7 +5291,7 @@ class FuncDecompiler:
         # RET, so its one apparent argument is the hidden object type and not
         # anything source wrote. Say what it makes -- `weapon@[]()` -- rather
         # than naming the stub, which no source can call.
-        if meth == "factstub" and ret is not None:
+        if meth in TEMPLATE_FACTORY and ret is not None:
             typename = _constructor_type(ret)
             # Its *declared* arguments are real: the array template has a
             # factory taking a length, and `double[]@ factstub(uint)` is that
@@ -7989,7 +8030,19 @@ class ModuleDecompiler:
                 for off, at in fd.alloc_sites.items():
                     allocs[off] = list(at)
                 seeded |= reused
+                # The three body analyses are pure functions of the
+                # bytecode, which this pass does not change, so they carry
+                # across rather than being walked again. They are memoised
+                # per instance deliberately -- a `FuncDecompiler` built
+                # without `__init__` must see the unwalked state -- and that
+                # left the re-simulation paying for all of them FIVE times:
+                # on Manamon 2's `create_kiarre`, 68,692 instructions,
+                # `slot_webs` alone was 18 of the body's 75 seconds. They
+                # are dropped with the instances at the end of the body, so
+                # nothing is retained per function.
+                analysis = (fd._io_cache, fd._succ_cache, fd._web_cache)
                 fd = FuncDecompiler(self.m, f, self.comments)
+                fd._io_cache, fd._succ_cache, fd._web_cache = analysis
                 initial_names = dict(fd.var_names)
                 fd.var_names.update(discovered)
                 fd.var_types.update(types)
