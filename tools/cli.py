@@ -470,6 +470,8 @@ def cmd_tonvgt(args: argparse.Namespace) -> int:
     argv = [args.project, "-o", args.output]
     if args.nvgt:
         argv += ["--nvgt", args.nvgt]
+    if getattr(args, "fix_conflicts", False):
+        argv += ["--fix-conflicts"]
     if args.no_compile:
         argv.append("--no-compile")
     if args.json:
@@ -1084,6 +1086,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--nvgt", metavar="PATH",
                    help="nvgt.exe or the folder holding it (else "
                         "NVGT_COMPILER, else the usual places)")
+    p.add_argument("--fix-conflicts", action="store_true",
+                   help="rename the game's own globals that clash with NVGT's, "
+                        "where BGT has no such name and the rename is "
+                        "therefore provably the same program")
     p.add_argument("--no-compile", action="store_true",
                    help="convert without asking the compiler")
     p.add_argument("--json", metavar="FILE", help="write the report")

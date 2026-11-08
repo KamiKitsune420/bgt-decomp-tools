@@ -94,6 +94,24 @@ _TYPE_BEFORE = re.compile(r"[A-Za-z_][\w:]*(?:\s*[@&\[\]]+)*\s*$")
 TYPED_RENAMES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     # name            -> (NVGT's spelling, the receiver types it applies to)
     "get_length": ("length", ("array", "string")),
+    #: **`http::get_progress` is a RENAME, not a difference in meaning**, and
+    #: this file listed it as the latter for as long as nobody read both
+    #: registrations side by side:
+    #:
+    #:     BGT   bool  http::get_progress() const
+    #:     NVGT  float http::get_progress() property
+    #:     NVGT  bool  http::get_running()  property
+    #:
+    #: BGT's answers "is it still going?" -- which is what the loop that uses
+    #: it says, `while (!h.get_progress()) break; s += h.request();` -- and
+    #: NVGT spells that `running`, reserving `progress` for the fraction.
+    #: `is_running()` behind it is `worker.isRunning()`, read out of NVGT's
+    #: own source, so the two are the same question.
+    #:
+    #: The type is `http` in BOTH engines, so nothing else has to move: NVGT
+    #: registers these methods on `"http"`, and `request()` returns a `string`
+    #: there as it does here.
+    "get_progress": ("get_running", ("http",)),
 }
 
 #: Accessor calls that are a plain PROPERTY in NVGT, so the call brackets
@@ -118,16 +136,18 @@ PROPERTY_RENAMES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
 #: this repository treats as the worst outcome available. Each one was read
 #: off NVGT's registration beside BGT's.
 SEMANTIC: Dict[str, str] = {
+    "get_file":
+        ("`pack_file::get_file` returns a `file@` in BGT and a `datastream@` "
+        "in NVGT, so a local that holds either a real file or a pack entry "
+        "cannot be declared the same way in both. A `cast<file@>` compiles "
+        "and returns NULL on a pack entry at run time, so it is not done "
+        "here: declare the local `datastream@` and cast only where the value "
+        "really is a file, which is the branch that calls `open` on it."),
     "call":
         "NVGT's `library::call` returns `var@` where BGT's returns "
         "`dictionary@`, so the result cannot be assigned to a "
         "`dictionary@` and is not read with `.get(...)`. Every `dllib.call` "
         "site needs its result handled as a `var@`.",
-    "get_progress":
-        "NVGT's `downloader::progress` is a `float` where BGT's "
-        "`get_progress()` is used as a truth value, so `!d.get_progress()` "
-        "is not a test for 'finished' -- written straight across it would "
-        "compile and poll forever.",
     "request":
         "NVGT's `network::request` returns a `const network_event@`, so the "
         "handle it is assigned to has to be `const` too.",
@@ -186,12 +206,56 @@ SEMANTIC: Dict[str, str] = {
         "file and returns true, where BGT's tag refuses the key outright.",
 }
 
+#: Which receiver types a `SEMANTIC` entry is ABOUT, where it is about one.
+#:
+#: `SEMANTIC` is keyed by the bare call name and was matched that way, so a
+#: note about one type fired on every type that shares a method name. Super
+#: Egg Hunt is the case: it reads a download in chunks with `h.request()` on
+#: an `http`, and got the note for `network::request` -- which returns a
+#: `const network_event@` and has nothing to do with it. A report that cannot
+#: be acted on is worse than no report, because the next one is read with less
+#: attention.
+#:
+#: A site whose receiver type cannot be read STILL reports, which is the safe
+#: direction: this narrows a false alarm, it does not hide a real difference.
+#: An entry absent from here is about the name wherever it appears -- which is
+#: right for `string_compress` and the rest, since those are global functions
+#: with no receiver at all.
+SEMANTIC_TYPES: Dict[str, Tuple[str, ...]] = {
+    "get_file": ("pack_file",),
+    "request": ("network",),
+    "call": ("library",),
+}
+
 #: `T name`, `T@ name`, `T[] name`, `T@[] name` -- a declaration, as the
 #: recovered text writes one. The type's trailing markers are kept, because
 #: they are what says "array".
 _DECLARED = re.compile(
     r"^[ \t]*((?:const\s+)?[A-Za-z_][\w:]*(?:\s*[@&]|\s*\[\s*\])*)"
     r"\s+([A-Za-z_]\w*)\s*[;=,)(]", re.M)
+
+
+def _semantic_receiver(scrubbed: str, types: Dict[str, str], name: str,
+                       line: int) -> Optional[str]:
+    """The declared type of what `name` is called on, on `line`, or None.
+
+    None where there is no receiver or its type is not written down, and the
+    caller reports the difference in that case rather than suppressing it.
+    """
+    start = 0
+    for _ in range(line - 1):
+        nxt = scrubbed.find("\n", start)
+        if nxt < 0:
+            return None
+        start = nxt + 1
+    end = scrubbed.find("\n", start)
+    text = scrubbed[start:] if end < 0 else scrubbed[start:end]
+    match = re.search(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*" + re.escape(name)
+                      + r"\s*\(", text)
+    if match is None:
+        return None
+    root = match.group(1)
+    return nearest_type(scrubbed, root, start + match.start()) or types.get(root)
 
 
 def declared_types(scripts: Sequence[Tuple[str, str]]) -> Dict[str, str]:
@@ -202,14 +266,138 @@ def declared_types(scripts: Sequence[Tuple[str, str]]) -> Dict[str, str]:
     `sound.get_length()` would become a broken `sound.length()`.
     """
     seen: Dict[str, Set[str]] = {}
+    #: **A class member is not a global, and this map is keyed by bare name.**
+    #: Paladin's class `map` declares `int[][] world` and the project declares
+    #: a global `map[] world`, so the two disagreed and the name was dropped
+    #: -- after which nothing knew what `world.get_length()` was called on,
+    #: and 67 of that title's 72 errors were that one question unanswered.
+    #: Members are kept apart in `class_members`, where they can be looked up
+    #: against their own class.
+    members = class_members(scripts)
+    member_names = {name for table in members.values() for name in table}
     for _path, text in scripts:
         for match in _DECLARED.finditer(_scrub(text)):
             kind, name = match.group(1).strip(), match.group(2)
             if name in RESERVED or kind in RESERVED and "[" not in kind:
                 continue
-            seen.setdefault(name, set()).add(re.sub(r"\s+", "", kind))
+            tidy = re.sub(r"\s+", "", kind)
+            #: A member's own declaration is skipped here rather than every
+            #: declaration of that name: a LOCAL called `world` is still a
+            #: local, and dropping those would lose what the rename needs.
+            if name in member_names and any(
+                    table.get(name) == tidy for table in members.values()):
+                continue
+            seen.setdefault(name, set()).add(tidy)
     return {name: next(iter(kinds)) for name, kinds in seen.items()
             if len(kinds) == 1}
+
+
+#: `class X {` / `shared class X : Base {` at the start of a line, which is how
+#: the recovered text writes one.
+_CLASS_OPEN = re.compile(r"^[ \t]*(?:shared\s+)?class\s+([A-Za-z_]\w*)", re.M)
+
+#: `interact@[] interacts;` at class scope. The terminator is what separates a
+#: member from a method signature, which is why it is required.
+_MEMBER_DECL = re.compile(
+    r"\s*(?:private\s+|protected\s+|const\s+)*"
+    r"([A-Za-z_][\w:]*(?:\s*[@&]|\s*\[\s*\])*)"
+    r"\s+([A-Za-z_]\w*)\s*[;=,]")
+
+
+def class_members(scripts: Sequence[Tuple[str, str]]) -> Dict[str, Dict[str, str]]:
+    """Each class's own members and their declared types.
+
+    Needed for two things that were one bug. A member is **not** a global, and
+    the flat `declared_types` map is keyed by bare name, so Paladin's class
+    `map` -- which has a member `int[][] world` -- collided with the global
+    `map[] world` and the name was dropped as disagreeing. Nothing then knew
+    what `world.get_length()` was called on.
+
+    And a member's type is what resolves a CHAIN: `world[i].interacts` is an
+    array because `map::interacts` is declared `interact@[]`.
+
+    A member is a declaration at brace depth 1 inside the class body. Depth 2
+    and beyond is a method's locals, which belong to nobody but the method.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for _path, text in scripts:
+        scrubbed = _scrub(text)
+        for match in _CLASS_OPEN.finditer(scrubbed):
+            brace = scrubbed.find("{", match.end())
+            if brace < 0:
+                continue
+            depth, i, n = 0, brace, len(scrubbed)
+            body_start = brace + 1
+            while i < n:
+                if scrubbed[i] == "{":
+                    depth += 1
+                elif scrubbed[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            body = scrubbed[body_start:i]
+            members = out.setdefault(match.group(1), {})
+            depth, start = 0, 0
+            for pos, char in enumerate(body):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth = max(0, depth - 1)
+                #: **A `;` terminates as well as a newline**, because a class
+                #: written on one line has no newline at depth 0 at all --
+                #: Paladin's `class character { dragonstrike[] strikes; }`
+                #: came out with no members, so the chain through it declined
+                #: and the rename was declined with it.
+                elif (char == ";" or char == "\n") and depth == 0:
+                    segment = body[start:pos + 1]
+                    decl = _MEMBER_DECL.match(segment)
+                    if decl:
+                        members.setdefault(
+                            decl.group(2), re.sub(r"\s+", "", decl.group(1)))
+                    start = pos + 1
+    return out
+
+
+def _strip_one_array(kind: str) -> Optional[str]:
+    """`map[]` -> `map`, `int[][]` -> `int[]`, `character@[]` -> `character@`."""
+    kind = kind.strip()
+    if kind.endswith("[]"):
+        return kind[:-2]
+    return None
+
+
+def resolve_chain(root_kind: str, middle: str,
+                  members: Dict[str, Dict[str, str]]) -> Optional[str]:
+    """The declared type a `root<middle>.method()` call lands on, or None.
+
+    `middle` is the `[...]` and `.name` steps between the root and the method,
+    exactly as the rename pattern captures them. Each step is taken from the
+    project's own declarations:
+
+        world[i].interacts      map[] -> map -> interact@[]
+
+    **None at the first step it cannot take**, which is the whole safety
+    argument: a chain is renamed only when every link is written down, so an
+    unknown member or an unknown element type declines rather than guesses.
+    """
+    kind = re.sub(r"\s+", "", root_kind)
+    for step in re.finditer(r"\[[^\[\]]*\]|\.([A-Za-z_]\w*)", middle):
+        name = step.group(1)
+        if name is None:                       # a subscript: one array level off
+            kind = _strip_one_array(kind)
+            if kind is None:
+                return None
+            continue
+        #: A handle and the thing it points at take the same members.
+        owner = kind.rstrip("@&")
+        if owner.endswith("]"):
+            return None                        # a member OF an array: no such thing
+        table = members.get(owner)
+        if not table or name not in table:
+            return None
+        kind = table[name]
+    return kind
 
 
 def _receiver_kind(kind: str) -> str:
@@ -235,6 +423,71 @@ def _receiver_kind(kind: str) -> str:
     return bare
 
 
+#: A function or method signature, with its parameter list captured. The line
+#: must END at the closing paren -- the recovered text puts the `{` on the
+#: next line -- which is what tells a signature from a call or from a
+#: constructor-form declaration, both of which carry a `;` or an argument that
+#: is not a type.
+_SIGNATURE = re.compile(
+    r"^[ \t]*(?:(?:private|protected|shared|external|abstract|final|override)"
+    r"\s+)*(?:const\s+)?[A-Za-z_][\w:]*(?:\s*[@&]|\s*\[\s*\])*\s+"
+    r"[A-Za-z_]\w*\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*"
+    r"(?:const\s*)?\{?[ \t]*$", re.M)
+
+#: One parameter of such a list: `vector[] arg0`, `const string&in arg1`.
+_PARAMETER = re.compile(
+    r"^\s*(?:const\s+)?([A-Za-z_][\w:]*(?:\s*[@&]|\s*\[\s*\])*)"
+    r"\s+([A-Za-z_]\w*)")
+
+
+def signature_parameters(text: str) -> List[Tuple[int, str, str]]:
+    """Every parameter's `(position, name, declared type)`.
+
+    **A parameter is declared in the signature, not as a statement**, and
+    `_DECLARED` is anchored at the start of a line -- so on
+
+        vector[] remove_vector(vector[] arg0, vector arg1, bool arg2 = true)
+
+    it captures `remove_vector` as a name of type `vector[]` and never sees
+    `arg0` at all. Every receiver in a recovered body is either a local or a
+    parameter, so half of them had no type: that was the last 10 of Paladin's
+    errors, all of the shape `arg0.statuses.get_length()`.
+
+    The position is the signature's own, which is above every use in the body
+    and below the function before it -- so `nearest_type`'s "look up" answer
+    is right without it having to know about scopes.
+    """
+    found: List[Tuple[int, str, str]] = []
+    for match in _SIGNATURE.finditer(text):
+        for piece in _split_arguments(match.group(1)):
+            param = _PARAMETER.match(piece)
+            if param:
+                found.append((match.start(), param.group(2),
+                              re.sub(r"\s+", "", param.group(1))))
+    return found
+
+
+def _split_arguments(text: str) -> List[str]:
+    """Split a parameter list on its TOP-LEVEL commas.
+
+    A default argument may hold one of its own -- `string arg1 = string("a,b")`
+    -- so a plain `split(",")` would cut a parameter in half and leave the
+    half-piece looking like a declaration of something else.
+    """
+    pieces: List[str] = []
+    depth, start = 0, 0
+    for pos, char in enumerate(text):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            pieces.append(text[start:pos])
+            start = pos + 1
+    pieces.append(text[start:])
+    return pieces
+
+
 def nearest_type(text: str, name: str, before: int) -> Optional[str]:
     """`name`'s type from the NEAREST declaration above offset `before`.
 
@@ -247,15 +500,167 @@ def nearest_type(text: str, name: str, before: int) -> Optional[str]:
     and for the same reason.
     """
     found: Optional[str] = None
+    at = -1
     for match in _DECLARED.finditer(text, 0, before):
         if match.group(2) == name:
             found = re.sub(r"\s+", "", match.group(1).strip())
+            at = match.start()
+    #: ...and the parameters, which are declared in a signature rather than in
+    #: a statement. Taken by position against the statement declarations, so
+    #: a local that shadows a parameter still wins where it is declared below
+    #: it, which is where the hoisting puts one.
+    for pos, pname, kind in signature_parameters(text):
+        if pos < before and pname == name and pos > at:
+            found, at = kind, pos
     return found
 
 
-def apply_typed_renames(text: str, types: Dict[str, str]) -> Tuple[str, List[str]]:
-    """Rename `recv.get_length()` only where `recv`'s type says to."""
+#: Value types BGT gives a COPY CONSTRUCTOR and NVGT does not.
+#:
+#: BGT registers `void f(const vector &in)`, so `vector(v)` is a copy there;
+#: NVGT registers only `void f()` and `void f(float x, float y, float z = 0)`,
+#: and `vector(v)` is *"No matching signatures to 'vector(vector)'"*.
+#:
+#: Dropping the call is exact rather than near enough, and the engine is the
+#: authority for both halves: NVGT registers the type `asOBJ_POD`, so
+#: AngelScript gives it a bitwise copy for free, and `vector b = a;` and
+#: `c = a;` were both put to `nvgt -c` before either was emitted.
+#:
+#: **Only where the argument's own type is the same type.** BGT's other
+#: constructor takes floats with defaults, so `vector(1.0)` is a legal
+#: one-argument call that means something else entirely -- and `vector(v.x)`
+#: is that call. The chain resolver answers which, and declines where it
+#: cannot, exactly as it does for a rename.
+COPY_CONSTRUCTED = ("vector",)
+
+
+def apply_copy_constructors(text: str, types: Dict[str, str],
+                            members: Dict[str, Dict[str, str]]
+                            ) -> Tuple[str, List[str]]:
+    """Drop `T(x)` where `T` is POD in NVGT and `x` is already a `T`."""
     notes: List[str] = []
+    scrubbed = _scrub(text)
+    #: `local_27`, `this.pos`, `points[i]` -- one argument and no comma, so the
+    #: float-triple constructor can never be reached from here.
+    arg = r"([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*|\s*\[[^\[\]]*\])*)"
+    for kind in COPY_CONSTRUCTED:
+        def resolve(root: str, middle: str, at: int) -> Optional[str]:
+            found = nearest_type(scrubbed, root, at) or types.get(root)
+            if found is not None and middle:
+                found = resolve_chain(found, middle, members)
+            return found
+
+        def split(expr: str) -> Tuple[str, str]:
+            head = re.match(r"\s*([A-Za-z_]\w*)", expr)
+            return head.group(1), expr[head.end():]
+
+        done = [0]
+
+        #: A DECLARATION with a constructor argument: the construction is the
+        #: declaration, so the cure is the initialiser form rather than
+        #: nothing at all.
+        decl = re.compile(r"^([ \t]*)" + re.escape(kind) + r"\s+([A-Za-z_]\w*)"
+                          r"\s*\(\s*" + arg + r"\s*\)\s*;", re.M)
+
+        def swap_decl(match, kind=kind, done=done):
+            root, middle = split(match.group(3))
+            if _receiver_kind(resolve(root, middle, match.start()) or "") != kind:
+                return match.group(0)
+            done[0] += 1
+            return "%s%s %s = %s;" % (match.group(1), kind, match.group(2),
+                                      match.group(3))
+
+        text = decl.sub(swap_decl, text)
+        scrubbed = _scrub(text)
+
+        #: ...and the same call in expression position, where the copy is the
+        #: whole of what it does.
+        call = re.compile(r"(?<![\w.])" + re.escape(kind)
+                          + r"\s*\(\s*" + arg + r"\s*\)")
+
+        def swap_call(match, kind=kind, done=done):
+            root, middle = split(match.group(1))
+            if _receiver_kind(resolve(root, middle, match.start()) or "") != kind:
+                return match.group(0)
+            done[0] += 1
+            return match.group(1)
+
+        text = call.sub(swap_call, text)
+        scrubbed = _scrub(text)
+        if done[0]:
+            notes.append("%s(%s) -> the value itself, %d time%s: NVGT has no "
+                         "copy constructor for it and registers it POD, so a "
+                         "plain copy is the same program"
+                         % (kind, kind, done[0], "" if done[0] == 1 else "s"))
+    return text, notes
+
+
+#: A call NVGT declares as returning a CONST handle where BGT's is not, with
+#: the receiver's type and the type returned.
+#:
+#: NVGT registers `const network_event@ network::request()`, so a local that
+#: receives one has to be `const` too -- *"Can't implicitly convert from
+#: 'const network_event@' to 'network_event@'"*, on every BGT game that reads
+#: its network. The declaration is the whole fix, and it was put to `nvgt -c`
+#: on a real recovery before it was emitted.
+#:
+#: **Only the declaration, and only where it is already a plain handle of the
+#: right type.** A non-const handle still assigns INTO a const one, so the
+#: same local may be filled from somewhere else and stay correct; and code
+#: that writes THROUGH the handle stops compiling, which is a visible failure
+#: rather than a silent one.
+CONST_HANDLE_RETURNS = {
+    "request": ("network", "network_event"),
+}
+
+
+def apply_const_handles(text: str, types: Dict[str, str],
+                        members: Dict[str, Dict[str, str]]
+                        ) -> Tuple[str, List[str]]:
+    """Declare `const` the locals that receive a const handle from NVGT."""
+    notes: List[str] = []
+    scrubbed = _scrub(text)
+    for call, (recv_kind, held) in CONST_HANDLE_RETURNS.items():
+        wanted = set()
+        pattern = re.compile(r"@\s*([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)"
+                             r"((?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*)\."
+                             + re.escape(call) + r"\s*\(")
+        for match in pattern.finditer(scrubbed):
+            root, middle = match.group(2), match.group(3)
+            kind = nearest_type(scrubbed, root, match.start()) or types.get(root)
+            if kind is not None and middle:
+                kind = resolve_chain(kind, middle, members)
+            if kind is None or _receiver_kind(kind) != recv_kind:
+                continue
+            wanted.add(match.group(1))
+        done = 0
+        for name in sorted(wanted):
+            decl = re.compile(r"^([ \t]*)" + re.escape(held) + r"(\s*@\s*)"
+                              + re.escape(name) + r"(\s*;)", re.M)
+            text, count = decl.subn(
+                lambda m: "%sconst %s%s%s%s" % (m.group(1), held, m.group(2),
+                                                name, m.group(3)), text)
+            done += count
+        if done:
+            notes.append("%s() -> its local declared `const %s@`, %d time%s: "
+                         "NVGT returns a const handle where BGT does not"
+                         % (call, held, done, "" if done == 1 else "s"))
+            scrubbed = _scrub(text)
+    return text, notes
+
+
+def apply_typed_renames(text: str, types: Dict[str, str],
+                        members: Optional[Dict[str, Dict[str, str]]] = None
+                        ) -> Tuple[str, List[str]]:
+    """Rename `recv.get_length()` only where `recv`'s type says to.
+
+    `members` is each class's own members, which is what lets a CHAIN resolve:
+    `world[i].interacts.get_length()` is an array because the project declares
+    `map[] world` and `map::interacts` as `interact@[]`. Without it the chain
+    is declined, which is correct and, on Paladin, was 67 compiler errors.
+    """
+    notes: List[str] = []
+    members = members or {}
     scrubbed = _scrub(text)
     for old, (new, kinds) in TYPED_RENAMES.items():
         pattern = re.compile(r"(?<![\w.])([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|"
@@ -266,12 +671,13 @@ def apply_typed_renames(text: str, types: Dict[str, str]) -> Tuple[str, List[str
         def swap(match, old=old, new=new, kinds=kinds, done=done,
                  declined=declined):
             root, middle = match.group(1), match.group(2)
-            #: a subscript or a further member makes the value an ELEMENT, so
-            #: the declared array type is not what the method is called on
-            if "[" in middle or "." in middle:
-                declined[0] += 1
-                return match.group(0)
             kind = nearest_type(scrubbed, root, match.start()) or types.get(root)
+            if kind is not None and middle:
+                #: a subscript or a further member makes the value an ELEMENT
+                #: or a MEMBER, so the root's own type is not what the method
+                #: is called on -- the chain is walked instead, and declines
+                #: at the first link the project does not declare
+                kind = resolve_chain(kind, middle, members)
             if kind is None or _receiver_kind(kind) not in kinds:
                 declined[0] += 1
                 return match.group(0)
@@ -290,17 +696,20 @@ def apply_typed_renames(text: str, types: Dict[str, str]) -> Tuple[str, List[str
     #: ...and the accessors that are a PROPERTY there, which lose their
     #: brackets as well as their prefix.
     for old, (new, kinds) in PROPERTY_RENAMES.items():
-        pattern = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\."
-                             + re.escape(old) + r"\s*\(\s*\)")
+        pattern = re.compile(r"(?<![\w.])([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*|"
+                             r"\[[^\[\]]*\])*)\." + re.escape(old)
+                             + r"\s*\(\s*\)")
         done = [0]
 
         def swap(match, new=new, kinds=kinds, done=done):
-            root = match.group(1)
+            root, middle = match.group(1), match.group(2)
             kind = nearest_type(scrubbed, root, match.start()) or types.get(root)
+            if kind is not None and middle:
+                kind = resolve_chain(kind, middle, members)
             if kind is None or _receiver_kind(kind) not in kinds:
                 return match.group(0)
             done[0] += 1
-            return "%s.%s" % (root, new)
+            return "%s%s.%s" % (root, middle, new)
 
         text = pattern.sub(swap, text)
         if done[0]:
@@ -420,10 +829,26 @@ def _scrub(text: str) -> str:
             out.append(" ")
             i += 1
             while i < n and text[i] != quote:
-                i += 2 if text[i] == "\\" else 1
+                #: **Two spaces for an escape, because it consumed two
+                #: characters.** One space made the output SHORTER than the
+                #: input from the first backslash in a file onward, so every
+                #: offset taken from it drifted -- and this function exists to
+                #: be searched by offset. `nearest_type` quietly looked in the
+                #: wrong place, and a rewrite that sliced the real text at a
+                #: scrubbed offset truncated the file: `Unexpected end of
+                #: file`, from a rename that was otherwise correct.
+                #: Clamped, because an escape as the LAST character of the
+                #: file would consume one and blank two.
+                step = min(2 if text[i] == "\\" else 1, n - i)
+                i += step
+                out.append(" " * step)
+            #: ...and the closing quote is blanked only if there IS one. An
+            #: unterminated literal at end of file otherwise got a space for
+            #: a character that was not there, which drifts the same way in
+            #: the other direction.
+            if i < n:
+                i += 1
                 out.append(" ")
-            i += 1
-            out.append(" ")
         elif text.startswith("//", i):
             while i < n and text[i] != "\n":
                 out.append(" ")
@@ -432,8 +857,11 @@ def _scrub(text: str) -> str:
             while i < n and not text.startswith("*/", i):
                 out.append("\n" if text[i] == "\n" else " ")
                 i += 1
-            out.append("  ")
-            i += 2
+            #: The closer only if it is there -- an unterminated block comment
+            #: at end of file otherwise got two spaces for no characters.
+            blanked = min(2, n - i)
+            out.append(" " * blanked)
+            i += blanked
         else:
             out.append(c)
             i += 1
@@ -642,7 +1070,7 @@ def convert_text(text: str, renames: Dict[str, str]) -> Tuple[str, List[str]]:
 
 
 def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
-            compile_it: bool = True) -> Dict[str, Any]:
+            compile_it: bool = True, fix_names: bool = False) -> Dict[str, Any]:
     """Convert a recovered BGT project into one NVGT compiles.
 
     Three mechanical steps and one honest report. The steps: every `.bgt`
@@ -701,9 +1129,14 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
     #: a function, which is most of them. So this is a second pass over what
     #: the first one wrote.
     types = declared_types(scripts)
+    members = class_members(scripts)
     rewritten: List[Tuple[str, str]] = []
     for path, text in scripts:
-        text, notes = apply_typed_renames(text, types)
+        text, notes = apply_typed_renames(text, types, members)
+        text, copy_notes = apply_copy_constructors(text, types, members)
+        notes += copy_notes
+        text, const_notes = apply_const_handles(text, types, members)
+        notes += const_notes
         if notes:
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)
@@ -763,12 +1196,22 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
     exact = exact_shims(nvgt)
     report["exact_shims"] = sorted(exact)
     for path, text in scripts:
+        scrubbed = _scrub(text)
         for line, name in calls_in(text):
-            if name in SEMANTIC:
-                report["semantic"].append(
-                    {"name": name, "file": os.path.relpath(path, out),
-                     "line": line, "why": SEMANTIC[name],
-                     "resolved": name in exact})
+            if name not in SEMANTIC:
+                continue
+            #: A note about one receiver type is not a note about another that
+            #: happens to share the method name. Only a receiver whose type is
+            #: READ and disagrees is skipped; an unknown one still reports.
+            kinds = SEMANTIC_TYPES.get(name)
+            if kinds:
+                kind = _semantic_receiver(scrubbed, types, name, line)
+                if kind is not None and _receiver_kind(kind) not in kinds:
+                    continue
+            report["semantic"].append(
+                {"name": name, "file": os.path.relpath(path, out),
+                 "line": line, "why": SEMANTIC[name],
+                 "resolved": name in exact})
     report["semantic"].sort(key=lambda r: (r["name"], r["file"], r["line"]))
 
     if compile_it and nvgt is not None and entry is not None:
@@ -795,7 +1238,239 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
             {"name": m.group(1)} for m in
             re.finditer(r"Name conflict\. '([^']+)' is a global",
                         said)]
+        #: **The other conflict message carries no name**, and that is why a
+        #: whole title reported nothing actionable. An exact signature clash
+        #: -- the game declares `void sleep(uint)` and so does NVGT -- is
+        #: *"A function with the same name and parameters already exists"*,
+        #: with a file and a line and no name in it. Paladin's only error is
+        #: that one, so the report said `1 error line(s)` and left a person
+        #: to open the file themselves.
+        #:
+        #: It is read off the DECLARATION the compiler pointed at, which is
+        #: the authority for both halves: the compiler decides there is a
+        #: clash, and the line it names says which function. A name clash on
+        #: its own is not a conflict and must not be reported as one --
+        #: `speak`, `clear` and `stop` all clash by name in Super Egg Hunt
+        #: and compile cleanly, because the parameters differ and NVGT takes
+        #: them as overloads.
+        report["conflicts"] += _signature_clashes(said)
+        #: ...and fix the ones that are provable, then ask the compiler again,
+        #: because a verdict about the source before the fix is not a verdict
+        #: about what is on disk now. One round only: every rename here is
+        #: taken from this pass's own diagnostics, so a second pass would be
+        #: reporting the same clash against a name that no longer exists.
+        if fix_names:
+            moved = fix_conflicts(out, report["conflicts"])
+            if moved:
+                code, said = nvgt.compile(entry)
+                report["compile"] = {
+                    "exit": code, "output": said.strip(),
+                    "errors": [l.strip() for l in said.splitlines()
+                               if l.strip().startswith(("ERROR:", "WARNING:"))]}
     return report
+
+
+#: `void sleep(uint arg0)` -- a declaration at the start of a line, which is
+#: how the recovered text writes a global function. Indentation would make it
+#: a member, and a member of the game's own class clashes with nothing.
+_GLOBAL_DECL = re.compile(
+    r"^(?:const\s+)?[A-Za-z_][\w:]*(?:\s*[@&]|\s*\[\s*\])*\s+"
+    r"([A-Za-z_]\w*)\s*\(")
+
+
+def _signature_clashes(said: str) -> List[Dict[str, Any]]:
+    """Name every function NVGT already has with the same parameters.
+
+    The compiler reports this one without the name, so the name comes from
+    the line it points at. Anything that line does not read as a global
+    declaration is left out rather than guessed at -- a wrong name here would
+    send somebody renaming the wrong function.
+    """
+    found: List[Dict[str, Any]] = []
+    pending: Optional[Tuple[str, int]] = None
+    path, line = None, None
+    for raw in said.splitlines():
+        text = raw.strip()
+        match = re.match(r"(?:Compilation error: )?file: (.+)$", text)
+        if match:
+            path, line = match.group(1).strip(), None
+            continue
+        match = re.match(r"line: (\d+)", text)
+        if match:
+            line = int(match.group(1))
+            continue
+        if "same name and parameters already exists" not in text:
+            continue
+        if not path or not line:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                source = handle.read().splitlines()
+        except OSError:
+            continue
+        if line > len(source):
+            continue
+        decl = _GLOBAL_DECL.match(source[line - 1])
+        if decl is None:
+            continue
+        found.append({"name": decl.group(1), "kind": "signature",
+                      "file": os.path.basename(path), "line": line})
+    seen = set()
+    unique = []
+    for row in found:
+        key = (row["name"], row["file"], row["line"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
+
+
+def renameable(name: str) -> bool:
+    """Whether renaming the game's own global function is PROVABLY safe.
+
+    It is, when BGT registers and documents nothing of that name: then every
+    unqualified `name(` in a recovered BGT project resolved to the game's own
+    declaration, so moving the declaration and those calls together cannot
+    change which function runs. Paladin's `sleep` is that case -- `bgt api
+    sleep` answers "this engine neither documents nor registers it".
+
+    It is NOT provable when BGT has the name, and the reason is a limit this
+    file records elsewhere: **a registration string carries no owner**, so
+    `registered()` cannot tell a global `speak` from `tts_voice::speak`. With
+    a global of that name in BGT, an unqualified call might have gone to the
+    engine rather than to the game, and a tool that renamed it would be
+    guessing. Those are reported instead.
+    """
+    try:
+        from . import bgt_api
+    except ImportError:
+        import bgt_api
+    try:
+        if name in bgt_api.registered():
+            return False
+    except Exception:                       # noqa: BLE001 -- no engine here
+        return False
+    return True
+
+
+def global_variable(out: str, name: str) -> Optional[Tuple[str, int, str]]:
+    """Where the project declares `name` as a GLOBAL VARIABLE, if it does.
+
+    `Name conflict. 'X' is a global function.` gives the name and not the kind
+    of the game's own declaration, and the kind is what decides whether this
+    can be fixed. Aliens Attack declares `sound power;` and `sound exp2;` at
+    file scope, and NVGT has a global *function* of each name -- which BGT
+    allowed and NVGT does not, so two sounds stopped the whole title
+    compiling.
+
+    A CLASS of that name is deliberately not looked for: this file declines
+    renaming one all along, because a class name reaches into string literals
+    and saved data. A variable's name reaches its declaration and its reads.
+    """
+    for path, text in _scripts(out):
+        scrubbed = _scrub(text)
+        #: file scope is brace depth 0, counted up to each candidate
+        depth = 0
+        cursor = 0
+        for match in _DECLARED.finditer(scrubbed):
+            depth += (scrubbed.count("{", cursor, match.start())
+                      - scrubbed.count("}", cursor, match.start()))
+            cursor = match.start()
+            if depth != 0 or match.group(2) != name:
+                continue
+            #: a signature opens a parameter list; a variable does not
+            if match.group(0).rstrip().endswith("("):
+                continue
+            line = scrubbed.count("\n", 0, match.start()) + 1
+            return path, line, re.sub(r"\s+", "", match.group(1).strip())
+    return None
+
+
+def _scripts(out: str) -> List[Tuple[str, str]]:
+    """Every `.nvgt` under `out`, as `(path, text)`."""
+    found = []
+    for root, _dirs, files in os.walk(out):
+        for name in sorted(files):
+            if name.endswith(".nvgt"):
+                path = os.path.join(root, name)
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    found.append((path, handle.read()))
+    return found
+
+
+def fix_conflicts(out: str, conflicts: Sequence[Dict[str, Any]]
+                  ) -> List[Dict[str, Any]]:
+    """Rename each provably-safe clashing global, in place. Returns what moved.
+
+    The declaration and every UNQUALIFIED call, and nothing else: `x.sleep()`
+    is a method on the game's own class and clashes with nothing, and a class
+    named `sleep` is a different fix that this deliberately does not attempt
+    -- a class name reaches into string literals and saved data, which is why
+    this file has declined that one all along.
+    """
+    done: List[Dict[str, Any]] = []
+    paths = [os.path.join(root, f)
+             for root, _dirs, files in os.walk(out)
+             for f in files if f.endswith(".nvgt")]
+    texts = {path: open(path, encoding="utf-8", errors="replace").read()
+             for path in paths}
+    for row in conflicts:
+        name = row.get("name")
+        if not name:
+            continue
+        if row.get("kind") == "signature":
+            #: a global FUNCTION, which is only provably safe where BGT has
+            #: no such name -- see `renameable`
+            if not renameable(name):
+                continue
+        else:
+            #: ...or a global VARIABLE, which is safe whatever BGT has: a
+            #: variable's name is read, never called, so renaming it cannot
+            #: change which function runs. That is the doubt `renameable`
+            #: exists for, and it does not reach a variable.
+            where = global_variable(out, name)
+            if where is None:
+                continue
+            row["kind"] = "variable"
+            row["file"] = os.path.basename(where[0])
+            row["line"] = where[1]
+            row["declared"] = where[2]
+        #: A suffix rather than a prefix, so the name still reads as itself in
+        #: a stack trace, and checked against the whole project so the cure is
+        #: not a second clash.
+        new_name = name + "_"
+        while any(re.search(r"(?<![\w.])%s(?![\w])" % re.escape(new_name), t)
+                  for t in texts.values()):
+            new_name += "_"
+        if row.get("kind") == "variable":
+            #: **Every use EXCEPT a call.** The engine's function of that name
+            #: is still reachable and still meant wherever the text calls it,
+            #: so `power(a, b)` is left exactly as it is while `power.play()`
+            #: and a bare `power` are the game's own variable.
+            pattern = re.compile(r"(?<![\w.])%s(?![\w])(?!\s*\()"
+                                 % re.escape(name))
+        else:
+            pattern = re.compile(r"(?<![\w.])%s(\s*\()" % re.escape(name))
+        moved = 0
+        for path, text in list(texts.items()):
+            scrubbed = _scrub(text)
+            pieces, last = [], 0
+            for match in pattern.finditer(scrubbed):
+                pieces.append(text[last:match.start()])
+                pieces.append(new_name)
+                last = match.start() + len(name)
+                moved += 1
+            if pieces:
+                pieces.append(text[last:])
+                texts[path] = "".join(pieces)
+        if moved:
+            row["renamed_to"] = new_name
+            row["sites"] = moved
+            done.append(row)
+    for path, text in texts.items():
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    return done
 
 
 def _wrap(text: str, width: int) -> List[str]:
@@ -828,18 +1503,38 @@ def summary(report: Dict[str, Any]) -> str:
     if extra > 0:
         out.append("  %-22s ...and %d more" % ("", extra))
     conflicts = report.get("conflicts") or []
-    if conflicts:
+    fixed = [r for r in conflicts if r.get("renamed_to")]
+    left = [r for r in conflicts if not r.get("renamed_to")]
+    if fixed:
+        out.append("  %-22s %d name(s) this game declares that NVGT also has,"
+                   % ("renamed for you", len(fixed)))
+        out.append("  %-22s which BGT has none of -- so every unqualified call"
+                   % "")
+        out.append("  %-22s was the game's own and moving them together cannot"
+                   % "")
+        out.append("  %-22s change which function runs:" % "")
+        for row in fixed[:8]:
+            out.append("      %s -> %s (%d site%s)"
+                       % (row["name"], row["renamed_to"], row["sites"],
+                          "" if row["sites"] == 1 else "s"))
+    if left:
         out.append("  %-22s %d name(s) this game declares that NVGT already"
-                   % ("rename these yourself", len(conflicts)))
-        out.append("  %-22s has. The cure is a project-wide rename, which is"
+                   % ("rename these yourself", len(left)))
+        out.append("  %-22s has, and which this will not rename for you: BGT"
                    % "")
-        out.append("  %-22s yours to judge: a class name reaches into string"
+        out.append("  %-22s has the name too and its registrations carry no"
                    % "")
-        out.append("  %-22s literals and saved data too." % "")
-        for row in conflicts[:8]:
-            out.append("      %s" % row["name"])
-        if len(conflicts) > 8:
-            out.append("      ...and %d more" % (len(conflicts) - 8))
+        out.append("  %-22s owner, so an unqualified call may have meant the"
+                   % "")
+        out.append("  %-22s engine's. A class name also reaches into string"
+                   % "")
+        out.append("  %-22s literals and saved data." % "")
+        for row in left[:8]:
+            where = ("  %s:%d" % (row["file"], row["line"])
+                     if row.get("file") else "")
+            out.append("      %s%s" % (row["name"], where))
+        if len(left) > 8:
+            out.append("      ...and %d more" % (len(left) - 8))
     semantic = report.get("semantic") or []
     exact = set(report.get("exact_shims") or ())
     if semantic:
@@ -905,6 +1600,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--nvgt", metavar="PATH",
                         help="nvgt.exe, or the folder holding it "
                              "(else NVGT_COMPILER, else the usual places)")
+    parser.add_argument("--fix-conflicts", action="store_true",
+                        help="rename the game's own globals that clash with "
+                             "NVGT's, where BGT has no such name and the "
+                             "rename is therefore provably the same program")
     parser.add_argument("--no-compile", action="store_true",
                         help="convert without asking the compiler, which is "
                              "the one check this tool can make for free")
@@ -918,7 +1617,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "only what can be known without them. Pass --nvgt or set\n"
               "NVGT_COMPILER to get the check this tool is for.")
     report = convert(args.project, args.output, nvgt,
-                     compile_it=not args.no_compile)
+                     compile_it=not args.no_compile,
+                     fix_names=args.fix_conflicts)
     print(summary(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

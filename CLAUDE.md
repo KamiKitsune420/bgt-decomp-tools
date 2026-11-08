@@ -540,7 +540,7 @@ bgt validate game.exe patched.exe
 ...or ported to the other engine, which can be compiled on every run:
 
 ```bash
-bgt tonvgt recovered/ -o ported/          # convert, then `nvgt -c` judges it
+bgt tonvgt recovered/ -o ported/ --fix-conflicts   # convert; `nvgt -c` judges it
 ```
 
 Or, in one command, the whole thing as a project the compiler judges:
@@ -16695,21 +16695,33 @@ is what the compiler said rather than what it hoped.
 
 Measured on every title that can be measured here:
 
-| title | `nvgt -c` | and what it is |
-|---|---|---|
-| Battle of the Hunter | **compiled cleanly** | |
-| constant velocity | **compiled cleanly** | |
-| Super Egg Hunt | 1 error | `Illegal operation on this datatype` |
-| Manamon 1 | **1 error**, in 82,099 lines | `Name conflict. 'sleep' is a global function` -- the game declares a class NVGT has as a function |
-| The Gate | 3 errors | the `log` name conflict, and `elias` again -- NVGT has no such type either |
-| cs server | 14 -> **5 errors** | the `const network_event@` the converter reports rather than rewrites, and `get_length` on a receiver whose type is not written down |
-| cs client | 17 -> **14 errors** | `get_MOUSE_X` and friends: BGT constants NVGT spells differently |
-| rage room | 212 errors | `library::call` returning `var@`, in a title that is a BASS wrapper |
+| title | files | `nvgt -c` | and what it is |
+|---|---|---|---|
+| Super Egg Hunt | 14 | **compiled cleanly** | |
+| Battle of the Hunter | 20 | **compiled cleanly** | |
+| constant velocity | 17 | **compiled cleanly** | |
+| Paladin of the Sky | 59 | **72 -> 1 error** | the `datastream@`/`file@` return, reported with its site |
+| Manamon 1 | 806 | **1 error**, in 82,157 lines | `class sleep`, which NVGT has as a function |
+| cs server | 35 | 14 -> **1 error** | `tone_synth::freq_ms`, a signature difference |
+| Psycho Strike | 73 | **2 errors** | `elias`, and `class log` |
+| The Gate | 178 | **3 errors** | the same two |
+| Perilous Hearts | 19 | 12 errors | the funcdef naming, and a missing `create_map` |
+| Palace Punch-up | 10 | 595 -> **588 errors** | **the recovery's own**, below |
+| Aliens attack | 10 | 2 -> **2076 errors** | **the recovery's own**, below |
+| rage room | 48 | 212 errors | `library::call` returning `var@`, in a title that is a BASS wrapper |
 
-**Two of those moved because the decompiler did**, not the converter: the
-`cs` server went 14 errors to 5 and its client 17 to 14 across the fold and
-type work above. Every error left is an engine difference the converter
-reports rather than guesses at, which is what it is for.
+**Three titles compile cleanly and three more are within two errors**, and
+every error left on those six is an engine difference the converter names
+rather than guesses at.
+
+**Paladin's 72 -> 1 is one question answered**: what type a method is being
+called ON, when the receiver is an array element, a member of one, or a
+parameter. See below -- 67 of the 72 were that, and the engine had the
+answer the whole time.
+
+**And the last two rows are NOT the converter's.** Both titles' *recoveries*
+are wrong, and NVGT's compiler is the first thing that could say so -- see
+**NVGT's compiler is a free check on the BGT recovery**.
 
 Four mechanical steps and three reports. The steps: every `.bgt` becomes a
 `.nvgt`, every `#include` is repointed, the entry script gains
@@ -16741,6 +16753,132 @@ handle-to-array in the corpus, which is why Battle of the Hunter sat at three
 errors instead of none. And `lstrip("const")` is not how a prefix comes off:
 it strips those five *characters*, so it turned `string[]@` into `ring[]@`.
 
+### ...and what it is called ON may be an ELEMENT, a MEMBER or a PARAMETER
+
+The receiver's declared type is the right question and `nearest_type` could
+only answer it for a bare local. **67 of Paladin's 72 errors were the other
+three cases**, and the guard that produced them said so in its own comment --
+*"a subscript or a further member makes the value an ELEMENT, so the declared
+array type is not what the method is called on"*. True, and the conclusion
+was to decline, where the project itself holds every link:
+
+```
+world[local_15].interacts.get_length()      map[] -> map -> interact@[]
+party[local_9].strikes.get_length()         character[] -> character -> dragonstrike[]
+bag[local_1].items.get_length()             pocket[] -> pocket -> item[]
+```
+
+`resolve_chain` walks it one step at a time -- a subscript takes one `[]` off,
+a `.name` is looked up in that class's own members -- and **returns None at
+the first step it cannot take**, which is the whole safety argument: a chain
+is renamed only when every link is written down, so an unknown member or an
+unknown element type declines exactly as before.
+
+Three things had to be read before any of that could work, and each was its
+own defect.
+
+#### A class member is not a global, and the map is keyed by bare name
+
+`declared_types` drops a name every declaration of which does not agree, and
+that is right -- renaming on a disagreement is how a correct
+`sound.get_length()` becomes a broken `sound.length()`. But Paladin declares
+a global `map[] world` **and** a class `map` with a member `int[][] world`,
+so the two disagreed and the name was dropped. After that nothing knew what
+`world.get_length()` was called on either, so even the bare-local case failed
+on the commonest global in the game.
+
+`class_members` keeps them apart, keyed by their own class, which is both the
+fix and what the chain walk needs. It is the rule this file already states
+about namespaces, one scope in: **qualify the key wherever the same name can
+mean two things.**
+
+#### A `;` terminates a class body as well as a newline
+
+Paladin writes `class character { dragonstrike[] strikes; }` on one line, so
+a member walk that only looked at depth-0 **newlines** reported that class as
+having no members at all -- the chain through it declined, and the rename
+declined with it.
+
+#### A PARAMETER is declared in a signature, not in a statement
+
+The last ten, and the plainest. `_DECLARED` is anchored at the start of a
+line, so on
+
+```
+vector[] remove_vector(vector[] arg0, vector arg1, bool arg2 = true)
+```
+
+it captures `remove_vector` as a name of type `vector[]` and **never sees
+`arg0` at all**. Every receiver in a recovered body is either a local or a
+parameter, so half of them had no type to go on.
+
+`signature_parameters` reads them, at the signature's own position -- which
+is above every use in the body and below the function before it, so
+`nearest_type`'s "look up" answer is right without it having to know about
+scopes. Two narrownesses keep it exact: the line must END at the closing
+paren, which is what tells a signature from a call or from a
+constructor-form declaration (`sound_pool p(500);` is neither), and the
+parameter list is split on its **top-level** commas, because a default
+argument may hold one of its own.
+
+#### What it cost
+
+**Paladin: 72 errors -> 5**, and the 67 are gone. Super Egg Hunt still
+`compiled cleanly`, every other title's error count held or fell, and the
+rename still declines a `sound` -- `uint64 get_length() property` is real
+there, so the one case this check exists to protect is untouched. It is
+pinned both ways: a chain that resolves renames, and a chain with no member
+table, an unknown member, a member of an array or a member of a registered
+type all decline.
+
+### A copy constructor BGT registers and NVGT does not
+
+```
+BGT    void f(const vector &in)        a copy
+NVGT   void f()
+       void f(float x, float y, float z = 0)
+```
+
+so `vector(v)` is *"No matching signatures to 'vector(vector)'"* -- four
+sites in Paladin's maze generator.
+
+Dropping the call is exact rather than near enough, and the engine is the
+authority for both halves: NVGT registers the type `asOBJ_POD`, so
+AngelScript gives it a bitwise copy for free, and `vector b = a;` and
+`c = a;` were both put to `nvgt -c` before either was emitted.
+
+**Only where the argument's own type is the same type**, which is what the
+chain resolver is for here too. BGT's *other* constructor takes floats with
+defaults, so `vector(1.0)` is a legal one-argument call that means something
+else entirely -- and `vector(v.x)` is that call. Both are left exactly as
+they are, and so is the float triple.
+
+A declaration keeps its value as an initialiser (`vector a(b);` ->
+`vector a = b;`) rather than losing it, because there the construction IS
+the declaration -- the same reason a sized array's length survives only on
+its own declaration.
+
+### A const handle, which is one word
+
+NVGT registers `const network_event@ network::request()` and BGT's is not
+const, so a recovered local that receives one is declared `network_event@`
+and *"Can't implicitly convert from 'const network_event@' to
+'network_event@'"* -- on every BGT game that reads its network.
+
+This file listed it under **What it will not do** for a while, on the
+grounds that a difference in a returned type is a difference in meaning. It
+is not: the value is the same object and only the declaration has to say so.
+Put to `nvgt -c` on the real `cs` server rather than argued, one word takes
+that title from 2 errors to 1, and Palace Punch-up's ten sites take 7 errors
+off it.
+
+**Only the declaration, and only a plain handle of the right type.** A
+non-const handle still assigns INTO a const one, so the same local may be
+filled from somewhere else and stay correct -- Palace Punch-up's
+`@local_7 = network_event()` is left alone and still works. Code that writes
+THROUGH the handle stops compiling, which is a visible failure rather than a
+silent one, and that is the acceptable direction.
+
 **Some accessors are a plain PROPERTY there**, so the brackets come off as
 well as the prefix. NVGT registers `network_event`'s members with
 `RegisterObjectProperty`, so `e.get_peer_id()` is `e.peer_id` -- 10 sites on
@@ -16750,24 +16888,26 @@ together.
 ## What it will not do
 
 Guess at a difference in **meaning**. Four are named with every site, and
-each is reported rather than rewritten:
+each is reported rather than rewritten -- it was five, and
+`network::request` left the list because its difference turned out to be in
+the DECLARATION rather than in the meaning: see **A const handle, which is
+one word**:
 
 | | |
 |---|---|
 | `library::call` | returns `var@` in NVGT and `dictionary@` in BGT, so the result is not read with `.get(...)`. **All 212 of rage room's errors**, that title being a BASS wrapper |
 | `downloader`'s progress | a `float` in NVGT where BGT's `get_progress()` is used as a truth value -- written straight across, `!d.get_progress()` compiles and polls forever |
-| `network::request` | returns a `const network_event@`, so the handle it is assigned to has to be `const` too |
 | `string_base64_decode` | BGT **skips** every byte outside the alphabet and NVGT **stops** at the first one, so a seed carrying NULs or spaces decodes to nothing. It is the quietest of the four: the conversion compiles, runs, and cannot open its own pack -- see **`string_base64_decode` SKIPS what it cannot read** |
+| `pack_file::get_file` | returns a `file@` in BGT and a `datastream@` in NVGT, so a local that holds either a real file or a pack entry cannot be declared the same way in both. A `cast<file@>` **compiles and returns NULL on a pack entry at run time**, so it is not done: declare the local `datastream@` and cast only in the branch that calls `open` on it. Paladin's one remaining error |
 
 A rewrite there would produce source that compiles and does something else,
 which this repository treats as the worst outcome available.
 
 ## A name the GAME declares that NVGT already has
 
-The last class, and the only one that is the port's problem rather than the
-converter's. Manamon 1 declares `class sleep` and NVGT has a global `sleep`;
-The Gate declares `log` and NVGT has that too. One compiler error each -- and
-Manamon 1's is its **only** one across 83,371 lines.
+Manamon 1 declares `class sleep` and NVGT has a global `sleep`; The Gate and
+Psycho Strike declare `class log` and NVGT has that too. One compiler error
+each -- and Manamon 1's is its **only** one across 82,157 lines.
 
 **The compiler is asked, not the text.** A static scan has to know what is in
 *scope*, and one got it wrong in both directions at once: it missed `sleep`,
@@ -16775,9 +16915,125 @@ and it reported `map` and `note`, which NVGT declares in files nobody
 included. `Name conflict. 'X' is a global function.` is exact and complete, so
 that is what is read -- this file's first rule, applied one engine over.
 
-The cure is a project-wide rename, which is the author's call: a class name
-reaches into string literals and saved data, and a tool that renamed it would
-be guessing about both.
+### Which of them `--fix-conflicts` renames, and why the kinds differ
+
+Three shapes clash, and the question for each is whether renaming it is
+PROVABLE rather than merely likely:
+
+| the game declares | renamed? | because |
+|---|---|---|
+| a global **function** BGT has no name for | **yes** | every unqualified `name(` in a recovered BGT project resolved to the game's own declaration, so moving the declaration and those calls together cannot change which function runs. Paladin's `sleep` -- `bgt api sleep` answers that this engine neither documents nor registers it |
+| a global **variable** | **yes, whatever BGT has** | a variable's name is READ, never called, so moving it cannot change which function runs -- which is the doubt the first row is about, and it does not reach a variable. The engine's function stays reachable wherever the text calls it |
+| a global **function** BGT has too | no | **a registration string carries no owner**, so `registered()` cannot tell a global `speak` from `tts_voice::speak`. With a global of that name in BGT, an unqualified call might have gone to the engine |
+| a **class** | no | a class name reaches into string literals and saved data, so renaming it is the author's call and always has been |
+
+**Aliens Attack is the variable case**, and it is the one that shows why the
+kinds need telling apart: it declares `sound power;` and `sound exp2;` at file
+scope, NVGT has a global *function* of each name, and BGT allowed what NVGT
+does not -- so **two sounds stopped a whole title compiling**. `renameable`
+says no to both, correctly, because BGT registers `power` -- and that is a
+question about a *call*, which a variable is not.
+
+A variable is renamed at every use EXCEPT a call, so `power(a, b)` is left
+exactly as it is while `power.play()` and a bare `power` are the game's own
+sound. The suffix is checked against the whole project first, so the cure is
+never a second clash.
+
+### A rename UNMASKS, which is the point and reads like a regression
+
+A name conflict stops the compiler early, so the count before a rename is a
+statement about how far it got rather than about the project. Both renamed
+titles went **up**:
+
+| | before | after |
+|---|---|---|
+| Paladin | 1 error | **72**, of which 71 are now fixed |
+| Aliens attack | 2 errors | **2076** |
+
+Paladin's 72 were real and are down to 1. Aliens' 2076 are its *recovery's*,
+and that is the next section.
+
+## NVGT's compiler is a free check on the BGT RECOVERY
+
+The reason this matters is the asymmetry this section opens with: asking BGT
+costs a modal dialog on somebody's screen, and asking NVGT costs an exit
+code. So a *conversion* is the cheapest way this project has ever had to put
+a recovered BGT game to a compiler at all -- and on the two titles that have
+never been compiled either way, it says they are wrong.
+
+Neither is the converter's doing. Both are identical in the recovered `.bgt`
+and in the converted `.nvgt`, and both are reproducible from the executable
+in one command.
+
+### Aliens attack: 330 unhandled `POP`s and 327 stores to a key CONSTANT
+
+A fresh `bgt recover` at HEAD passes every free check -- 5,766 lines, **0
+unmodelled opcodes, 0 bodies given up on, 0 residual gotos, 0 dangling
+gotos, a verified split** and 1,662 calls read back. Its text holds:
+
+| | |
+|---|---|
+| `// POP (unhandled)` | **330** |
+| assignments to an engine key constant | **327** -- `KEY_RETURN = ...` 259 times, `KEY_NUMPADENTER` 36, `KEY_SPACE` 20 |
+
+and the shape is one generated global initialiser repeated:
+
+```
+nss_net __nvgt_global_init_39() {
+    nss_net net;
+    KEY_RETURN = nss_net();      <- the construction, stored to a CONSTANT
+    // POP (unhandled)
+    return net;                   <- ...and nothing ever wrote `net`
+}
+```
+
+So every global of a script class in that title is initialised to nothing,
+and the store lands on an engine constant instead. **It compiles in neither
+engine**, which is what makes it findable at all.
+
+**The two counts being nearly equal is the diagnosis.** Opcodes 0 and 1 are
+`POP` and `PUSH` in that build and `PopPtr` and `PshGPtr` in 1.3 -- which
+this file already records, and which `early_opcodes` exists for. What it
+does not record is that **the renames live in `as_early.decode_early`, and
+Aliens Attack does not go through `as_early`**: it is read by `as_module`
+under the `2012-03` profile. So `bgt_asir` renames `POP 1` to `PopPtr` only
+where `w_arg == 1`, and `PUSH` -- the prologue's stack reservation, which
+`decode_early` skips outright -- is not skipped on this path at all.
+
+`unmodelled opcodes 0` is reported while 330 instructions are emitted as
+`// POP (unhandled)`, so **that count does not see what this path could not
+model.** A count that aggregates two causes hides the rarer one, which is
+this file's own lesson about `bodies that failed` arriving in a new place.
+
+### Palace Punch-up: `string@`, in the 2010 beta alone
+
+588 errors, and 281 of them are **"Object handle is not supported for this
+type"** on `string@ local_9;`. `string` is a value type in both engines, so
+that declaration is invalid in BGT too.
+
+Counted across the corpus, `string@` occurs in **Palace Punch-up's recovery
+and nowhere else** -- 0 in Super Egg Hunt, Paladin, Manamon 1, The Gate and
+Aliens attack. So it is specific to the 2010 beta generation, which is also
+the generation whose `_beh_10_` is the index behaviour and whose `string`
+handling this file records as different throughout.
+
+The rest of that title's count is one cascade: `'items' is not a member of
+'sound_pool'` 133 times, `'grid' is not a member of 'player'` 32, and so on
+-- member accesses failing because the class they are on failed to declare.
+
+### Neither is fixed here, deliberately
+
+Both are BGT-side decompiler defects and this is a converter change. Fixing
+either in the same commit is the shape this file keeps recording -- *two
+changes in flight is one measurement of neither* -- and the Aliens one in
+particular wants the five-title measurement every reader change here gets.
+They are written down with their numbers and their diagnosis so the next
+attempt starts from a measurement.
+
+What is worth keeping either way is the method: **a conversion that compiles
+is a statement about the recovery, not only about the port.** Three titles
+convert and compile cleanly, and the two that produce hundreds of errors are
+the two whose recoveries nothing had ever asked.
 
 ## Two sets, and they are deliberately different sizes
 
@@ -17417,6 +17673,21 @@ slot); and a `&&`/`||` whose result is *stored* in a bool and used later (the
 merge folds `(A op B)` into the stored slot at its `CpyVtoV4`, so an `if`, a
 ternary or an expression reading it later sees the whole value -- guarded to a
 bool destination so a uint ternary still goes to the value-merge).
+
+**Two titles' RECOVERIES are wrong, and a conversion is what said so.**
+Aliens attack emits 330 `// POP (unhandled)` and stores 327 constructions
+into an engine key constant, while reporting 0 unmodelled opcodes; Palace
+Punch-up's recovery declares `string@` locals, which are invalid in both
+engines. Both pass every free check, both are diagnosed in full under
+**NVGT's compiler is a free check on the BGT RECOVERY**, and neither is
+fixed -- they are reader changes and want the five-title measurement every
+reader change here gets.
+
+**Two converter rows are open and small.** The `cs` server's one error is
+`tone_synth::freq_ms(string, const double)`, a signature difference not yet
+read; Perilous Hearts has 12, mostly the funcdef naming this file records
+(`menu_callback` where `pathfinder_callback` belongs) plus a missing
+`create_map`. Neither has been run down.
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified

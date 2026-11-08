@@ -228,7 +228,7 @@ class SemanticDifferenceTests(unittest.TestCase):
     """
 
     def test_both_are_named_with_what_differs(self):
-        for name in ("call", "get_progress", "request",
+        for name in ("call", "request",
                      "generate_computer_id", "string_compress",
                      "string_decompress", "serialize", "deserialize"):
             self.assertIn(name, bgt_to_nvgt.SEMANTIC)
@@ -285,6 +285,46 @@ class SemanticDifferenceTests(unittest.TestCase):
         for name in bgt_to_nvgt.EXACT_SHIMS:
             self.assertIn(name, bgt_to_nvgt.SEMANTIC)
 
+    def test_get_progress_moved_out_of_here_and_into_a_typed_rename(self):
+        """It was listed as a difference in MEANING and it is a RENAME.
+
+            BGT   bool  http::get_progress() const
+            NVGT  float http::get_progress() property
+            NVGT  bool  http::get_running()  property
+
+        BGT's answers "is it still going?", which is what the loop using it
+        says; NVGT spells that `running` and keeps `progress` for the
+        fraction. Both are on a type called `http` in both engines, so the
+        receiver guard has something to match and nothing else has to move.
+        """
+        self.assertNotIn("get_progress", bgt_to_nvgt.SEMANTIC)
+        self.assertIn("get_progress", bgt_to_nvgt.TYPED_RENAMES)
+        spelling, kinds = bgt_to_nvgt.TYPED_RENAMES["get_progress"]
+        self.assertEqual(spelling, "get_running")
+        self.assertIn("http", kinds)
+
+    def test_a_typed_semantic_note_is_not_reported_for_another_type(self):
+        """`SEMANTIC` is keyed by the bare call name, so a note about one type
+        fired on every type sharing a method name: Super Egg Hunt reads a
+        download in chunks with `h.request()` on an `http` and got the note
+        for `network::request`. A report that cannot be acted on is worse than
+        no report, because the next one is read with less attention.
+
+        A receiver whose type cannot be read still reports, which is the safe
+        direction -- this narrows a false alarm, it does not hide a
+        difference.
+        """
+        for name, kinds in bgt_to_nvgt.SEMANTIC_TYPES.items():
+            self.assertIn(name, bgt_to_nvgt.SEMANTIC)
+            self.assertTrue(kinds)
+
+        scrubbed = bgt_to_nvgt._scrub("    h.request();")
+        self.assertEqual(
+            bgt_to_nvgt._semantic_receiver(scrubbed, {"h": "http"},
+                                           "request", 1), "http")
+        self.assertEqual(
+            bgt_to_nvgt._semantic_receiver(scrubbed, {}, "request", 1), None)
+
     def test_none_of_them_is_also_a_rename(self):
         """A name cannot be both rewritten and left to a person."""
         for name in bgt_to_nvgt.SEMANTIC:
@@ -295,3 +335,337 @@ class SemanticDifferenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScrubLengthTests(unittest.TestCase):
+    """`_scrub` must be LENGTH-PRESERVING, because it is searched by offset.
+
+    It blanks comments and string literals so a pattern cannot match inside
+    one, and every caller then takes an offset from the result and uses it
+    against the real text. It was short by one for each backslash escape, and
+    long by one or two for an unterminated literal or block comment at end of
+    file -- so from the first escape in a file onward `nearest_type` looked in
+    the wrong place, and a rewrite that sliced the real text at a scrubbed
+    offset truncated the file: `Unexpected end of file`, from a rename that
+    was otherwise correct.
+    """
+
+    CASES = (
+        'a = "x";',
+        'a = "x\\ty";',
+        'a = "\\\\";',
+        '"\\\\\\\\"',
+        'f("a\\"b");',
+        "'\\''",
+        '// comment',
+        'a // comment',
+        '/* block */ f();',
+        '/*unterminated',
+        '"unterminated',
+        "'",
+        '"',
+        '\\',
+        '',
+        'f(1);',
+    )
+
+    def test_every_hand_case_keeps_its_length(self):
+        for case in self.CASES:
+            with self.subTest(case=case):
+                self.assertEqual(len(bgt_to_nvgt._scrub(case)), len(case))
+
+    def test_fuzzed_over_the_characters_that_matter(self):
+        """A quote, an escape, a newline and both comment openers, which is
+        where every drift came from."""
+        import random
+        random.seed(7)
+        alphabet = ''.join((chr(34), chr(39), chr(92), 'abc', chr(10), '/*; '))
+        for _ in range(20000):
+            text = ''.join(random.choice(alphabet)
+                           for _ in range(random.randint(0, 28)))
+            if len(bgt_to_nvgt._scrub(text)) != len(text):
+                self.fail('drifted on %r' % text)
+
+    def test_it_still_blanks_what_it_is_for(self):
+        """Length alone would be satisfied by returning the input unchanged."""
+        source = 'f(' + chr(34) + 'sleep(' + chr(34) + ');  // sleep('
+        scrubbed = bgt_to_nvgt._scrub(source)
+        self.assertNotIn('sleep(', scrubbed)
+        self.assertIn('f(', scrubbed)
+
+
+class ChainResolutionTests(unittest.TestCase):
+    """A method on an ELEMENT or a MEMBER, which is most of a real project.
+
+    `bgt libcheck`-style name-only renaming cannot answer
+    `world[i].interacts.get_length()`, and declining it was 67 of Paladin's
+    72 compiler errors. Each link is taken from the project's own
+    declarations, and the chain declines at the first one that is not
+    written down -- so this gets stricter, never looser, where the project
+    says nothing.
+    """
+
+    SCRIPTS = (
+        ("globals.nvgt", "map[] world;\nsound effect;\n"),
+        ("map.nvgt",
+         "class map {\n"
+         "    string filename;\n"
+         "    int[][] world;\n"
+         "    interact@[] interacts;\n"
+         "    void go() { int[] world; }\n"
+         "}\n"),
+        #: a class whose whole body is on ONE line, which is how Paladin
+        #: writes `class character`
+        ("character.nvgt", "class character { dragonstrike[] strikes; }"),
+    )
+
+    def setUp(self):
+        self.members = bgt_to_nvgt.class_members(self.SCRIPTS)
+        self.types = bgt_to_nvgt.declared_types(self.SCRIPTS)
+
+    def test_a_class_member_is_not_a_global(self):
+        """The flat map is keyed by bare name, so class `map`'s member
+        `int[][] world` collided with the global `map[] world` and the name
+        was dropped as disagreeing -- after which nothing knew what
+        `world.get_length()` was called on."""
+        self.assertEqual(self.types.get("world"), "map[]")
+        self.assertEqual(self.members["map"]["world"], "int[][]")
+
+    def test_a_one_line_class_body_still_has_members(self):
+        """A `;` terminates as well as a newline. Without that, a class
+        written on one line reported no members at all, the chain through it
+        declined, and the rename declined with it."""
+        self.assertEqual(self.members["character"]["strikes"],
+                         "dragonstrike[]")
+
+    def test_a_method_body_declares_locals_not_members(self):
+        """`map::go`'s `int[] world` is a local at brace depth 2 and belongs
+        to nobody but the method."""
+        self.assertEqual(self.members["map"]["world"], "int[][]")
+
+    def test_each_link_of_a_chain(self):
+        for middle, want in (("", "map[]"),
+                             ("[i]", "map"),
+                             ("[i].interacts", "interact@[]"),
+                             ("[i].world", "int[][]"),
+                             ("[i].world[j]", "int[]")):
+            with self.subTest(middle=middle):
+                self.assertEqual(
+                    bgt_to_nvgt.resolve_chain("map[]", middle, self.members),
+                    want)
+
+    def test_it_declines_rather_than_guesses(self):
+        for middle in ("[i].nope",          # no such member
+                       "[i][j]",            # `map` is not an array
+                       ".interacts",        # a member of an ARRAY
+                       "[i].interacts.x"):  # a member of a registered type
+            with self.subTest(middle=middle):
+                self.assertIsNone(
+                    bgt_to_nvgt.resolve_chain("map[]", middle, self.members))
+
+    def test_the_rename_follows_a_chain_and_leaves_a_sound_alone(self):
+        source = ("void f() {\n"
+                  "    character[] party;\n"
+                  "    int a = world[i].interacts.get_length();\n"
+                  "    int b = party[n].strikes.get_length();\n"
+                  "    double c = effect.get_length();\n"
+                  "}\n")
+        out, _notes = bgt_to_nvgt.apply_typed_renames(
+            source, self.types, self.members)
+        self.assertIn("world[i].interacts.length()", out)
+        self.assertIn("party[n].strikes.length()", out)
+        #: NVGT really does register `uint64 get_length() property` on a
+        #: sound, so renaming this one would break it
+        self.assertIn("effect.get_length()", out)
+
+    def test_with_no_members_a_chain_declines(self):
+        """Passing no member table must not make the rename looser."""
+        source = "void f() { int a = world[i].interacts.get_length(); }\n"
+        out, _notes = bgt_to_nvgt.apply_typed_renames(source, self.types, {})
+        self.assertIn("get_length()", out)
+
+
+class SignatureParameterTests(unittest.TestCase):
+    """A PARAMETER is declared in the signature, not as a statement.
+
+    `_DECLARED` is anchored at the start of a line, so on
+
+        vector[] remove_vector(vector[] arg0, vector arg1, bool arg2 = true)
+
+    it captures `remove_vector` as a name of type `vector[]` and never sees
+    `arg0`. Every receiver in a recovered body is a local or a parameter, so
+    half of them had no type at all: the last 10 of Paladin's errors.
+    """
+
+    def test_every_parameter_is_read_with_its_type(self):
+        text = ("vector[] remove_vector(vector[] arg0, vector arg1, "
+                "bool arg2 = true)\n{\n}\n")
+        self.assertEqual(
+            bgt_to_nvgt.signature_parameters(text),
+            [(0, "arg0", "vector[]"), (0, "arg1", "vector"),
+             (0, "arg2", "bool")])
+
+    def test_a_default_argument_may_hold_a_comma(self):
+        """A plain `split(',')` would cut a parameter in half and leave the
+        half looking like a declaration of something else."""
+        q = chr(34)
+        text = ('void f(string arg0 = string(' + q + 'a,b' + q + '), '
+                'int arg1)\n{\n}\n')
+        self.assertEqual(
+            [(n, k) for _p, n, k in bgt_to_nvgt.signature_parameters(text)],
+            [("arg0", "string"), ("arg1", "int")])
+
+    def test_a_call_is_not_a_signature(self):
+        """The line must END at the closing paren, which is what tells a
+        signature from a call or from a constructor-form declaration."""
+        for line in ("    f(a, b);\n", "    sound_pool p(500);\n",
+                     "    int n = g(x);\n"):
+            with self.subTest(line=line):
+                self.assertEqual(bgt_to_nvgt.signature_parameters(line), [])
+
+    def test_a_parameter_resolves_a_receiver(self):
+        text = ("void walk(int[][] arg2, sound arg1)\n{\n"
+                "    if (arg2.get_length() <= 1) { return; }\n"
+                "    double d = arg1.get_length();\n"
+                "}\n")
+        out, _notes = bgt_to_nvgt.apply_typed_renames(text, {}, {})
+        self.assertIn("arg2.length()", out)
+        self.assertIn("arg1.get_length()", out)
+
+
+class CopyConstructorTests(unittest.TestCase):
+    """BGT registers `void f(const vector &in)` and NVGT does not.
+
+    NVGT registers the type `asOBJ_POD`, so AngelScript gives it a bitwise
+    copy for free -- `vector b = a;` and `c = a;` were both put to `nvgt -c`
+    before either was emitted. Only where the argument's own type is the same
+    type: BGT's other constructor takes floats with defaults, so `vector(1.0)`
+    is a legal one-argument call that means something else.
+    """
+
+    SOURCE = ("void f(vector arg0)\n{\n"
+              "    vector local_24;\n"
+              "    vector local_27;\n"
+              "    vector local_28(local_27);\n"
+              "    local_28 = vector(local_24);\n"
+              "    local_28 = vector(arg0);\n"
+              "    local_28 = vector(1.0);\n"
+              "    local_28 = vector(local_24.x);\n"
+              "    local_28 = vector(1, 2, 3);\n"
+              "}\n")
+
+    def setUp(self):
+        self.out, self.notes = bgt_to_nvgt.apply_copy_constructors(
+            self.SOURCE, {}, {})
+
+    def test_a_declaration_keeps_its_value_as_an_initialiser(self):
+        """The construction IS the declaration, so dropping it entirely would
+        lose the value."""
+        self.assertIn("vector local_28 = local_27;", self.out)
+
+    def test_a_copy_in_expression_position_becomes_the_value(self):
+        self.assertIn("local_28 = local_24;", self.out)
+        self.assertIn("local_28 = arg0;", self.out)
+
+    def test_the_float_constructor_is_left_alone(self):
+        """`vector(1.0)` and `vector(v.x)` are BGT's OTHER constructor, with
+        its defaults -- a different call that means something else."""
+        self.assertIn("vector(1.0)", self.out)
+        self.assertIn("vector(local_24.x)", self.out)
+        self.assertIn("vector(1, 2, 3)", self.out)
+
+    def test_it_says_how_many_it_moved(self):
+        self.assertTrue(any("vector" in n for n in self.notes))
+
+
+class ConstHandleTests(unittest.TestCase):
+    """NVGT registers `const network_event@ network::request()`.
+
+    BGT's is not const, so a recovered local that receives one is declared
+    `network_event@` and *"Can't implicitly convert from 'const
+    network_event@' to 'network_event@'"* -- on every BGT game that reads its
+    network. One word on the declaration fixes it, and it was put to
+    `nvgt -c` on a real recovery before it was emitted.
+    """
+
+    SOURCE = ("network host;\n"
+              "void loop()\n{\n"
+              "    network_event@ local_4;\n"
+              "    network_event@ local_7;\n"
+              "    @local_4 = host.request();\n"
+              "    @local_7 = network_event();\n"
+              "}\n")
+
+    def setUp(self):
+        self.types = bgt_to_nvgt.declared_types(
+            [("g.nvgt", self.SOURCE)])
+        self.out, self.notes = bgt_to_nvgt.apply_const_handles(
+            self.SOURCE, self.types, {})
+
+    def test_the_receiving_local_is_declared_const(self):
+        self.assertIn("const network_event@ local_4;", self.out)
+
+    def test_a_local_filled_from_elsewhere_is_left_alone(self):
+        """`network_event()` is not const, and a non-const handle assigns INTO
+        a const one anyway -- so widening this would be safe and pointless,
+        while leaving it alone keeps the output nearest the original."""
+        self.assertIn("    network_event@ local_7;", self.out)
+
+    def test_it_declines_when_the_receiver_is_not_a_network(self):
+        source = ("http client;\n"
+                  "void f()\n{\n"
+                  "    network_event@ local_4;\n"
+                  "    @local_4 = client.request();\n"
+                  "}\n")
+        types = bgt_to_nvgt.declared_types([("g.nvgt", source)])
+        out, _notes = bgt_to_nvgt.apply_const_handles(source, types, {})
+        self.assertIn("    network_event@ local_4;", out)
+
+    def test_it_says_what_it_did(self):
+        self.assertTrue(any("const network_event@" in n for n in self.notes))
+
+
+class GlobalVariableConflictTests(unittest.TestCase):
+    """A global VARIABLE whose name NVGT has as a function.
+
+    Aliens Attack declares `sound power;` and `sound exp2;` at file scope,
+    and NVGT has a global function of each name -- which BGT allowed and NVGT
+    does not, so two sounds stopped the whole title compiling.
+
+    Renaming a variable is safe whatever BGT has, which is the difference
+    from `renameable`: a variable's name is READ, never called, so moving it
+    cannot change which function runs. The engine's own function stays
+    reachable wherever the text calls it.
+    """
+
+    def test_a_global_variable_is_found_with_its_type(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as out:
+            inc = os.path.join(out, "includes")
+            os.makedirs(inc)
+            with open(os.path.join(inc, "globals.nvgt"), "w",
+                      encoding="utf-8") as handle:
+                handle.write("int fish;\nsound power;\n"
+                             "void f() { sound local_1; }\n")
+            where = bgt_to_nvgt.global_variable(out, "power")
+            self.assertIsNotNone(where)
+            self.assertEqual(where[1], 2)
+            self.assertEqual(where[2], "sound")
+            #: a LOCAL of that name is not a global
+            self.assertIsNone(bgt_to_nvgt.global_variable(out, "local_1"))
+            #: and neither is a function
+            self.assertIsNone(bgt_to_nvgt.global_variable(out, "f"))
+
+    def test_a_class_is_not_offered(self):
+        """This file declines renaming a class all along: a class name
+        reaches into string literals and saved data. The Gate declares
+        `class log` and Manamon 1 `class sleep`, and both are reported
+        rather than renamed."""
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as out:
+            with open(os.path.join(out, "a.nvgt"), "w",
+                      encoding="utf-8") as handle:
+                handle.write("class log {\n    int n;\n}\n")
+            self.assertIsNone(bgt_to_nvgt.global_variable(out, "log"))
