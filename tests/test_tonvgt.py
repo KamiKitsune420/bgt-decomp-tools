@@ -265,10 +265,13 @@ class SemanticDifferenceTests(unittest.TestCase):
         nvgt = bgt_to_nvgt.Nvgt(os.path.join(scratch, "nvgt.exe"), include, None)
         self.assertEqual(bgt_to_nvgt.exact_shims(nvgt), set())
 
+        #: Every symbol any entry asks for, so the set comes back whole --
+        #: written from the table rather than listed, because a hand-written
+        #: list goes stale the moment a sixth format is read.
         with open(compat, "w") as handle:
-            for name in ("bgt_string_compress", "bgt_string_decompress",
-                         "bgt_serialize", "bgt_generate_computer_id"):
-                handle.write("// routes to %s\n" % name)
+            for symbols in bgt_to_nvgt.EXACT_SHIMS.values():
+                for symbol in symbols:
+                    handle.write("// routes to %s\n" % symbol)
         self.assertEqual(bgt_to_nvgt.exact_shims(nvgt),
                          set(bgt_to_nvgt.EXACT_SHIMS))
 

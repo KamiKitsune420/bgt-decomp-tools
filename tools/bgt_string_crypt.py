@@ -87,8 +87,21 @@ def unwrap(plaintext: bytes) -> Optional[bytes]:
 
 def string_encrypt(data: Union[bytes, str], password: Union[bytes, str],
                    use_kdf: bool = True) -> bytes:
+    """BGT's own `string_encrypt`, checked against the engine.
+
+    `use_kdf=True` is what the SCRIPT-facing function does, which a probe
+    settles rather than infers: three non-empty cases reproduce the engine's
+    ciphertext byte for byte and the raw-key variant matches none of them.
+
+    **An empty input gives an empty string**, which is the engine's answer and
+    not a shortcut -- BGT returns `""` where encrypting the wrapped header
+    alone would give one block. A caller that wrote that block would produce a
+    file BGT's own `string_decrypt` reads as 16 bytes of nothing.
+    """
     if isinstance(data, str):
         data = data.encode("utf-8")
+    if not data:
+        return b""
     key, iv = aes_params(password, use_kdf)
     pt = wrap(data)
     pt += b"\x00" * ((-len(pt)) % 16)

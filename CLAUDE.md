@@ -3703,12 +3703,13 @@ What is left is a truncated or hostile packet, where BGT would skip the junk
 and NVGT returns empty, so a name arrives blank rather than garbled. That is
 the whole exposure, in a netplay path nobody has tested.
 
-### Three formats a PORT has to reproduce, and all three are now read
+### FIVE formats a PORT has to reproduce, and all five are now read
 
 `string_base64_decode` above is one primitive whose difference between the two
-engines breaks a game. Three more are worse, because they are not primitives
+engines breaks a game. Five more are worse, because they are not primitives
 but **formats**, and NVGT's `bgt_compat.nvgt` shimmed each one with its own
-equivalent:
+equivalent. Three of them are below; the other two are the rest of a save
+path, under **...and FIVE**:
 
 | BGT | what `bgt_compat.nvgt` answered with | what that costs |
 |---|---|---|
@@ -3719,10 +3720,10 @@ equivalent:
 Each failure is the shape this file keeps recording: the port compiles, runs,
 and silently cannot read its own old data. And each reaches real titles --
 `generate_computer_id` is in Psycho Strike, The Gate, Manamon 1 and Manamon 2;
-`string_compress` and `serialize` in Paladin; `serialize` in all five of those.
-Only Super Egg Hunt calls none of them.
+`string_compress` in Paladin; `serialize` in all five of those. Super Egg Hunt
+calls none of these three and is reached by the fourth.
 
-All three are read now, and the authority is the engine rather than the
+All five are read now, and the authority is the engine rather than the
 disassembly: each was checked by asking `bgt.exe` and comparing.
 
 #### `generate_computer_id`, bit for bit
@@ -3884,6 +3885,99 @@ sites, rather than rewriting them -- 32 sites in Paladin alone. It also
 **asks the NVGT in hand** whether that build already answers them exactly,
 because a fork can, and reporting it anyway would send somebody to fix what
 is already fixed.
+
+
+#### ...and FIVE, because a save path has three links and two more formats
+
+The table above says three. Probing the rest of the chain found two more, and
+the first of them is the one that would have made the other two pointless: a
+BGT save is `serialize()` into `string_compress()` into `string_encrypt()`, so
+fixing two of three leaves it broken at the decrypt with nothing to say which
+layer was wrong.
+
+**`string_encrypt` is BGT's own arrangement, and this toolkit already had it.**
+`bgt_string_crypt.py` is exact for it, which a probe settles rather than
+argues: `use_kdf=True` reproduces the engine's ciphertext byte for byte on
+every non-empty case.
+
+```
+material = kdf(password)            the 64-byte NUL-free derivation
+key      = SHA256(material up to its first NUL)
+iv       = key[0..15]
+plain    = "printf" + decimal(len) + NUL + data, zero padded to 16
+AES-256-CBC
+```
+
+**An empty input encrypts to an empty string**, which is the engine's own
+answer and not a shortcut -- BGT returns `""` rather than one block of
+padding, and this module's docstring did not say so.
+
+What NVGT's shim did instead: SHA-256 of the key with no derivation, an IV of
+`key[i*2] ^ (4*i+1)`, and its own padding with no header. Its own comment in
+`bgt_compat.nvgt` said *"Does not work with existing bgt encrypted data"*,
+which is the rare case of a shim that announced the problem.
+
+**`file_encrypt` is a THIRD arrangement, and it is the PACK's.** Not
+`string_encrypt`'s:
+
+```
+"SWCR" + the plaintext length as a little-endian u32, THREE TIMES
+       + a 16-byte tag + AES-256-ECB of the data, zero padded to 16
+```
+
+which is exactly how an entry inside an SFPv asset pack is encrypted, tag and
+all -- so one reading settles both, and `bgt_pack` plus `bgt_kdf.aes_key`
+already decode it. Probed: `file_encrypt("x", "y", "key")` on `hello world`
+writes 48 bytes whose tag is `AES-ECB(key, 16 zero bytes)` and whose
+ciphertext is the ECB of the padded plaintext, under **the same key
+`string_encrypt` uses** -- checked on four passwords. So only the container and
+the cipher mode differ between the two.
+
+**Which titles each reaches**, because that decides how much any of this is
+worth:
+
+| | calls it |
+|---|---|
+| `generate_computer_id` | Psycho Strike, The Gate, Manamon 1, Manamon 2 |
+| `string_compress` / `string_decompress` | Paladin |
+| `serialize` / `deserialize` | Paladin, Psycho Strike, The Gate, Manamon 1, Manamon 2 |
+| `string_encrypt` / `string_decrypt` | **Super Egg Hunt**, Paladin, Manamon 1, Manamon 2 |
+| `file_encrypt` / `file_decrypt` | **none in this corpus** -- latent |
+
+Super Egg Hunt calls none of the first three and does call this one, so every
+title in the corpus is reached by at least one.
+
+#### Driven end to end, in both directions
+
+The claim worth making is not that each function agrees but that the **chain**
+does, and that is measured rather than argued. A fork carrying all five --
+`src/bgt_legacy.cpp`, in the NVGT checkout -- was built and driven:
+
+| | |
+|---|---|
+| NVGT writes `serialize` -> `string_compress` -> `string_encrypt` | BGT reads all three values back: `42, hero, 1.5` |
+| BGT writes the same chain | NVGT reads all three values back |
+| `file_encrypt` | **byte-identical** output, and each engine reads the other's file |
+| `generate_computer_id` | NVGT's answer equals BGT's on 12 of 12, both flags |
+| a wrong key | refused by both, because the plaintext is self-checking |
+| NVGT's own `serialize`/`deserialize` round trip | unchanged |
+
+The last row is the one that makes this safe to put in a shared engine:
+NVGT's `deserialize` reads BGT's format **as well as** its own two, and it can
+tell them apart by construction -- both of NVGT's headers open with `0x0E`,
+which is not a base64 character, so a BGT blob can never be mistaken for one
+or the other.
+
+#### `bgt tonvgt` reports all five, and asks whether they are needed
+
+`SEMANTIC` carries twelve entries now, and `EXACT_SHIMS` says which symbol in
+a `bgt_compat.nvgt` means that build answers one of them in BGT's own format.
+The report then splits: the differences a person still has to read, and the
+ones **this** NVGT already answers -- 32 sites of the latter in Paladin alone.
+
+Reporting the second group rather than dropping it is deliberate: a difference
+one fork resolves is still a difference every other build has, so a project
+moved to a stock NVGT needs to know which ones were being answered for it.
 
 
 ### The engine registers itself, and the binary is the longer list

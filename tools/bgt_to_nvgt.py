@@ -151,6 +151,30 @@ SEMANTIC: Dict[str, str] = {
         "The other half of `serialize`, and the one that fails quietly: a "
         "blob in BGT's format leaves NVGT's dictionary empty rather than "
         "reporting a bad save, so a loaded game silently starts over.",
+    "string_encrypt":
+        "NVGT's `bgt_compat.nvgt` answers this with `string_aes_encrypt`, "
+        "whose own comment says it does not work with existing BGT data: it "
+        "hashes the key straight with SHA-256 where BGT puts it through a "
+        "derivation of its own, takes the IV from every other digest byte "
+        "where BGT takes the first sixteen, and does not wrap the plaintext "
+        "in BGT's `printf<len>` header. This is the third link of a save "
+        "path, so it fails even where the other two agree.",
+    "string_decrypt":
+        "The other half of `string_encrypt`. BGT's is self-checking -- the "
+        "plaintext has to begin `printf` and declare its own length -- so a "
+        "wrong arrangement returns nothing rather than rubbish, which is the "
+        "one mercy in this family.",
+    "file_encrypt":
+        "NVGT's `bgt_compat.nvgt` answers this with `asset_encryptor`, and "
+        "BGT writes a different container again -- `SWCR`, the length as a "
+        "little-endian u32 three times, a 16-byte tag, then AES-256-ECB of "
+        "the data, which is also how an entry inside an SFPv asset pack is "
+        "encrypted. Not the same format as `string_encrypt`, so a game that "
+        "uses both needs both.",
+    "file_decrypt":
+        "The other half of `file_encrypt`, and worth its own line because "
+        "the shim it replaces reports success: a wrong key writes an empty "
+        "file and returns true, where BGT's tag refuses the key outright.",
 }
 
 #: `T name`, `T@ name`, `T[] name`, `T@[] name` -- a declaration, as the
@@ -567,6 +591,10 @@ EXACT_SHIMS: Dict[str, Tuple[str, ...]] = {
     "serialize": ("bgt_serialize",),
     "deserialize": ("bgt_serialize",),
     "generate_computer_id": ("bgt_generate_computer_id",),
+    "string_encrypt": ("bgt_string_encrypt",),
+    "string_decrypt": ("bgt_string_decrypt",),
+    "file_encrypt": ("bgt_swcr_encrypt",),
+    "file_decrypt": ("bgt_swcr_decrypt",),
 }
 
 
