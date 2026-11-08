@@ -2727,9 +2727,10 @@ for the `for` headers it now writes.
 |---|---|---|---|---|---|---|
 | Screaming Strike (2012-07 engine, **debug**) | 951 | 0 | 0 | yes | 346 | **yes** |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
+| Aliens attack (2012-03) | 5,766 | 0 | 0 | yes | 1,662 | not asked -- a fifth engine, see **A FIFTH generation** |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
-| Palace Punch-up (2010 beta) | 3,200 | 0 | 0 | yes | 823 | not asked |
+| Palace Punch-up (2010 beta) | 3,200 -> **3,147** | 0 | 0 | yes | 823 | not asked |
 | Air Puck server (**debug**) | 3,717 | 0 | 0 | yes | 995 | **yes** |
 | constant velocity | 3,805 | 0 | 0 | yes | 1,767 | **yes** |
 | Battle of the Hunter | 4,269 | 0 | 0 | yes | 1,334 | **yes** |
@@ -3772,9 +3773,13 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 | Grodan Gun | 295 | 26 | 2011-09-19 11:10 |
 | Perilous Hearts | 309 | 28 | 2011-11-25 15:33 |
 | Antony | 312 | 27 | 2012-02-05 15:23 |
+| **Aliens attack** (NS Studios) | **322** | 25 | **2012-03-09 22:49** |
 | Screaming Strike | 394 | -- | 2012-07-24 |
+| **zompocalypse** | **420** | -- | **2012-12-28** |
+| River Raiders, casino | 427 | -- | 2013-04-24 |
 | a 2013 BGT, from a pack tool | 427 | -- | 2013-04-24 |
 | BGT 1.3 | 432 | 32 | 2014-06-01 00:41 |
+| adventure at c | **434** | 32 | 2014-06-01 |
 | Super Egg Hunt | 432 | 32 | 2014-06-01 00:38 |
 | Paladin of the Sky | 432 | 32 | stock |
 | Psycho Strike | 453 | 40 | 2015-04-19 21:02 |
@@ -3785,6 +3790,15 @@ bgt api --exe "<game>.exe" weakref garbage_collect    # that build's answer
 Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
+
+**Three of those rows are new, and two of them are not supported.** Aliens
+Attack's 2012-03 engine reads end to end -- see **A FIFTH generation**
+below -- and the 2012-12 and 2013-04 builds do not: a product of every
+record field this reader has, 16,384 walks, gets 5% through River Raiders
+and no further, so that generation needs a field that is not here yet. See
+**The 2012-12 and 2013-04 engines are open**. `adventure at c` is a 190 MB
+stock-1.3 title whose runtime registers two names more than `bgt.exe`
+does, which is not looked into.
 
 (BGT 1.0's type count is 21 here where this table used to say 23. The names
 agree and only the types moved, which is `registered_types` having been
@@ -13554,6 +13568,273 @@ bounds them is the shape above and nothing stronger -- the change can only
 reach a zero-argument object construction used as a declaration, and on the
 eight artefacts that were measured it reaches nothing else -- so the three
 rows are an expectation rather than a reading, and they are owed.
+
+## Manamon 2 did not hang, it took three quarters of an hour in silence
+
+Reported as *"it just sat there on decompiling and never moved: it did dump
+the byte code bin into the folder I set though"*, which is exactly what the
+symptom looks like from outside and is two defects rather than one.
+
+**The module loads in 1.4 seconds.** Unpacking, the opcode table and the
+whole 4,736,046-byte parse are 2 seconds together, which is why the
+bytecode appeared and nothing else did. Everything after that is
+`_Splitter.render()`, one call, and `bgt recover` says `decompiling` before
+it and nothing until it returns.
+
+### One body was 219 seconds, and 40 of them were ONE linear scan
+
+Timed per body across the title: 7,398 bodies, and the distribution is what
+matters rather than the total. `create_kiarre` is **68,692 instructions**
+and took **219 seconds** on its own; `create_requiem_world` 20,419 and 28
+seconds; nothing else above 6.
+
+Profiled, the top line is not subtle:
+
+```
+136688/134306   22.985   42.839  {built-in method builtins.any}
+   159683    1.853      40.698  _normalize_arg
+ 47487150   16.851      16.851  <genexpr>
+```
+
+**47.5 million comparisons in one body.** `_normalize_arg` asks whether an
+argument's type is one of the module's own classes, and it asked by
+scanning them: `any(source.obj_type is cls for cls in self.m.classes)`.
+Manamon 2 declares **1,604 classes** and that body normalises 159,683
+arguments. It is an identity test, so a set keyed on `id()` answers it in
+one lookup -- safe because the module holds every class for its own
+lifetime, so no id can be reused while the index exists.
+
+It is memoised on the **module**, not on the decompiler, because a
+`FuncDecompiler` is built five times per body by the re-simulation.
+`_is_reference_type` was scanning the same list for the same reason and
+takes the same index, with a `(name, namespace)` set beside the identities
+for the half of its test that is by name.
+
+### ...and the body analyses were paid for FIVE times
+
+`_slot_io`, `_successors` and the webs are pure functions of the bytecode
+and are memoised **per instance** -- deliberately, so that a
+`FuncDecompiler` built without `__init__` sees the unwalked state, which
+the analysis tests rely on. The re-simulation builds a fresh instance per
+pass, so all three were walked again on every one: `slot_webs` alone was 18
+of this body's seconds. They are carried across now, and dropped with the
+instances at the end of the body, so nothing is retained per function.
+
+| `create_kiarre` | seconds |
+|---|---|
+| as found | 219 (128 on a warm run) |
+| after the class index | 75 |
+| after carrying the analyses | **59** |
+
+**Byte-identical output**, which is the claim that matters for a
+performance change: Super Egg Hunt and The Gate recover to the same files
+byte for byte, 0 differing paths, with the time falling 6.8s -> 3.9s and
+70.2s -> 64.7s.
+
+### The other half: a step that says nothing is indistinguishable from a hang
+
+`_capture` is the one chokepoint every class, the globals block and every
+function goes through, so it is where the progress comes from: the name of
+the declaration about to be rendered, at most every two seconds, with a
+running count. **Before** the work rather than after it, because what a
+reader needs to see on a title with a one-minute body is which declaration
+it is sitting on.
+
+A small title prints one extra line. Manamon 2 prints a few hundred, and
+the difference between that and silence is the whole report.
+
+## Two more engine constructs with two names each
+
+The pattern this file states as a rule -- **a registered name is a
+per-build field like any other** -- collecting its fourth and fifth
+instances, after `%delegate_factory`/`$dlgte`, `$list`/`factstub` and
+`_string_factory_`/`$str`. Both were found by reading a user's compiler
+output rather than by any check here.
+
+### `factstub` is `$fact` in the 2017 fork, and that was 124 parse errors
+
+`GenerateTemplateFactoryStub` names the stub `factstub` in BGT 1.3 and in
+every build up to The Gate. VGStorm's 2017 fork names it **`$fact`** -- the
+same move that renamed the string factory to `$str` -- and Manamon 1
+reaches it **85 times**.
+
+Known by one spelling, every one of those fell through to the generic call
+rendering, which names a type the way a DECLARATION does:
+
+```
+@local_6 = character@[]();
+```
+
+`weapon@[]()` is a parse error, which this file already records and already
+has the fix for: `_constructor_type` emits `array<weapon@>()` for exactly
+this reason. The branch that calls it is gated on the stub's name, so the
+fix was present and unreachable. **124 errors in that one title**, two per
+site, and it went unreported because Manamon 1 had never been put to a
+compiler -- this file says so in the standings, and the reason it gives is
+still right.
+
+`TEMPLATE_FACTORY` is the two spellings in one place, read by both callers:
+the call rendering and `_member_array_sizes`, which carries a sized array's
+length onto its declaration and was equally blind.
+
+### `array` is `_builtin_array_` in the 2010 beta
+
+The array template's own internal name, and the same shape one layer down.
+Palace Punch-up's module calls it `_builtin_array_`; `array` does not occur
+in that runtime at all, and `_builtin_array_` occurs seven times. Known by
+one name, its arrays came out as
+
+```
+_builtin_array_<sound> preloads(50);
+```
+
+which is "Expected identifier" and then "Instead found '<'".
+
+**The source syntax is `T[]` there too**, which is read from the beta's own
+registrations rather than assumed: it registers `string[]@ string_split(`,
+`string[]@ find_directories(` and `string[]@ find_files(`. So the suffix
+rendering is right and only the name it was keyed on was wrong.
+`ARRAY_TEMPLATE` holds both.
+
+Measured: Palace Punch-up recovers to 3,147 lines, 0 residual gotos, a
+verified split, 823 calls read back, and **all ten `bgt signatures` shapes
+at 0**.
+
+## A FIFTH generation: Aliens attack, and it dates the SIGN FLAG
+
+`Aliens attack.exe` (NS Studios, 2012) was reported as a recovery that
+failed outright: *"module tail did not land on EOF: ParseError: bad
+type-info tag 0x05 at 0x87 (at 0x88 of 0x1F0A8, after 0 of 5 class
+blocks)"*. It is a fifth engine release, and where it sits is what makes it
+worth a section: its runtime is dated **2012-03-09** and registers **322**
+names, between Antony's 312 (2012-02-05, which `as_early` reads) and
+Screaming Strike's 394 (2012-07-24, which `as_module` reads).
+
+**So it is the build that dates the encoded integer's sign flag.** This file
+had that as "between February and July 2012"; Aliens Attack has it, so the
+window closes to **between 5 February and 9 March 2012**.
+
+It is a hybrid, and that is the point rather than a curiosity: 1.3's
+integer and 1.3's bytecode with the earlier generation's records.
+
+| | the 2011/2012-02 engines | **Aliens attack, 2012-03** | BGT 1.3 |
+|---|---|---|---|
+| encoded integer | plain base-128 | **sign flag** | sign flag |
+| bytecode | dword count, raw-width operands | **instruction count, encoded operands** | the same |
+| opcode numbering | `POP`/`PUSH` at 0/1 | **`POP`/`PUSH`** | `PopPtr`/`PshGPtr` |
+| `eTokenType` | four below the IR's | **four below** | two below |
+| `ReadDataType` | token first, split flag bytes | **the same** | zero first, one packed byte |
+| signature namespace | after the NAME | **after the name** | last |
+| body | no variableSpace, no objVariablesOnHeap | **neither** | both |
+| template subtype | `s` + TypeInfo + a handle byte | **the same**, with the token as an **eu** | a tag then a DataType |
+| behaviour numbering | 0 ctor, 1 dtor, 2 factory | **the same** | 0, 2, 3 |
+
+It lands **exactly on EOF** at 0x1F0A8 with 0 parse errors and 0 trailing
+bytes, and recovers to 13 files and 5,766 lines with 0 unmodelled opcodes,
+0 bodies given up on, 0 residual gotos, 0 dangling gotos, 0 unbalanced
+files, a verified split and 1,662 calls read back against its own build's
+declarations.
+
+### It is a named PROFILE, for the reason the fourth one is
+
+`RECORDS_2012_03` is Screaming Strike's profile and four records more, so
+adding it cannot re-describe a module that already lands: the profiles are
+tried verified-first and every title in this corpus still reports exactly
+what it did before. The four are `sig_namespace_first`,
+`body_scalar_fields` (off), `template_subtype_early` and `early_opcodes`.
+
+**`early_opcodes` is a THIRD separate question**, after how the operands
+are stored and how the behaviours are numbered. This build stores its
+operands 1.3's way and numbers its opcodes the old way, so the name and the
+operand shape come from its own table while the reading stays the newer
+one. Taken together -- which is what `self.early` meant -- it decoded
+`PUSH` as `PshGPtr` and refused the module with *"opcode 0x01 is 'PUSH'
+here and 'PshGPtr' there"*. Counted: its table is 202 entries of which 16
+disagree with the newer numbering, Perilous Hearts' 202 and 22, Psycho
+Strike's 200 and none.
+
+**And the jump offsets are 1.3's**, which was measured rather than assumed,
+over only the jumps where the two readings disagree: 4,304 of its 4,310
+jumps discriminate, and they land 99.5% as instruction numbers against
+85.9% as dwords -- where the controls, Super Egg Hunt and Psycho Strike,
+land 100% and 99.8% as instruction numbers. So `positions_are_dwords` stays
+off and `_Translator` is untouched.
+
+### The one field that is NOT in a profile, and its evidence
+
+The `t` form of a template's subtype carries the primitive's token as an
+**encoded integer** here, where the 2011 builds write four raw bytes.
+`keyslist` is `05 'a' r52 't' 40 42`, and `40 42` is 66 -- this build's
+`int` -- giving the `int[]` the name promises. Read as four raw bytes it is
+0x40420000, and the two flag bytes it swallows take the global's
+initialiser with them.
+
+### Two fields this reader called DEBUG and the engine writes always
+
+Found on the way and kept, although nothing in the corpus needs them,
+because each is a wrong claim rather than a missing feature:
+
+- **The traits byte.** `debug_head` returned before it when the module had
+  no debug information. The engine closes the `funcType == asFUNC_SCRIPT`
+  branch with that byte whether or not the build kept its debug info, so a
+  RELEASE build of such an engine was one byte short in every body.
+- **The one-string script section.** The same correction one field later:
+  it is written at the join after the funcType switch, outside the branch
+  that tests it, so a release build carries an empty string rather than
+  nothing.
+
+Neither is reachable for any profile in the table, because the two
+generations that write those fields have no `noDebugInfo` byte and are
+therefore always read as debug builds. They are in for the reason the
+`FREE`-must-exist condition is: the next release-built sample of that
+generation would pay for finding them again. Verified inert -- every title
+in the corpus lands exactly where it did.
+
+### The profiles are DERIVED now, and the drift was not silent
+
+`RECORDS_2012` was a second full dict of the same keys, and adding a field
+to 1.3's copy and not to it is a **`KeyError` out of the middle of a
+parse** -- which took Aliens Attack from landing exactly on EOF to
+"neither reader could parse this module". It is `dict(RECORDS_13, ...)`
+now, so a new field cannot be missing from a profile that does not mention
+it.
+
+**And the test that was supposed to catch that could not.**
+`test_every_profile_answers_every_field` compares each profile against
+`RECORDS_13`, so it is blind to a field missing from ALL of them -- and so
+was the check I ran by hand, for the same reason.
+`test_every_field_the_reader_reads_is_declared` reads the source for the
+field names the reader actually looks up and requires each to be declared;
+it finds ten, and it fails if one is removed. A baseline that is itself
+wrong is not a baseline, for the umpteenth time in this file.
+
+## The 2012-12 and 2013-04 engines are open
+
+Two more releases turn up in the same batch of executables, and neither
+opens: **zompocalypse** (2012-12-28, 420 registered names) and **River
+Raiders** and **casino** (2013-04-24, 427 names, the same build as the 2013
+BGT this file already dates from somebody's pack tool). All three carry
+**189 opcodes**, contiguous from 0 and in 1.3's numbering with not one name
+disagreeing -- so the renumbering happened between 2012-03 and 2012-12 and
+the count went 202, 189, 200 as AngelScript reorganised.
+
+What is established, and it is a bound rather than a reading: a product of
+**every** record field this reader has -- 16,384 walks over River Raiders,
+both body shapes and both legacy-body answers included -- gets to 0x1167 of
+0x12929, about 5%, and no combination lands. So this generation needs at
+least one field that is not here, and the way to get it is the one this
+file opens with: read that build's own `asCReader`.
+
+Two things that were read and are worth keeping for whoever does:
+
+- **Its funcdef parses** under `datatype_early` with 1.3's trailing
+  namespace, so `sig_namespace_first` is off and the signature is 1.3's.
+- **Its `you` constructor ends exactly where the factory's `f` tag begins**
+  when the body is read as 1.3's -- stackNeeded, `{typeinfo, eu, eu}` per
+  object variable, `objVariablesOnHeap`, `objVariableInfo`, then the traits
+  byte -- which is what the unconditional-traits correction above was found
+  from. The factory after it does not, so something between the two is
+  still unread.
 
 ## Build to Survive is three DEBUG builds, and every free check passed
 
