@@ -2743,12 +2743,12 @@ for the `for` headers it now writes.
 | rage room | 8,484 | 0 | 0 | yes | 2,369 | **yes** |
 | cs server | 9,713 | 0 | 0 | yes | 3,060 | **yes** |
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
+| Paladin of the Sky | 23,106 | 0 | 0 | yes | 6,975 | not asked -- see **the compiler is the judge** |
 | Psycho Strike | 23,935 | 0 | 0 | yes | 6,421 | no -- **`elias`**, which no stock BGT registers |
 | The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
 | Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
 | Manamon 2 | 160,305 | 0 | 0 | yes | 51,016 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
-| Paladin of the Sky | -- | -- | -- | -- | -- | **not on this machine any more** |
 
 **The last column is new and it is the stronger claim.** "Compiled cleanly"
 was what this table used to carry, and a compile-only check never runs a
@@ -2796,12 +2796,28 @@ places to keep in step, for the umpteenth time.
 
 **Every number is from one run of the committed tree.** That is what this
 table has rarely been able to say: it carried a mixture of rows from
-different commits for most of this project's life. Three titles now say
-`--` rather than a figure, because their executables are no longer in the
-folders this file names -- Paladin, Psycho Strike and Manamon 2 -- and a
-number nobody can reproduce reads as a baseline. Everything above them in
-this document that quotes a Paladin or Psycho Strike figure is a measurement
-from the commit it was written at, and should be read that way.
+different commits for most of this project's life.
+
+**And the three titles that used to say `--` are all back**, because their
+own executables turned up: Manamon 2 and Psycho Strike in a batch of
+shipped games, and Paladin at
+`Documents/backup/decompelation stuff/paladin/game.exe` -- the game as
+it shipped (2014-09-16, with its own manual and credits beside it), not the
+`paladin_fixed/game.exe` this file warns is a build of an earlier
+recovery. Its module is **631,015 bytes**, which is the figure this file
+already records for Paladin, so it is the title every historical number
+here came from.
+
+Those three rows are measured on this tree, and they do not match the
+figures quoted elsewhere in this document: Paladin is 23,106 lines against
+the 23,396 last written down and 6,975 calls against 6,952, and Psycho
+Strike 23,935 against 23,646 and 6,421 against 6,462. **None of that
+movement is this session's**: Paladin's recovered `.bgt` files are
+byte-identical before and after the changes committed here, so the drift is
+from commits made between those sentences and this table. Everything above
+this table that quotes a Paladin or Psycho Strike figure is still a
+measurement from the commit it was written at, and should be read that
+way.
 
 **Crazy Party's goto column is the one that matters most.** It is the title
 every over-broad fold or structurer change in this file was caught by --
