@@ -271,6 +271,15 @@ class Lifter:
 
     def __init__(self, mod: "as_disasm.Module", func: Dict[str, Any]) -> None:
         self.mod = mod
+        #: Which behaviour numbering this build uses -- see
+        #: `EARLY_BEHAVIOURS`. Read once rather than per call, and through
+        #: `getattr` because the analysis tests build a module stub with no
+        #: parse information at all: the same reason `FuncDecompiler`'s body
+        #: caches are class attributes. A stub gets 1.3's numbering, which
+        #: is what those fixtures are written against.
+        info = getattr(mod, "info", None) or {}
+        self.behaviours = (dict(BEHAVIOURS, **EARLY_BEHAVIOURS)
+                           if info.get("early_behaviours") else BEHAVIOURS)
         self.func = func
         self.stack: List[Expr] = []
         self.value_reg = "ret"        # the value register (CpyRtoV4 etc.)
@@ -499,10 +508,7 @@ class Lifter:
             lit = next((a for a in raw if a.startswith('"')), None)
             return lit if lit else "string()"
 
-        names = BEHAVIOURS
-        if self.mod.info.get("early_behaviours"):
-            names = dict(BEHAVIOURS, **EARLY_BEHAVIOURS)
-        behaviour = names.get(name)
+        behaviour = self.behaviours.get(name)
         if behaviour == "destructor":
             return ""                                   # dropped, like FREE
         if behaviour == "constructor" or behaviour == "factory":
