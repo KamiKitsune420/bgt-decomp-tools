@@ -1394,6 +1394,40 @@ def _default_last(arms):
 #: unreported because Manamon 1 had never been put to a compiler.
 TEMPLATE_FACTORY = ("factstub", "$fact")
 
+#: Every binary operator a class may overload, and the token the source
+#: wrote -- `(name, reflected)`, where a reflected form is the one the
+#: engine registers for `<value> op <object>` and so prints its operand on
+#: the left.
+#:
+#: **Only three of these were rendered as operators**, so a class that
+#: overloads `*` came out as `a.opMul(b)`. The names come from BGT's own
+#: language tutorial, which prints the whole set in four tables, and the
+#: list is the same one `bgt_libcheck.OPERATOR_METHODS` keeps for dropping
+#: an operator out of a call comparison -- so there is one authority for
+#: what the overloadable operators are rather than two. `opPow` is
+#: deliberately absent: the tutorial does not list one, and `**` is an
+#: opcode in this engine rather than an overload.
+#:
+#: The shift spellings are the AngelScript names, not a judgement about
+#: which shift is logical: `opShr` is `>>` and `opUshr` is `>>>` whatever
+#: those two do, and what they do is recorded elsewhere in this file.
+#: `op_Ushr_r` is the tutorial's own typo for `opUshr_r`, carried here for
+#: the same reason it is carried there.
+BINARY_OPERATORS = {
+    "opAdd": ("+", False), "opAdd_r": ("+", True),
+    "opSub": ("-", False), "opSub_r": ("-", True),
+    "opMul": ("*", False), "opMul_r": ("*", True),
+    "opDiv": ("/", False), "opDiv_r": ("/", True),
+    "opMod": ("%", False), "opMod_r": ("%", True),
+    "opAnd": ("&", False), "opAnd_r": ("&", True),
+    "opOr": ("|", False), "opOr_r": ("|", True),
+    "opXor": ("^", False), "opXor_r": ("^", True),
+    "opShl": ("<<", False), "opShl_r": ("<<", True),
+    "opShr": (">>", False), "opShr_r": (">>", True),
+    "opUshr": (">>>", False), "opUshr_r": (">>>", True),
+    "op_Ushr_r": (">>>", True),
+}
+
 
 def _constructor_type(dt: DataType) -> str:
     """The type as a *constructor expression* can name it.
@@ -5521,12 +5555,11 @@ class FuncDecompiler:
                     self._stmt(f"{obj.text} = {args[0].text};")
                 self.value_reg = receiver
                 return
-            if meth == "opAdd" and len(args) == 1:
-                result = Atom("call", f"({obj.text} + {args[0].text})")
-            elif meth == "opAdd_r" and len(args) == 1:
-                result = Atom("call", f"({args[0].text} + {obj.text})")
-            elif meth == "opSub" and len(args) == 1:
-                result = Atom("call", f"({obj.text} - {args[0].text})")
+            if meth in BINARY_OPERATORS and len(args) == 1:
+                token, reflected = BINARY_OPERATORS[meth]
+                left, right = ((args[0], obj) if reflected
+                               else (obj, args[0]))
+                result = Atom("call", f"({left.text} {token} {right.text})")
             elif meth in ("opIndex", "get_opIndex"):
                 result = Atom("call",
                               f"{obj.text}[{', '.join(a.text for a in args)}]")
