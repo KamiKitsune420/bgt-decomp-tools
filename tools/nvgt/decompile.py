@@ -316,7 +316,27 @@ def _read_slots(instrs: list[Instr]) -> set[int]:
     its value, so a slot that is only ever bound and freed is read NOWHERE.
     """
     reads: set[int] = set()
-    for ins in instrs:
+    for pos, ins in enumerate(instrs):
+        #: **A `PSF` that supplies a `REFCPY`'s DESTINATION is not a read**,
+        #: for the same reason `FREE` is not one: it is where the value goes,
+        #: not a use of the value that was there. 1.3 fuses the pair into
+        #: `RefCpyV`, whose own operand nothing counts as a read, so the two
+        #: forms disagreed only because one of them names its slot in a
+        #: separate instruction.
+        #:
+        #: Counted as a read, the whole-body half of `_borrowed_handle` --
+        #: *"nothing in the body reads the slot, and a `FREE` releases it"* --
+        #: could never fire for the 2010-2012 generations at all: the bind's
+        #: own `PSF` was the read.
+        #:
+        #: **Immediately** before, because with two the destination is the
+        #: one pushed LAST and the earlier is a source, which really is read.
+        #: `PSF a ; PSF b ; REFCPY` does not occur in the one title that has
+        #: this shape -- 0 of 227 -- so nothing here rests on it, and the
+        #: rule is right either way.
+        if (ins.name == "PSF" and pos + 1 < len(instrs)
+                and instrs[pos + 1].name == "REFCPY"):
+            continue
         if ins.name == "CallPtr":
             # **The one opcode whose operands are not where `bc_type` says.**
             # BGT's generation gives `CallPtr` a single word operand, and the
@@ -5156,7 +5176,35 @@ class FuncDecompiler:
                 prefix = "@" if self.global_types.get(dest.text) and self.global_types[dest.text].is_object_handle else ""
                 self._stmt(f"{prefix}{dest.text} = {value.text};")
             elif dest.is_ptr and dest.offset is not None:
-                self._emit_assign(dest.offset, value)
+                #: **The unfused form of the same borrow.** 1.3 fuses
+                #: `PSF v ; REFCPY` into `RefCpyV`, which names its slot in
+                #: an operand -- and the branch above asks
+                #: `_borrowed_handle` about it. The 2010-2012 generations
+                #: emit the pair, where the slot arrives as the popped
+                #: destination, so the question was never put at all.
+                #:
+                #: Counted, the two forms are mutually exclusive by
+                #: generation -- Aliens attack 227 pairs and 0 `RefCpyV`,
+                #: Perilous Hearts 309 and 0, Palace Punch-up 18 and 0,
+                #: against The Gate 1,023 `RefCpyV` and 0 pairs and Psycho
+                #: Strike 605 and 0 -- so this reaches the early titles and
+                #: cannot touch a newer one.
+                #:
+                #: What it cost: **426 `tmpN = <global>;` statements with no
+                #: declaration** in Aliens attack, which is 600 of its 630
+                #: conversion errors. `tmp4 = drown;` before
+                #: `drown[0].set_volume(0.0)`, where the index expression
+                #: already reads the global and the alias is dead -- and
+                #: `tmpN` is the name for an UNNAMED slot, so by
+                #: construction there is nothing declaring it.
+                if self._borrowed_handle(dest.offset):
+                    self.consumed_temps.discard(dest.offset)
+                    self.temps[dest.offset] = value
+                    self.temp_bound[dest.offset] = (self._pos(),
+                                                    self.stmt_count)
+                    self.consumed_temps.add(dest.offset)
+                else:
+                    self._emit_assign(dest.offset, value)
             elif dest.kind == "prop" and dest.data_type is not None                     and dest.data_type.is_object_handle:
                 # `@h.item = b`: PshVPtr h / ADDSi item / REFCPY. The address
                 # is a member, not a frame slot, and without this branch the

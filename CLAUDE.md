@@ -17138,28 +17138,116 @@ committed tree, title by title and file by file:
 | The Gate | `decode` | 33,987 | 8,681 | **0** |
 | Psycho Strike | `decode` | 23,935 | 6,421 | **0** |
 | cs server | `decode` | 9,834 | 3,023 | **0** |
+| Manamon 1 | `decode` | 82,087 | 26,508 | **0** |
 
-Five titles **byte-identical** across both readers, which is what says
+Six titles **byte-identical** across both readers, which is what says
 `decode_early` and the newer path are untouched -- the change reaches the
 `early_opcodes` branch of `decode`, and the 2012-03 generation is the only
 profile that sets it.
 
-#### What is LEFT on that title, and it is pre-existing
+(Manamon 1's row is **82,087 lines and 26,508 calls**, where the standings
+say 82,157 and 26,509. Both trees agree on 82,087, so the standings figure
+is stale -- it predates the decimal-return fix of the commit before this
+session, which that row was never re-derived against. A number and a claim
+about that number, for the umpteenth time.)
 
-630 errors, 600 of them one shape: **426 `tmpN = <global>;` statements with
-no declaration.** They are the borrowed-handle alias this file records --
-`tmp4 = drown;` before `drown[0].set_volume(0.0)`, where the index
-expression already reads the global and the alias is dead -- and
-`_borrowed_handle` does not see them because this generation emits the
-**unfused** `PSF 4 ; REFCPY` where 1.3 emits `RefCpyV`, which names its slot
-in an operand.
+### ...and the borrowed handle, in the form these builds emit
 
-`HANDLE_SLOT_OPS` already reads that unfused form for the handle-witness
-question, so there is a place for it. It is **426 statements identical
-before and after** these three fixes, so it is pre-existing and was merely
-invisible: every operand read `KEY_RETURN`, so nobody could read the output
-to notice. It is a change to the shared decompiler path and wants the
-five-title measurement every one of those gets.
+What the fix above made readable was **426 `tmpN = <global>;` statements
+with no declaration** -- 600 of that title's 630 conversion errors, and
+pre-existing: identical before and after, and invisible only because every
+operand read `KEY_RETURN`, so nobody could read the output to notice.
+
+They are the borrowed-handle alias this file records at length:
+
+```
+tmp4 = drown;
+drown[0].set_volume(0.0);        <- the index re-reads the global anyway
+```
+
+`_borrowed_handle` could not see them, for two reasons that are one reading.
+
+**The slot is named by the PREVIOUS instruction.** 1.3 fuses `PSF v ;
+REFCPY` into `RefCpyV`, which names its slot in an operand, and the branch
+that asks `_borrowed_handle` is keyed on that. These generations emit the
+pair, where the slot arrives as the popped destination, so the question was
+never put at all. Counted, the two forms are **mutually exclusive by
+generation**:
+
+| title | `RefCpyV` | `PSF ; REFCPY` |
+|---|---|---|
+| Aliens attack | 0 | 227 |
+| Perilous Hearts | 0 | 309 |
+| Palace Punch-up | 0 | 18 |
+| The Gate | 1,023 | 0 |
+| Psycho Strike | 605 | 0 |
+
+-- so this reaches the early titles and **cannot touch a newer one by
+construction** rather than by measurement.
+
+**And a destination `PSF` is not a READ.** `_read_slots` counted it as one,
+so the stronger of the two tests -- *"nothing in the body reads the slot,
+and a `FREE` releases it"* -- could never fire for these generations: the
+bind's own `PSF` was the read. That is the same reading `FREE` already gets
+in that function, whose docstring says it outright -- *"releasing a slot is
+not a use of its value"* -- and where the value GOES is not a use of it
+either.
+
+**Immediately** before, because with two the destination is the one pushed
+last and the earlier really is a source. `PSF a ; PSF b ; REFCPY` does not
+occur in the one title that has this shape -- 0 of 227 -- so nothing rests
+on it, and the rule is right either way.
+
+#### It is a correctness fix, not 1,139 lines of tidiness
+
+Perilous Hearts is where that shows, and it is the `find_walls` shape this
+file already records:
+
+```
+@local_21 = path;
+@local_23 = map;
+@local_25 = map[uint(path[path_step].x)];        <- indexes HERE
+if ((float(local_19) > path[path_step].y)
+    && (map[uint(...)][uint(...)].length() == 0)) {
+```
+
+The three aliases are dead -- the `if` reads `path` and `map` directly --
+and the third one **indexes before the `&&` that guards it**. An event sorts
+by its own bytecode position while a branch sorts by the end of the chain,
+so the borrow lands ahead of the whole condition. That is exactly what made
+*entering any map* throw `Index out of bounds` in Paladin, one title over.
+
+| title | lines | goto | unmodelled | calls | `tmpN =` | files differing |
+|---|---|---|---|---|---|---|
+| Aliens attack | 4,662 -> **4,413** | 0 | 0 | 1,659 | 426 -> **180** | 4 |
+| Perilous Hearts | 14,862 -> **13,723** | 0 | 0 | 3,314 -> 3,312 | 4 | 9 |
+| Palace Punch-up | 3,200 | 0 | 0 | 823 | 2 | **0** |
+| Psycho Strike, The Gate, cs server | unchanged | 0 | 0 | unchanged | -- | **0** |
+
+Palace Punch-up does not move although it has the shape, which is the two
+safety tests working: its 18 are slots the source really does name.
+
+**Perilous Hearts' two fewer calls are the casts inside that one dead
+statement**, counted twice -- `bgt apicheck` reads `uint(` as the call it
+syntactically is, which this file's own rule covers. Nothing else in its
+census moves but `for` +2 and `while` -2: two loops became `for` headers
+once the dead statements above their increments went, which is the same
+effect this file records for the fused form.
+
+#### What is left, and why it is a DECLARATION rather than a fold
+
+**180 `tmpN =` statements** on Aliens attack. For those the slot is read
+elsewhere in the body -- slots are reused -- so both tests correctly decline
+and the bind really is a variable there. The error is then not the fold but
+the missing declaration: `tmpN` is the name for a slot with no recorded
+name, so by construction nothing declares it, and `objVariableTypes` has the
+type that would.
+
+**And `bgt audit` cannot judge these titles at all** -- 0 of 0 bodies paired
+on Perilous Hearts, because it reads a module through the newer reader
+only. So the strongest instrument this project has for "was anything lost?"
+is blind to the whole 2010-2012 corpus, which is worth more than either item
+above.
 
 ### Palace Punch-up: `string@`, in the 2010 beta alone
 

@@ -239,3 +239,72 @@ class AHoistedLocalMustNotShadowAGlobal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DestinationPsfTests(unittest.TestCase):
+    """A destination `PSF` is not a READ of the slot.
+
+    1.3 fuses `PSF v ; REFCPY` into `RefCpyV`, whose own operand nothing
+    counts as a read; the 2010-2012 generations emit the pair, and counting
+    its `PSF` as a read meant the stronger half of `_borrowed_handle` --
+    *"nothing in the body reads the slot, and a `FREE` releases it"* -- could
+    never fire for them at all: the bind's own `PSF` was the read.
+
+    It is the same reading `FREE` already gets in that function, whose
+    docstring says it outright -- *"releasing a slot is not a use of its
+    value"* -- and where the value GOES is not a use of it either.
+    """
+
+    @staticmethod
+    def _ins(name, **kw):
+        """One instruction, with its bc_type taken from the ENGINE's own
+        table rather than written down -- `PSF` is `asBCTYPE_rW_ARG`, and a
+        test that hardcoded `W_ARG` would be asking about an instruction this
+        reader does not have."""
+        from nvgt.asreader import Instr, OPCODES
+        bc = next(b for _n, b, _s, _st in OPCODES.values()
+                  if _n == name) if any(
+            n == name for n, _b, _s, _st in OPCODES.values()) else "asBCTYPE_NO_ARG"
+        i = Instr.__new__(Instr)
+        i.name = name
+        for field in ("w_arg", "w_arg2", "dw_arg", "qw_arg", "pos", "op",
+                      "size"):
+            setattr(i, field, kw.get(field, 0))
+        i.bc_type = kw.get("bc_type", bc)
+        return i
+
+    def test_a_destination_psf_is_not_a_read(self):
+        body = [self._ins("PSF", w_arg=4), self._ins("REFCPY"),
+                self._ins("FREE", w_arg=4)]
+        self.assertNotIn(4, decompile._read_slots(body))
+
+    def test_a_psf_that_is_not_a_destination_still_reads(self):
+        body = [self._ins("PSF", w_arg=4), self._ins("CALLSYS")]
+        self.assertIn(4, decompile._read_slots(body))
+
+    def test_with_two_the_destination_is_the_one_pushed_last(self):
+        """The earlier is a SOURCE and really is read. `PSF a ; PSF b ;
+        REFCPY` does not occur in the one title with this shape -- 0 of 227 --
+        so nothing rests on it, and the rule is right either way."""
+        body = [self._ins("PSF", w_arg=3), self._ins("PSF", w_arg=4),
+                self._ins("REFCPY")]
+        reads = decompile._read_slots(body)
+        self.assertIn(3, reads)
+        self.assertNotIn(4, reads)
+
+    def test_one_instruction_on_its_own_is_unchanged(self):
+        """`_read_slots` is also called with a single instruction, where there
+        is no next one to look at -- that keeps the conservative answer."""
+        self.assertIn(4, decompile._read_slots([self._ins("PSF", w_arg=4)]))
+
+    def test_the_unfused_borrow_asks_the_same_question_as_the_fused_one(self):
+        """A test about the SOURCE, because the behaviour needs a module: the
+        fused branch asks `_borrowed_handle` and the unfused one went straight
+        to `_emit_assign`, which is the whole bug. Perilous Hearts indexed
+        `map[uint(path[path_step].x)]` BEFORE the `&&` that guards it, which
+        is the shape that made entering any map throw in Paladin."""
+        import inspect
+        source = inspect.getsource(decompile.FuncDecompiler._refcpy)
+        unfused = source.partition("else:  # REFCPY")[2]
+        self.assertTrue(unfused, "the unfused branch was not found")
+        self.assertIn("_borrowed_handle(", unfused)
