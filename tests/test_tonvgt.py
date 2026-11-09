@@ -734,3 +734,103 @@ class StringifiedNumberTests(unittest.TestCase):
         statements."""
         self.assertTrue(bgt_to_nvgt._wraps_whole('("" + freq)'))
         self.assertFalse(bgt_to_nvgt._wraps_whole("(a) + (b)"))
+
+
+class TypeRenameTests(unittest.TestCase):
+    """BGT's pathfinder callback is NVGT's LEGACY one, parameter for parameter.
+
+        BGT   int pathfinder_callback(int x, int y, int parent_x,
+                                      int parent_y, string data)
+        NVGT  int pathfinder_callback_legacy(int x, int y, int parent_x,
+                                            int parent_y, string user_data)
+        NVGT  int pathfinder_callback(int x, int y, int z,
+                                      any\n callback_data = null)
+
+    -- five parameters against four, and `string` against `any\n`. NVGT
+    registers `pathfinder::set_callback_function` once per callback type, so
+    the legacy overload is there to be used, and a recovered BGT project can
+    mean nothing else: BGT has no three-coordinate pathfinder at all. Read
+    out of both engines' own registrations rather than guessed between.
+
+    `RENAMES` cannot carry it: that table matches a name a `(` opens against,
+    and a type in a declaration has no paren.
+    """
+
+    SOURCE = ("pathfinder_callback\n cb;\n"
+              "\ncb = \npath_callback;\n"
+              "sherlock.set_callback_function(cb);\n"
+              "string s = " + chr(34) + "pathfinder_callback" + chr(34) + ";\n"
+              "// pathfinder_callback in a comment\n")
+
+    def setUp(self):
+        self.out, self.notes = bgt_to_nvgt.convert_text(
+            self.SOURCE, bgt_to_nvgt.RENAMES)
+
+    def test_a_declaration_is_renamed(self):
+        self.assertIn("pathfinder_callback_legacy\n cb;", self.out)
+
+    def test_a_string_literal_is_not(self):
+        """Spliced through the scrubbed text, so a spelling inside a literal
+        or a comment is left exactly as the game wrote it."""
+        self.assertIn(chr(34) + "pathfinder_callback" + chr(34), self.out)
+
+    def test_a_comment_is_not(self):
+        self.assertIn("// pathfinder_callback in a comment", self.out)
+
+    def test_it_says_what_it_did_and_why(self):
+        self.assertTrue(any("LEGACY" in n for n in self.notes))
+
+    def test_a_game_that_declares_its_OWN_is_left_alone(self):
+        """Renaming it would be renaming the game's code to suit the engine.
+        Nothing in the corpus does; the guard is here because the cost of
+        being wrong is a program that compiles and binds the wrong
+        callback."""
+        own = ("funcdef int pathfinder_callback(int a);\n"
+               "pathfinder_callback\n cb;\n")
+        out, notes = bgt_to_nvgt.convert_text(own, bgt_to_nvgt.RENAMES)
+        self.assertEqual(out, own)
+        self.assertEqual(notes, [])
+
+    def test_the_type_table_is_not_the_call_table(self):
+        """A name in `RENAMES` is matched only where a `(` follows it, so a
+        type cannot live there -- which is the whole reason this exists."""
+        for name in bgt_to_nvgt.TYPE_RENAMES:
+            self.assertNotIn(name, bgt_to_nvgt.RENAMES)
+
+
+class UnknownNamesCarryTheirReasonTests(unittest.TestCase):
+    """A name can be both UNKNOWN to NVGT and explained.
+
+    The two reports were separate lists: `semantic` holds names NVGT does
+    declare and means differently, so a name it declares NOWHERE fell through
+    to a bare line with a site and no reason. Perilous Hearts' two were
+    exactly that -- `open_sound_device` is a property there and returns
+    nothing where BGT's returns whether the device opened, and
+    `pathfinder::create_map` has no equivalent because nothing is missing.
+    A report that cannot be acted on is this file's own definition of noise.
+    """
+
+    @staticmethod
+    def _report(*unknown):
+        """The smallest report `summary` will render, with these names."""
+        return {"files": 1, "out": "out", "compat": None, "entry": None,
+                "renames": [], "unknown": list(unknown), "conflicts": [],
+                "semantic": [], "exact_shims": [], "compile": None}
+
+    def test_an_unknown_name_with_an_explanation_prints_it(self):
+        said = bgt_to_nvgt.summary(self._report(
+            {"name": "create_map", "file": "part_0.nvgt", "line": 2147}))
+        self.assertIn("create_map", said)
+        self.assertIn("no NVGT equivalent", said)
+
+    def test_an_unknown_name_without_one_still_prints_its_site(self):
+        said = bgt_to_nvgt.summary(self._report(
+            {"name": "some_private_thing", "file": "a.nvgt", "line": 7}))
+        self.assertIn("some_private_thing", said)
+        self.assertIn("a.nvgt:7", said)
+
+    def test_both_of_perilous_hearts_gaps_are_explained(self):
+        for name in ("open_sound_device", "create_map"):
+            self.assertIn(name, bgt_to_nvgt.SEMANTIC)
+            self.assertGreater(len(bgt_to_nvgt.SEMANTIC[name]), 80,
+                               "a one-line note is not an explanation")

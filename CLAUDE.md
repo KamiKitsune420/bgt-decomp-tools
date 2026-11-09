@@ -16705,9 +16705,9 @@ Measured on every title that can be measured here:
 | Manamon 1 | 806 | **1 error**, in 82,157 lines | `class sleep`, which NVGT has as a function |
 | Psycho Strike | 73 | **2 errors** | `elias`, and `class log` |
 | The Gate | 178 | **3 errors** | the same two |
-| Perilous Hearts | 19 | 12 errors | 2 engine gaps the converter names, and **10 the recovery's own** |
+| Perilous Hearts | 19 | 12 -> **10 errors** | 2 engine gaps, each with its reason, and **8 the recovery's own** |
 | Palace Punch-up | 10 | 595 -> **588 errors** | **the recovery's own**, below |
-| Aliens attack | 10 | 2 -> **2076 errors** | **the recovery's own**, below |
+| Aliens attack | 10 | 2 -> 2,076 -> **386 errors** | **the recovery's own**, below |
 | rage room | 48 | 212 errors | `library::call` returning `var@`, in a title that is a BASS wrapper |
 
 **Four titles compile cleanly and three more are within three errors**, and
@@ -17242,6 +17242,52 @@ and the bind really is a variable there. The error is then not the fold but
 the missing declaration: `tmpN` is the name for a slot with no recorded
 name, so by construction nothing declares it, and `objVariableTypes` has the
 type that would.
+
+### BGT's pathfinder callback is NVGT's LEGACY one
+
+Read out of both engines' own registrations rather than guessed between:
+
+```
+BGT   int pathfinder_callback(int x, int y, int parent_x, int parent_y,
+                              string data)
+NVGT  int pathfinder_callback_legacy(int x, int y, int parent_x, int parent_y,
+                                     string user_data)
+NVGT  int pathfinder_callback(int x, int y, int z, any@ callback_data = null)
+```
+
+-- five parameters against four, and a `string` against an `any@`. So a
+recovered BGT project assigning its own callback to NVGT's same-named funcdef
+gets *"Can't implicitly convert from '<function>@const' to
+'pathfinder_callback@'"*, and both titles that use the pathfinder write the
+legacy shape: Perilous Hearts' `int path_callback(int, int, int, int, string)`
+and Manamon 1's `int tile_callback(int, int, int, int, string)`.
+
+**NVGT registers `pathfinder::set_callback_function` once per callback type**,
+so the legacy overload is there to be used, and a recovered BGT project can
+mean nothing else -- BGT has no three-coordinate pathfinder at all.
+
+`RENAMES` cannot carry it, which is why `TYPE_RENAMES` exists: that table
+matches a name a `(` opens against, and a type in a declaration has no paren.
+Three things keep it honest -- the substitution is spliced through the
+scrubbed text, so a spelling inside a string literal or a comment is left as
+the game wrote it; a game that declares its **own** funcdef of that name is
+skipped, because renaming that would be renaming the game's code to suit the
+engine; and the note says which rename it made and why.
+
+### An unknown name can still carry its reason
+
+`semantic` holds names NVGT declares and means differently, and `unknown`
+holds names it declares nowhere -- two lists, so a name in both printed as a
+bare line with a site and no reason. Perilous Hearts' two gaps were exactly
+that, and both are worth a sentence:
+
+| | |
+|---|---|
+| `open_sound_device` | NVGT spells it as a PROPERTY, `void set_sound_output_device(int)`, which returns nothing where BGT's `bool open_sound_device(int)` returns whether the device opened. So the call is `sound_output_device = n;` and **the success test has no equivalent** -- `if (!open_sound_device(0))` is a guard that cannot be written |
+| `pathfinder::create_map` | has **no NVGT equivalent at all, and nothing is missing**: NVGT's pathfinder is driven entirely by the callback and takes its extent from the `find` call's own coordinates and from `search_range`, so there is no map to make beforehand |
+
+A report that cannot be acted on is this file's own definition of noise, and
+a site with no reason is one.
 
 ### A funcdef-typed slot's type comes from the CALL, not from a count
 
@@ -18060,15 +18106,14 @@ wants the five-title measurement.
 in both engines -- 281 of its 588 conversion errors, and the 2010 beta is
 the only title with any. Not run down.
 
-**Perilous Hearts is 11 and 9 are the RECOVERY's.** Two are engine gaps the
-converter names with their sites -- `open_sound_device` and
-`pathfinder::create_map`, neither of which NVGT registers. **One is fixed**:
-see **A funcdef-typed slot's type comes from the CALL** below. The other nine
-are the 2011 generation's own: a bare function assigned to a funcdef handle
-without the wrapper NVGT wants; a handle compared with the literal `0` where
-this file's own rule says a zero meeting a reference type is `null`, twice; a
-`const int` assigned to a `surface[]@`; and two bodies that do not return on
-every path.
+**Perilous Hearts is 10 and 8 are the RECOVERY's.** Two are engine gaps, and
+the converter now explains both rather than listing them -- see **An unknown
+name can still carry its reason**. Two are fixed: the funcdef slot's type
+(below) and the callback's own name (**BGT's pathfinder callback is NVGT's
+LEGACY one**). The other eight are the 2011 generation's own: a handle
+compared with the literal `0` where this file's own rule says a zero meeting
+a reference type is `null`, twice; a `const int` assigned to a `surface[]@`;
+and three bodies that do not return on every path.
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified

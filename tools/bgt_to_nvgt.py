@@ -56,6 +56,34 @@ RENAMES: Dict[str, str] = {
     "load_from_memory": "load_memory",
 }
 
+#: TYPE names the two engines spell differently. `RENAMES` cannot carry one:
+#: it matches a name a `(` opens against, and a type in a declaration has no
+#: paren at all.
+#:
+#: **BGT's pathfinder callback is NVGT's LEGACY one**, parameter for
+#: parameter, and NVGT's own `pathfinder_callback` is a different shape:
+#:
+#:     BGT   int pathfinder_callback(int x, int y, int parent_x,
+#:                                   int parent_y, string data)
+#:     NVGT  int pathfinder_callback_legacy(int x, int y, int parent_x,
+#:                                          int parent_y, string user_data)
+#:     NVGT  int pathfinder_callback(int x, int y, int z,
+#:                                   any@ callback_data = null)
+#:
+#: -- five parameters against four, and `string` against `any@`. NVGT
+#: registers `pathfinder::set_callback_function` once per callback type, so
+#: the legacy overload is there to be used and a recovered BGT project can
+#: mean nothing else: BGT has no three-coordinate pathfinder at all. Read out
+#: of both engines' own registrations rather than guessed between.
+#:
+#: Without it Perilous Hearts gets *"Can't implicitly convert from
+#: '<function>@const' to 'pathfinder_callback@'"*, because its own
+#: `int path_callback(int, int, int, int, string)` is the legacy shape and
+#: NVGT's same-named funcdef is not.
+TYPE_RENAMES: Dict[str, str] = {
+    "pathfinder_callback": "pathfinder_callback_legacy",
+}
+
 #: BGT names `bgt_compat.nvgt` supplies, so a call to one of these is fine
 #: even though NVGT's engine has no such registration. Derived from that file
 #: at run time rather than listed here -- see `compat_names`.
@@ -136,6 +164,21 @@ PROPERTY_RENAMES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
 #: this repository treats as the worst outcome available. Each one was read
 #: off NVGT's registration beside BGT's.
 SEMANTIC: Dict[str, str] = {
+    "open_sound_device":
+        ("NVGT has no such function: it spells the same thing as a PROPERTY, "
+         "`void set_sound_output_device(int)`, which returns nothing where "
+         "BGT's `bool open_sound_device(int)` returns whether the device "
+         "opened. So `sound_output_device = n;` is the call and the success "
+         "test has no equivalent -- `if (!open_sound_device(0))` is a guard "
+         "that cannot be written, and what to do when the device will not "
+         "open is yours to decide."),
+    "create_map":
+        ("`pathfinder::create_map(width, height)` has no NVGT equivalent at "
+         "all, and nothing is missing: NVGT's pathfinder is driven entirely "
+         "by the callback and takes its extent from the `find` call's own "
+         "coordinates and from `search_range`, so there is no map to make "
+         "beforehand. The call can go; the surrounding code is what wants "
+         "reading, because BGT's returns a `bool` the script may be testing."),
     "get_file":
         ("`pack_file::get_file` returns a `file@` in BGT and a `datastream@` "
         "in NVGT, so a local that holds either a real file or a pack entry "
@@ -223,6 +266,7 @@ SEMANTIC: Dict[str, str] = {
 #: with no receiver at all.
 SEMANTIC_TYPES: Dict[str, Tuple[str, ...]] = {
     "get_file": ("pack_file",),
+    "create_map": ("pathfinder",),
     "request": ("network",),
     "call": ("library",),
 }
@@ -1229,6 +1273,33 @@ def convert_text(text: str, renames: Dict[str, str]) -> Tuple[str, List[str]]:
         if count:
             notes.append("%s -> %s (%d call%s)"
                          % (old, new, count, "" if count == 1 else "s"))
+    #: ...and the TYPE names, which have no paren to match against. Spliced
+    #: through the scrubbed text so a spelling inside a string literal or a
+    #: comment is left exactly as the game wrote it.
+    for old, new in TYPE_RENAMES.items():
+        #: A game that declares its OWN funcdef of that name means its own,
+        #: and renaming it would be renaming the game's code to suit the
+        #: engine. Nothing in the corpus does; the guard is here because the
+        #: cost of being wrong is a program that compiles and binds the
+        #: wrong callback.
+        if re.search(r"(?<!\w)funcdef\b[^;\n]*(?<!\w)" + re.escape(old)
+                     + r"\s*\(", text):
+            continue
+        scrubbed = _scrub(text)
+        pattern = re.compile(r"(?<![\w.])" + re.escape(old) + r"(?!\w)")
+        pieces: List[str] = []
+        last = 0
+        for match in pattern.finditer(scrubbed):
+            pieces.append(text[last:match.start()])
+            pieces.append(new)
+            last = match.end()
+        if pieces:
+            pieces.append(text[last:])
+            text = "".join(pieces)
+            notes.append("%s -> %s (%d use%s): BGT's callback is NVGT's "
+                         "LEGACY one, parameter for parameter"
+                         % (old, new, len(pieces) // 2,
+                            "" if len(pieces) // 2 == 1 else "s"))
     return text, notes
 
 
@@ -1736,6 +1807,19 @@ def summary(report: Dict[str, Any]) -> str:
         for row in unknown[:10]:
             out.append("      %-28s %s:%d" % (row["name"], row["file"],
                                               row["line"]))
+            #: **A name can be both unknown AND explained**, and the two
+            #: reports were separate lists: `semantic` holds names NVGT does
+            #: declare and means differently, so a name it declares NOWHERE
+            #: fell through to a bare line with a site and no reason.
+            #: Perilous Hearts' two were exactly that -- `open_sound_device`
+            #: is a PROPERTY there and returns nothing where BGT's returns
+            #: whether the device opened, and `pathfinder::create_map` has no
+            #: equivalent because nothing is missing. Both are worth a
+            #: sentence, and a report that cannot be acted on is this file's
+            #: own definition of noise.
+            if row["name"] in SEMANTIC:
+                for chunk in _wrap(SEMANTIC[row["name"]], 62):
+                    out.append("          %s" % chunk)
         if len(unknown) > 10:
             out.append("      ...and %d more" % (len(unknown) - 10))
     done = report.get("compile")
