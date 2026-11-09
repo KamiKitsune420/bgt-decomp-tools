@@ -17343,7 +17343,141 @@ becomes `pathfinder_callback@ local_16;` -- and Perilous Hearts converts at
 byte-identical, the newer ones because they declare several funcdefs and the
 guess never fired for them at all.
 
-#### `bgt audit` is blind to the whole early corpus, and now SAYS so
+#### `bgt audit` reads the whole early corpus now
+
+**Four tools were refusing five titles for one missing operand rule.**
+`as_opcodes.disassemble` read every operand as a varint, which is the newer
+storage; in the 2010-2012 generation a word is two raw bytes big-endian, a
+quadword eight, and only a dword is encoded -- out of `ReadByteCode`'s own
+switch, which `as_early.BC_READS` has carried all along for the reader that
+builds a recovery. Nothing else was wrong: one rule, four tools
+(`bgt audit`, `bgt disasm`, `bgt lift`, and anything else built on
+`as_disasm`).
+
+**And the position is a DWORD offset there**, not a byte one, because that
+is the unit this generation counts a jump offset in -- measured earlier this
+session at 100% against 0% for the other reading, over 9,808 jumps in five
+titles. So an early jump is resolved through the dword offset rather than by
+counting instructions, with the operand taken as the **signed** dword it is:
+without that every loop's back edge resolves to nothing and only the forward
+jumps land.
+
+The acceptance test is the format's own, and it is unanimous:
+
+| | |
+|---|---|
+| bodies ending **exactly** on their own span | **505 of 505** across two titles, 0 short, 0 long |
+| Perilous Hearts, operands resolved | **27,676 of 27,676 -- 100.0%** |
+| Palace Punch-up, operands resolved | 3,610 of 4,302 -- 83.9%, for the beta reasons this file already records: its `ADDSi` names a byte offset rather than an index, and it has no `usedObjectProps` table to resolve against |
+| The Gate, the control | 1,889 of 1,889 bodies, **100.0%** -- unchanged |
+
+**And the declared length is in DWORDS here**, which is this file's own units
+trap arriving from the other side: the header read
+`292 decoded / 428 declared  <-- MISMATCH` on a body that had decoded
+perfectly, because 292 instructions really are 428 dwords. The decoded figure
+is given in whatever unit the module declared and the unit is named.
+
+##### The payoff, and the defect it found on its first run
+
+| title | calls | literals | constants |
+|---|---|---|---|
+| Palace Punch-up | **0** | **0** | **0** |
+| Perilous Hearts | **0** | 3 bodies, 14 | **0** |
+| Aliens attack | 25 -> **0** | 4 | **0** |
+| The Gate | 143 / 157 | 2 / 4 | 5 / 5 -- unchanged |
+| Psycho Strike | 41 / 41 | 1 / 1 | 2 / 2 -- unchanged |
+
+**Palace Punch-up audits completely clean** on all three comparisons, which
+is a title that has never been audited at all; Perilous Hearts and Aliens
+attack are clean on calls and constants.
+
+And the 14 literals are a real defect, found the moment the instrument could
+look. `player::look_for_character` is declared `string` and the bytecode
+holds `"Dragon"`, `"Insect"`, `"Lion"`, `"boar"`, `"chimpanzee"`, `"cow"`,
+`"goat"`, `"leopard"`, `"monkey"`, `"sheep"`, `"snake"` -- the creature
+names it answers with. The recovery renders every arm as a bare `break;` and
+**the function returns nothing at all**:
+
+```
+string look_for_character(int arg0, int arg1, uint[]@ arg2)
+{
+    ...
+        if (chars[local_4].type == 12) {
+            break;                      <- `return "Dragon";`
+        }
+    ...
+}
+```
+
+That also explains three of that title's conversion errors, which NVGT
+reports as *"Not all paths return a value"* -- a count the converter had and
+could not account for.
+
+#### ...and `ALLOC`'s second operand is not always a callee
+
+Which the same run turned up, because it was the other reason the audit
+could not be believed. `TranslateFunction` reads the type first, and **the
+builds disagree about what happens next**: BGT 1.3 looks the callee up
+whenever the operand is non-zero, and the 2010-2012 and 2012-03 builds skip
+the lookup entirely unless the type is a SCRIPT object -- so for a
+registered type those leave the field holding whatever the compiler put
+there.
+
+Both readings are in the corpus, so this is settled **per site by the
+OWNER** rather than per build by a table, which is the evidence that settled
+the one-based rule itself -- there the owner matched the allocated type in
+15,619 of 15,619 sites once the minus one was applied, and in 322 without
+it:
+
+| | what the one-based rule names for a registered type |
+|---|---|
+| The Gate | `string::_beh_0_` -- **1,592 of 1,592** |
+| Perilous Hearts | `sound_pool::sound_is_active` x633, `sound::get_playing` x2 |
+
+A function whose owner is the type being allocated is that type's
+constructor; one that belongs to something else is not a constructor at all.
+Naming it is the worst thing a resolver can do, and this one made
+`bgt audit` report a real method as **LOST from 104 bodies**, across the
+whole of BGT's own `sound_pool`. A script class keeps the reading measured
+at 15,619 of 15,619, and an operand that cannot be read is given the benefit
+of the doubt.
+
+**This file recorded the same artifact on Screaming Strike and recorded it
+as open** on the grounds that *"the one-based rule lives in `as_disasm`,
+which is not told which build it is reading"*. It does not need to be told:
+it is told which TYPE is being allocated, and the module says whether it
+declares that type.
+
+#### What `bgt lift` still cannot do with them
+
+It steps them now -- `sound_pool::sound_is_active` lifts to 119
+instructions with **0 stack residue** -- and three gaps this file already
+names are why it is not claimed as working: the token numbering is four
+below the IR's where `as_disasm` applies 1.3's two, so every `void` reads as
+`tt63`; the per-method `_beh_4_` AddRef has no handling and shows as a call;
+and `RDS4`/`RDS8` pass through, which `bgt_asir` renames to `RDSPtr` on its
+own path and `as_lift` does not. All three are naming rather than stepping,
+which is why the audits are sound while the lift is still rough.
+
+#### The refusal it replaces, and what that cost
+
+This path declined these modules for one commit, and the message was right
+for as long as the bodies could not be stepped. Two things from it are worth
+keeping.
+
+**Reading the records is not enough.** Falling back to `as_early` for the
+summary alone is four lines and it makes things worse: Palace Punch-up's
+`sound_is_active` decoded as 20 instructions of 91 declared with operands
+like -18375530906935973120, and the audit reported **76 lost constants on
+that title and 141 on Perilous Hearts** -- noise shaped exactly like a real
+finding. An instrument that answers anyway is worse than one that declines.
+
+**And a refusal must be an ORDINARY exception.** Raised as `SystemExit` it
+derives from `BaseException` and walked straight through the
+`except Exception` in `bgt_project._origins` -- the catch that exists so a
+recovery carries on when the library attribution cannot read a module -- so
+`bgt recover` died on every one of the five early titles. A passing suite
+did not notice: nothing in it recovers one of those games.
 
 The strongest instrument this project has for *"did the recovery lose
 anything?"* could not judge a single one of the five 2010-2012 titles. Asked
@@ -18090,6 +18224,19 @@ slot); and a `&&`/`||` whose result is *stored* in a bool and used later (the
 merge folds `(A op B)` into the stored slot at its `CpyVtoV4`, so an `if`, a
 ternary or an expression reading it later sees the whole value -- guarded to a
 bool destination so a uint ternary still goes to the value-merge).
+
+**The early corpus is AUDITABLE now**, which was the enabler: one missing
+operand rule in `as_opcodes.disassemble` was why `bgt audit`, `bgt disasm`
+and `bgt lift` each refused five titles. Palace Punch-up audits completely
+clean, Perilous Hearts and Aliens attack are clean on calls and constants,
+and the instrument found a real defect on its first run -- see
+**`bgt audit` reads the whole early corpus now**.
+
+**`player::look_for_character` returns nothing at all.** Declared `string`,
+and every arm that should answer a creature's name is a bare `break;` -- 12
+literals lost in Perilous Hearts, and three of that title's conversion
+errors are NVGT saying so as *"Not all paths return a value"*. Found by the
+audit above; not yet diagnosed.
 
 **Aliens attack's recovery is FIXED** -- every global in that title read as
 `KEY_RETURN`, because a pointer operand is named `DW_ARG` by a 32-bit build

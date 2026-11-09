@@ -276,31 +276,73 @@ def global_index_is_plain(str_count: int, pga_count: int):
     return str_count > 0
 
 def disassemble(bc: bytes, table: Dict[int, Dict[str, Any]], start: int = 0,
-                limit: Optional[int] = None) -> List[Tuple[int, int, str, List[int]]]:
-    """Decode a bytecode run. Every operand is one varint regardless of declared width."""
+                limit: Optional[int] = None, early: bool = False
+                ) -> List[Tuple[int, int, str, List[int]]]:
+    """Decode a bytecode run, as `(position, opcode, name, operands)`.
+
+    `early` reads the **2010-2012 storage**, which is why this could not step
+    those bodies at all and why five titles were refused by everything built
+    on it. There an operand is not a varint: a word is two raw bytes
+    big-endian, a quadword eight, and only a dword is encoded -- read out of
+    `ReadByteCode`'s own switch and carried in `as_early.BC_READS`, where an
+    integer is a count of raw bytes and `None` is an encoded integer.
+
+    **And the position it reports is then a DWORD offset**, not a byte one,
+    because that is the unit this generation counts a jump offset and a live
+    range in. The newer form is unchanged and still reports the byte offset
+    it always did: nothing reads it but a display and one error message, and
+    the caller resolves a jump through the instruction INDEX there.
+    """
     try:
         from .as_module import read_encoded_uint
     except ImportError:
         from as_module import read_encoded_uint
+    reads: Dict[int, Tuple[Optional[int], ...]] = {}
+    plain = None
+    if early:
+        try:
+            from . import as_early
+        except ImportError:
+            import as_early
+        reads, plain = as_early.BC_READS, as_early.read_plain_uint
     out = []
     p = start
+    pos = 0
     n = len(bc) if limit is None else min(len(bc), start + limit)
     while p < n:
         op = bc[p]
         info = table.get(op)
         if info is None:
-            out.append((p, op, "UNKNOWN_%02X" % op, []))
+            out.append((pos if early else p, op, "UNKNOWN_%02X" % op, []))
             break
         q = p + 1
         args = []
         try:
-            for _ in range(info["operands"]):
-                v, q = read_encoded_uint(bc, q)
-                args.append(v)
+            if early:
+                widths = reads.get(info["type"])
+                if widths is None or len(widths) != info["operands"]:
+                    #: A type whose stored form is not known, or one whose
+                    #: own table disagrees with it -- refused rather than
+                    #: guessed at, because a wrong width desynchronises
+                    #: every instruction after it.
+                    out.append((pos, op, "UNREADABLE_%s" % info["name"], []))
+                    break
+                for width in widths:
+                    if width is None:
+                        v, q = plain(bc, q)
+                    else:
+                        v = int.from_bytes(bc[q:q + width], "big")
+                        q += width
+                    args.append(v)
+            else:
+                for _ in range(info["operands"]):
+                    v, q = read_encoded_uint(bc, q)
+                    args.append(v)
         except IndexError:
             break
-        out.append((p, op, info["name"], args))
+        out.append((pos if early else p, op, info["name"], args))
         p = q
+        pos += info["dwords"]
         if info["name"] == "RET":
             break
     return out

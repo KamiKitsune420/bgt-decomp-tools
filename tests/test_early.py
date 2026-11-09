@@ -895,8 +895,13 @@ def _disasm():
     return importlib.import_module("as_disasm")
 
 
-def test_an_early_module_is_declined_with_its_release_named(monkeypatch,
-                                                            tmp_path):
+def test_an_early_module_is_READ_rather_than_declined(monkeypatch, tmp_path):
+    """This used to raise, and the message was right for as long as the
+    bodies could not be stepped. They can: `disassemble` reads the
+    2010-2012 storage now, and 505 bodies across two titles land exactly on
+    their own span under it. So the fallback is taken and the module is
+    marked `early`, which is what tells every operand reading downstream
+    which generation it is looking at."""
     as_disasm = _disasm()
     module = tmp_path / "m.bin"
     module.write_bytes(b"\x00" * 8)
@@ -904,12 +909,12 @@ def test_an_early_module_is_declined_with_its_release_named(monkeypatch,
                         lambda *a, **k: {"tail": None, "dialect": "tagged",
                                          "blocks": [], "parse_errors": []})
     monkeypatch.setattr(as_disasm.as_early, "summarize",
-                        lambda *a, **k: {"eof": True, "release": "2011-11"})
-    with pytest.raises(as_disasm.UnsupportedModule) as caught:
-        as_disasm.Module(str(module), {})
-    said = str(caught.value)
-    assert "2011-11" in said
-    assert "bgt early" in said, "the message must name the reader that CAN"
+                        lambda *a, **k: {"eof": True, "release": "2011-11",
+                                         "early": True, "dialect": "tagged",
+                                         "blocks": [], "tail": {}})
+    mod = as_disasm.Module(str(module), {})
+    assert mod.early is True
+    assert mod.info["release"] == "2011-11"
 
 
 def test_a_module_the_newer_reader_handles_is_untouched(monkeypatch, tmp_path):
@@ -1091,3 +1096,222 @@ def test_a_callee_with_more_than_one_parameter_is_declined():
     m.funcdefs = [type("F", (), {"name": "menu_callback"})()]
     m.saved_functions = [body]
     assert B.retype_funcdef_slots(m) == 0
+
+
+# ---------------------------------------------------------------------------
+# Stepping a 2010-2012 body: the storage, the positions and the jumps
+# ---------------------------------------------------------------------------
+#
+# An operand is not a varint there: a word is two raw bytes big-endian, a
+# quadword eight, and only a dword is encoded -- out of `ReadByteCode`'s own
+# switch, carried in `BC_READS`. That one difference is why
+# `as_opcodes.disassemble` could not step these bodies at all, and why `bgt
+# audit`, `bgt disasm` and `bgt lift` each refused five titles.
+#
+# The bytes below are written out by hand from the rule rather than produced
+# by an encoder, because an encoder written as this decoder's inverse would
+# agree with a wrong decoder.
+
+#: A synthetic table, so the test does not need a game. The types are the
+#: real ones: 4 is `asBCTYPE_DW_ARG`, whose operand is ENCODED; 3 is
+#: `asBCTYPE_wW_ARG` and 2 is `asBCTYPE_W_ARG`, whose operands are two RAW
+#: bytes big-endian.
+_OP_JMP, _OP_PSF, _OP_RET = 10, 20, 30
+_EARLY_TABLE = {
+    _OP_JMP: {"name": "JMP", "type": 4, "operands": 1, "dwords": 2},
+    _OP_PSF: {"name": "PSF", "type": 3, "operands": 1, "dwords": 1},
+    _OP_RET: {"name": "RET", "type": 2, "operands": 1, "dwords": 1},
+}
+
+
+def test_a_word_operand_is_two_raw_bytes_big_endian():
+    import as_opcodes
+    bc = bytes([_OP_PSF, 0x01, 0x02, _OP_RET, 0, 0])
+    raw = as_opcodes.disassemble(bc, _EARLY_TABLE, early=True)
+    assert [n for _p, _o, n, _a in raw] == ["PSF", "RET"]
+    assert raw[0][3] == [0x0102], "two raw bytes, big-endian -- not a varint"
+
+
+def test_a_dword_operand_is_an_encoded_integer():
+    import as_opcodes
+    #: 0x80 0x80 is the two-byte form: (0x80 & 0x3F) << 8 | 0x80 == 128
+    bc = bytes([_OP_JMP, 0x80, 0x80, _OP_RET, 0, 0])
+    raw = as_opcodes.disassemble(bc, _EARLY_TABLE, early=True)
+    assert raw[0][3] == [128]
+
+
+def test_the_position_is_a_DWORD_offset():
+    """Which is the unit this generation counts a jump offset and a live
+    range in -- the newer form reports the byte offset it always did."""
+    import as_opcodes
+    bc = (bytes([_OP_JMP, 0]) + bytes([_OP_PSF, 0, 7])
+          + bytes([_OP_RET, 0, 0]))
+    raw = as_opcodes.disassemble(bc, _EARLY_TABLE, early=True)
+    #: JMP is two dwords, PSF one, so the offsets are 0, 2, 3
+    assert [p for p, _o, _n, _a in raw] == [0, 2, 3]
+
+
+def test_the_newer_reading_is_untouched():
+    """Every operand one varint, and the position a BYTE offset."""
+    import as_opcodes
+    bc = bytes([_OP_PSF, 0x05, _OP_RET, 0x00])
+    raw = as_opcodes.disassemble(bc, _EARLY_TABLE)
+    assert raw[0][3] == [5]
+    assert [p for p, _o, _n, _a in raw] == [0, 2]
+
+
+def test_a_type_whose_stored_form_is_unknown_is_refused():
+    """A wrong width desynchronises every instruction after it, so the walk
+    stops and says so rather than guessing."""
+    import as_opcodes
+    table = {_OP_PSF: {"name": "ODD", "type": 99, "operands": 1, "dwords": 1}}
+    raw = as_opcodes.disassemble(bytes([_OP_PSF, 0, 0]), table, early=True)
+    assert raw[0][2] == "UNREADABLE_ODD"
+
+
+def test_an_early_jump_resolves_through_its_DWORD_delta(tmp_path,
+                                                        monkeypatch):
+    """Forward and backward, because the operand arrives unsigned and
+    without the sign a loop's back edge resolves to nothing."""
+    import as_disasm
+    import as_opcodes
+
+    #: PSF@0, JMP@1 (+1 -> dword 4), PSF@3, RET@4
+    body = (bytes([_OP_PSF, 0, 1]) + bytes([_OP_JMP, 1])
+            + bytes([_OP_PSF, 0, 2]) + bytes([_OP_RET, 0, 0]))
+    raw = as_opcodes.disassemble(body, _EARLY_TABLE, early=True)
+    assert [p for p, _o, _n, _a in raw] == [0, 1, 3, 4]
+    #: JMP sits at dword 1 and is two dwords long, so +1 lands on dword 4,
+    #: which is the RET at index 3
+    assert as_disasm._s32(1) + 1 + 2 == 4
+
+    #: ...and a backward delta is the signed dword it is
+    assert as_disasm._s32(0xFFFFFFFB) == -5
+
+
+def test_the_declared_length_is_in_dwords_for_an_early_body():
+    """`292 decoded / 428 declared  <-- MISMATCH` on a body that decoded
+    perfectly: 292 instructions really are 428 dwords. So the decoded
+    figure is given in whatever unit the module declared, and the unit is
+    named."""
+    import as_disasm
+    import as_opcodes
+
+    class _Mod:
+        early = True
+        opcodes = _EARLY_TABLE
+        data = (bytes([_OP_JMP, 0]) + bytes([_OP_PSF, 0, 7])
+                + bytes([_OP_RET, 0, 0]))
+        non_value_types = ()
+
+        def resolve(self, _role, _value):
+            return None
+
+        def alloc_ctor_translated(self, _args):
+            return True
+
+    f = {"body": (0, len(_Mod.data)), "name": "f", "instructions": 4}
+    dis = as_disasm.disassemble_function(_Mod(), f)
+    assert dis["length_unit"] == "dword"
+    #: 2 + 1 + 1
+    assert dis["decoded_instructions"] == 4
+    assert dis["declared_instructions"] == 4
+
+
+# ---------------------------------------------------------------------------
+# `ALLOC`'s second operand is not always a constructor index
+# ---------------------------------------------------------------------------
+#
+# `TranslateFunction` reads the type first, and the builds disagree about
+# what happens next: BGT 1.3 looks the callee up whenever the operand is
+# non-zero, while the 2010-2012 and 2012-03 builds skip the lookup entirely
+# unless the type is a SCRIPT object -- so for a registered type those leave
+# the field holding whatever the compiler put there.
+#
+# Both readings are in the corpus, so it is settled per site by the OWNER,
+# which is the evidence that settled the one-based rule itself:
+#
+#     The Gate          string -> string::_beh_0_            1,592 of 1,592
+#     Perilous Hearts   string -> sound_pool::sound_is_active      x633
+#
+# Naming the second is the worst thing a resolver can do: it made `bgt audit`
+# report a real method as LOST from 104 bodies, across the whole of BGT's own
+# `sound_pool`.
+
+
+class _AllocModule:
+    """Just enough of a module to ask the question of."""
+
+    script_classes = frozenset({"creature"})
+    script_classes_qualified = frozenset({"creature"})
+
+    def __init__(self, types, ctors):
+        self.used_types = types
+        self._ctors = ctors
+
+    def resolve(self, role, value):
+        #: Keyed by the RAW operand, because the real `resolve` applies the
+        #: one-based rule itself -- a fake that applied it again would be
+        #: asking a different question than the code does.
+        if role == "objtype":
+            return self.used_types[value] if value < len(self.used_types) else None
+        if role == "ctorfunc":
+            return self._ctors.get(value)
+        return None
+
+    alloc_ctor_translated = None       # bound below from the real one
+
+
+def _alloc_module(types, ctors):
+    import as_disasm
+    m = _AllocModule(types, ctors)
+    m.alloc_ctor_translated = (
+        lambda args: as_disasm.Module.alloc_ctor_translated(m, args))
+    return m
+
+
+def _patch_type_name(monkeypatch):
+    """`_type_info_name` renders a real TypeInfo; here a type IS its name."""
+    import as_disasm
+    monkeypatch.setattr(as_disasm, "_type_info_name", lambda ti: ti)
+    monkeypatch.setattr(as_disasm, "_at",
+                        lambda seq, i: seq[i] if 0 <= i < len(seq) else None)
+
+
+def test_a_registered_type_whose_ctor_belongs_to_IT_is_translated(monkeypatch):
+    """The Gate's 1,592, every one `string::_beh_0_`."""
+    _patch_type_name(monkeypatch)
+    m = _alloc_module(["string"], {29: "string::_beh_0_"})
+    assert m.alloc_ctor_translated([0, 29]) is True
+
+
+def test_a_registered_type_whose_ctor_belongs_to_SOMETHING_ELSE_is_not(
+        monkeypatch):
+    """Perilous Hearts' 633, every one a method of the game's sound pool."""
+    _patch_type_name(monkeypatch)
+    m = _alloc_module(["string"], {33: "sound_pool::sound_is_active"})
+    assert m.alloc_ctor_translated([0, 33]) is False
+
+
+def test_a_script_class_keeps_the_reading_it_has_always_had(monkeypatch):
+    """Measured at 15,619 of 15,619 under the one-based rule, so the owner
+    test is not applied there -- a script class's constructor is its own by
+    construction and the corpus says so."""
+    _patch_type_name(monkeypatch)
+    m = _alloc_module(["creature"], {5: "somewhere::else"})
+    assert m.alloc_ctor_translated([0, 5]) is True
+
+
+def test_a_zero_operand_means_no_script_constructor(monkeypatch):
+    _patch_type_name(monkeypatch)
+    m = _alloc_module(["string"], {})
+    assert m.alloc_ctor_translated([0, 0]) is True
+
+
+def test_an_unreadable_type_is_given_the_benefit_of_the_doubt(monkeypatch):
+    """A module whose `usedTypes` cannot be indexed has bigger problems than
+    one operand, and this is the reading the path has always taken."""
+    _patch_type_name(monkeypatch)
+    m = _alloc_module([], {2: "whatever::thing"})
+    assert m.alloc_ctor_translated([7, 2]) is True
+    assert m.alloc_ctor_translated([]) is True

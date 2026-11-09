@@ -60,7 +60,7 @@ import decimal
 import json
 import struct
 import sys
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 try:                      # installed as a package
     from . import as_early, as_module, as_opcodes
@@ -205,6 +205,16 @@ def signature(f: Dict[str, Any]) -> str:
     return "%s %s(%s)" % (type_name(f.get("returns")), function_label(f), params)
 
 
+def _s32(value: int) -> int:
+    """A jump offset as the SIGNED dword it is.
+
+    A backward branch is a negative delta, and the operand arrives as the
+    unsigned integer the stream stored -- so without this every loop's back
+    edge resolves to nothing and only the forward jumps land.
+    """
+    return value - 0x100000000 if value >= 0x80000000 else value
+
+
 class UnsupportedModule(Exception):
     """This path cannot read this module's generation, and says which.
 
@@ -236,6 +246,9 @@ class Module:
         self.blocks = self.info["blocks"] or []
         self.tail = self.info["tail"] or {}
         self.parse_errors = self.info.get("parse_errors") or []
+        #: Which generation's bytecode storage this module uses, which
+        #: decides how an operand is read and what a jump offset counts.
+        self.early = bool(self.info.get("early"))
 
         self.used_functions = self.tail.get("used_functions", [])
         self.used_strings = self.tail.get("used_string_constants", [])
@@ -308,13 +321,7 @@ class Module:
             data = fh.read()
         early = as_early.summarize(data, opcodes)
         if early is not None and early.get("eof"):
-            raise UnsupportedModule(
-                "this module is the %s BGT format, which this path cannot "
-                "decode: its bodies store their operands as raw words and "
-                "quadwords rather than as encoded integers, so the "
-                "instruction stream cannot be stepped here. `bgt early` "
-                "reads it, and `bgt recover` goes through its own decoder."
-                % (early.get("release") or "2010-2012"))
+            return early
         if info is not None:
             return info
         raise UnsupportedModule(
@@ -484,6 +491,52 @@ class Module:
             ti = _at(self.used_types, value)
             return _type_info_name(ti) if ti is not None else None
         return None
+
+    def alloc_ctor_translated(self, args: Sequence[int]) -> bool:
+        """Is this `ALLOC`'s second operand a constructor index at all?
+
+        **It is not always one, and which builds translate it differs.**
+        `TranslateFunction` reads the type first, and BGT 1.3 then looks the
+        callee up whenever the operand is non-zero, while the 2010-2012 and
+        2012-03 builds skip the lookup entirely unless the type is a SCRIPT
+        object -- so for a registered type those leave the field holding
+        whatever the compiler put there.
+
+        Both readings are in the corpus, so this is settled **per site by
+        the OWNER** rather than per build by a table, which is the same
+        evidence that settled the one-based rule itself: there the owner
+        matched the allocated type in 15,619 of 15,619 sites once the minus
+        one was applied, and in 322 without it.
+
+        | | what the one-based rule names for a registered type |
+        |---|---|
+        | The Gate | `string::_beh_0_`, **1,592 of 1,592** |
+        | Perilous Hearts | `sound_pool::sound_is_active` x633 |
+
+        A function whose owner is the type being allocated is that type's
+        constructor; one that belongs to something else is not a
+        constructor at all, and naming it is the worst thing a resolver can
+        do -- Perilous Hearts' 633 made `bgt audit` report a real method as
+        LOST from 104 bodies, across the whole of BGT's own `sound_pool`.
+
+        A script class keeps the reading it has always had, which is the one
+        measured at 15,619 of 15,619. True wherever the operands cannot be
+        read, because a module whose `usedTypes` cannot be indexed has
+        bigger problems than one operand.
+        """
+        if len(args) < 2 or args[1] == 0:
+            return True
+        ti = _at(self.used_types, args[0])
+        type_name = _type_info_name(ti) if ti is not None else None
+        if type_name is None:
+            return True
+        if (type_name in self.script_classes
+                or type_name in self.script_classes_qualified):
+            return True
+        label = self.resolve("ctorfunc", args[1])
+        if label is None:
+            return True
+        return label.startswith(type_name + "::")
 
     def object_property_type(self, value: int) -> Optional[Dict[str, Any]]:
         """The declared data type of a usedObjectProps entry, if recoverable."""
@@ -726,10 +779,28 @@ def variable_name(f: Dict[str, Any], slot: int,
 def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
     """Decode and annotate one function body."""
     start, end = f["body"]
-    raw = as_opcodes.disassemble(mod.data[start:end], mod.opcodes)
+    #: `getattr`, because a caller may hand this a module-like object that
+    #: predates the flag -- the known-answer tests build one, and a reader
+    #: with no generation of its own is the newer form by default.
+    is_early = bool(getattr(mod, "early", False))
+    raw = as_opcodes.disassemble(mod.data[start:end], mod.opcodes,
+                                 early=is_early)
 
     targets: Dict[int, int] = {}          # instruction index -> label number
     resolved = unresolved = 0
+    #: **A jump offset is counted in DWORDS in the 2010-2012 generation and
+    #: in instructions in every later one.** Measured over the jumps where
+    #: the two readings disagree: 4,304 of Aliens attack's 4,310 land 99.5%
+    #: as dwords against 85.9% as instructions, where the controls land 100%
+    #: the other way. So an early jump is resolved through the dword offset
+    #: `disassemble` reports for each instruction, and the newer form keeps
+    #: the index arithmetic it always had.
+    by_dword = {off: i for i, (off, _op, _n, _a) in enumerate(raw)} \
+        if is_early else {}
+    dword_after = [0] * len(raw)
+    if is_early:
+        for i, (off, op, _n, _a) in enumerate(raw):
+            dword_after[i] = off + mod.opcodes[op]["dwords"]
 
     instrs: List[Dict[str, Any]] = []
     for i, (off, op, name, args) in enumerate(raw):
@@ -739,8 +810,14 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
             role = roles.get(j)
             item: Dict[str, Any] = {"value": a, "role": role}
             if role == "jump":
-                # instructions, not dwords, and relative to the NEXT instruction
-                tgt = i + 1 + a
+                if is_early:
+                    #: a DWORD delta from the instruction after the branch,
+                    #: so the target is looked up rather than counted
+                    tgt = by_dword.get(_s32(a) + dword_after[i], -1)
+                else:
+                    # instructions, not dwords, and relative to the NEXT
+                    # instruction
+                    tgt = i + 1 + a
                 item["target"] = tgt
                 if 0 <= tgt < len(raw):
                     targets.setdefault(tgt, len(targets))
@@ -748,6 +825,30 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
                     resolved += 1
                 else:
                     unresolved += 1
+            elif role == "ctorfunc" and not mod.alloc_ctor_translated(args):
+                #: **`ALLOC`'s callee operand is not always a callee**, and
+                #: the engine's own `TranslateFunction` says when: it reads
+                #: the type first and, when that type is not a SCRIPT
+                #: object, never translates the second operand at all --
+                #: `je done` before `FindFunction`. So for `ALLOC string`
+                #: the field holds whatever the compiler left there.
+                #:
+                #: Resolved anyway it names a real function that the program
+                #: never calls, which is the worst shape a resolver has:
+                #: Perilous Hearts' `ALLOC 3 33` rendered as
+                #: `sound_pool::sound_is_active`, and `bgt audit` then
+                #: reported that callee as LOST from 104 bodies -- one
+                #: phantom per `ALLOC` of a registered type, across the
+                #: whole of BGT's own `sound_pool`.
+                #:
+                #: This file records the same artifact on Screaming Strike
+                #: and records it as open because *"the one-based rule lives
+                #: in `as_disasm`, which is not told which build it is
+                #: reading"*. It does not need to be: it is told which TYPE
+                #: is being allocated, and the module says whether it
+                #: declares that type.
+                item["text"] = "<untranslated>"
+                item["untranslated"] = True
             elif role:
                 text = mod.resolve(role, a)
                 item["text"] = text
@@ -775,8 +876,18 @@ def disassemble_function(mod: Module, f: Dict[str, Any]) -> Dict[str, Any]:
 
     return {"function": f, "label": function_label(f), "signature": signature(f),
             "layout": frame_layout(f, getattr(mod, "non_value_types", ())),
+            #: **The declared length is a count of DWORDS in the 2010-2012
+            #: generation and of INSTRUCTIONS in every later one**, which is
+            #: this file's own units trap read from the other side: the
+            #: header reported `292 decoded / 428 declared  <-- MISMATCH` on
+            #: a body that decoded perfectly, because 292 instructions
+            #: really are 428 dwords. So the decoded figure is given in
+            #: whatever unit the module declared, and the unit is named.
             "declared_instructions": f.get("instructions"),
-            "decoded_instructions": len(raw),
+            "decoded_instructions": (
+                sum(mod.opcodes[op]["dwords"] for _p, op, _n, _a in raw)
+                if is_early else len(raw)),
+            "length_unit": "dword" if is_early else "instruction",
             "stack_needed": f.get("stackNeeded"),
             "span": [start, end], "labels": targets, "instructions": instrs,
             "resolved": resolved, "unresolved": unresolved}
@@ -969,7 +1080,9 @@ def format_function(dis: Dict[str, Any]) -> str:
         out.append("; stack needed: %s" % dis["stack_needed"])
     declared, decoded = dis["declared_instructions"], dis["decoded_instructions"]
     flag = "" if declared == decoded else "   <-- MISMATCH"
-    out.append("; instructions: %s decoded / %s declared%s" % (decoded, declared, flag))
+    out.append("; %ss: %s decoded / %s declared%s"
+               % (dis.get("length_unit", "instruction"), decoded, declared,
+                  flag))
     out.append("")
     out.append("%s:" % dis["label"])
 
