@@ -18097,10 +18097,14 @@ and read from `qw_arg`, and `decode` took the field layout from the build
 where `decode_early` already took it from the newer reader. Written up in
 full under **Aliens attack: EVERY global read as `KEY_RETURN`**.
 
-**What is left on it is 426 undeclared `tmpN` aliases**, pre-existing and
-unchanged by that fix: the borrowed-handle fold looks for `RefCpyV` and this
-generation emits the unfused `PSF v ; REFCPY`. A shared-path change, so it
-wants the five-title measurement.
+**What is left on it is 180 undeclared `tmpN` aliases**, down from 426 --
+the borrowed-handle fold now reads the unfused `PSF v ; REFCPY` these
+generations emit, and that took 246 of them. The 180 that remain are slots
+the body reads elsewhere, so both safety tests correctly decline and the
+bind really is a variable there: what is missing is the **declaration**, not
+the fold. `tmpN` is the name for a slot with no recorded name, so by
+construction nothing declares it, and `objVariableTypes` has the type that
+would.
 
 **Palace Punch-up's recovery declares `string@` locals**, which are invalid
 in both engines -- 281 of its 588 conversion errors, and the 2010 beta is
