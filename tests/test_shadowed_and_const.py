@@ -308,3 +308,53 @@ class DestinationPsfTests(unittest.TestCase):
         unfused = source.partition("else:  # REFCPY")[2]
         self.assertTrue(unfused, "the unfused branch was not found")
         self.assertIn("_borrowed_handle(", unfused)
+
+
+class ReturnAddressConstructionTests(unittest.TestCase):
+    """Constructing into the hidden RETURN ADDRESS is a `return`.
+
+    A value type returned by value is built in the caller's storage, whose
+    address the frame holds at the return slot -- so the receiver arrives as
+    `PshV4 -1`, the VALUE of that slot, where every other construction's
+    receiver is a slot ADDRESS. `dst.is_ptr` is therefore False and the
+    handler fell through to the value register, which nothing then read:
+
+        STR "Dragon" ; PSF 15 ; CALLSYS $str
+        PSF 15 ; PshV4 -1 ; CALLSYS $beh0      <- the return
+        PSF 15 ; CALLSYS $beh1                 <- the temp goes
+        JMP -> exit
+
+    `player::look_for_character` is twelve of those, and every arm came out
+    as a bare `break;` -- so the function returned nothing at all and twelve
+    creature names were lost. `bgt audit` found it on the first run it could
+    read that generation, and NVGT had been counting it all along as "Not
+    all paths return a value".
+    """
+
+    def test_the_return_slot_is_named_apart_from_every_positive_slot(self):
+        """Which is what makes the receiver identifiable without giving a
+        value atom an offset it has never carried: `name_of` renders a
+        negative slot `tmp_N` and a positive one `tmpN`, so slot -1 and slot
+        1 cannot be confused."""
+        fd = decompile.FuncDecompiler.__new__(decompile.FuncDecompiler)
+        fd.var_names = {}
+        fd.fn = type("F", (), {"object_type": None})()
+        self.assertEqual(fd.name_of(-1), "tmp_1")
+        self.assertEqual(fd.name_of(1), "tmp1")
+        self.assertNotEqual(fd.name_of(-1), fd.name_of(1))
+
+    def test_the_branch_asks_for_a_VALUE_of_the_return_slot(self):
+        """A test about the SOURCE, because the behaviour needs a module: the
+        whole point is that this receiver is not a pointer, so a branch that
+        required `is_ptr` -- as every sibling does -- could never fire."""
+        import inspect
+        source = inspect.getsource(decompile.FuncDecompiler._call)
+        marker = "self.name_of(self.return_slot)"
+        self.assertIn(marker, source)
+        window = source[source.index(marker) - 400:source.index(marker) + 200]
+        self.assertIn("not dst.is_ptr", window,
+                      "the receiver is a value, not an address")
+        self.assertIn("self.return_slot < 0", window,
+                      "slot 0 is `this`, never the return address")
+        self.assertIn("_needs_out_ref", window,
+                      "only a type returned IN the caller's storage")

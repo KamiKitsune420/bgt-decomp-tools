@@ -393,6 +393,7 @@ SKIP_OPS = {"CHKREF", "ChkRefS", "ChkNullS", "ChkNullV", "SUSPEND", "ClrHi",
             "LINE", "LABEL", "ObjInfo", "Block", "VarDecl", "TryBlock",
             "SetListSize", "SetListType", "PshListElmnt", "AllocMem"}
 CTORS = {"$beh0", "$beh1"}     # default ctor / copy ctor
+
 #: Operators that write their receiver. `opAdd` returns a new value and
 #: leaves its receiver alone, so it is deliberately absent: a `PSF` before
 #: one is a receiver being read.
@@ -5562,6 +5563,43 @@ class FuncDecompiler:
             if dst is not None and dst.kind == "list_elem":
                 value = args[0] if copy_ctor else Atom("call", f"{typename}({', '.join(a.text for a in args)})")
                 self.list_values.setdefault(dst.offset, {})[dst.list_index] = value
+                return
+            if (dst is not None and self.returns_value
+                    and self.return_slot < 0 and not dst.is_ptr
+                    and dst.kind == "var"
+                    and dst.text == self.name_of(self.return_slot)
+                    and _needs_out_ref(self.fn.return_type)):
+                #: **Constructing into the hidden RETURN ADDRESS is a
+                #: `return`**, and it is the one shape of return this file
+                #: had no rule for.
+                #:
+                #: A value type returned by value is built in the caller's
+                #: storage, whose address the frame holds at the return
+                #: slot -- so the receiver arrives as `PshV4 -1`, the VALUE
+                #: of that slot, where every other construction's receiver
+                #: is a slot ADDRESS. `dst.is_ptr` is therefore False and
+                #: the handler fell through to the value register, which
+                #: nothing then read:
+                #:
+                #:     STR "Dragon" ; PSF 15 ; CALLSYS $str
+                #:     PSF 15 ; PshV4 -1 ; CALLSYS $beh0      <- return
+                #:     PSF 15 ; CALLSYS $beh1                 <- the temp goes
+                #:     JMP -> exit
+                #:
+                #: `player::look_for_character` is twelve of those. It
+                #: answers with a creature's name -- `"Dragon"`,
+                #: `"Insect"`, `"boar"`, `"chimpanzee"` -- and every arm
+                #: came out as a bare `break;`, so **the function returned
+                #: nothing at all** and all twelve names were lost. There is
+                #: no ambiguity to weigh: the return address is written for
+                #: one purpose.
+                #:
+                #: `bgt audit` found it, on the first run it could read that
+                #: generation -- and NVGT had been counting it all along as
+                #: *"Not all paths return a value"*.
+                src = self._deref(args[0]) if copy_ctor else Atom(
+                    "call", f"{typename}({', '.join(a.text for a in args)})")
+                self._stmt(f"return {src.text};")
                 return
             if dst is not None and dst.is_ptr and dst.offset is not None:
                 if not args:

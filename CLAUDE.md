@@ -17413,6 +17413,61 @@ That also explains three of that title's conversion errors, which NVGT
 reports as *"Not all paths return a value"* -- a count the converter had and
 could not account for.
 
+#### Constructing into the return address is a `return`
+
+The one shape of return this file had no rule for, and `bgt audit` found it
+on the first run it could read that generation.
+
+A value type returned **by value** is built in the caller's storage, whose
+address the frame holds at the return slot. So the receiver arrives as
+`PshV4 -1` -- the VALUE of that slot -- where every other construction's
+receiver is a slot ADDRESS:
+
+```
+STR "Dragon" ; PSF 15 ; CALLSYS $str
+PSF 15 ; PshV4 -1 ; CALLSYS $beh0      <- the return
+PSF 15 ; CALLSYS $beh1                 <- the temp goes
+JMP -> exit
+```
+
+`dst.is_ptr` is therefore False, so the constructor handler -- whose every
+branch requires a pointer -- fell through to the value register, and nothing
+read it. `player::look_for_character` is **twelve** of those. It answers with
+a creature's name, and every arm came out as a bare `break;`:
+
+```
+before:  if (chars[local_4].type == 12) { break; }
+after:   if (chars[local_4].type == 12) { return "Insect"; }
+```
+
+-- so **the function returned nothing at all**, and `"Dragon"`, `"Insect"`,
+`"Lion"`, `"boar"`, `"chimpanzee"`, `"cow"`, `"goat"`, `"leopard"`,
+`"monkey"`, `"sheep"` and `"snake"` were lost. **NVGT had been counting it
+all along** as *"Not all paths return a value"*, three times, and the
+converter had no way to explain those rows.
+
+**There is no ambiguity to weigh**: the return address is written for one
+purpose, so a construction into it is a return and nothing else. The
+discriminator is the slot's NAME rather than an offset, because a value atom
+has never carried one -- `name_of` renders a negative slot `tmp_N` and a
+positive one `tmpN`, so slot -1 and slot 1 cannot be confused.
+
+**An attempt at the `_bind` path came first and was dead.** The same defect
+reads naturally as *"the value is parked in `temps[return_slot]` and printed
+at the `RET`, so the last path wins"* -- which is this file's own
+value-register lesson -- and a rule was written there to emit at the bind
+when a jump to the exit follows. Instrumented, `_returns_here` was asked
+**0 times** on Perilous Hearts and 0 on The Gate: this construction never
+reaches `_bind` at all, because the receiver is not a slot. It came out
+rather than sit untested, and the whole change is 38 lines in one branch.
+
+| title | lines | goto | calls | files differing |
+|---|---|---|---|---|
+| Perilous Hearts | 13,723 -> **13,727** | 0 | 3,275 | the 13 returns |
+| Palace Punch-up | 3,200 | 0 | 823 | **0** |
+| Aliens attack | 4,413 | 0 | 1,659 | **0** |
+| The Gate | 33,987 | 0 | 8,681 | **0** |
+
 #### ...and `ALLOC`'s second operand is not always a callee
 
 Which the same run turned up, because it was the other reason the audit
@@ -18232,11 +18287,9 @@ clean, Perilous Hearts and Aliens attack are clean on calls and constants,
 and the instrument found a real defect on its first run -- see
 **`bgt audit` reads the whole early corpus now**.
 
-**`player::look_for_character` returns nothing at all.** Declared `string`,
-and every arm that should answer a creature's name is a bare `break;` -- 12
-literals lost in Perilous Hearts, and three of that title's conversion
-errors are NVGT saying so as *"Not all paths return a value"*. Found by the
-audit above; not yet diagnosed.
+**`player::look_for_character` is FIXED**, which was the first thing that
+audit found -- see **Constructing into the return address is a `return`**.
+Perilous Hearts audits completely clean on all three comparisons now.
 
 **Aliens attack's recovery is FIXED** -- every global in that title read as
 `KEY_RETURN`, because a pointer operand is named `DW_ARG` by a 32-bit build
