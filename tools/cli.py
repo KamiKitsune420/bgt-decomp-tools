@@ -1222,7 +1222,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not getattr(args, "command", None):
         ap.print_help()
         return 0
-    return args.func(args)
+    try:
+        return args.func(args)
+    except as_disasm.UnsupportedModule as exc:
+        #: A whole MODULE GENERATION this path cannot read, which is a
+        #: refusal rather than a crash: the message names the format and the
+        #: reader that does handle it. Caught here rather than raised as
+        #: `SystemExit` so a caller that can do without the step -- the
+        #: library attribution inside `bgt recover` -- still carries on.
+        print(exc, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

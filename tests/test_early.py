@@ -905,7 +905,7 @@ def test_an_early_module_is_declined_with_its_release_named(monkeypatch,
                                          "blocks": [], "parse_errors": []})
     monkeypatch.setattr(as_disasm.as_early, "summarize",
                         lambda *a, **k: {"eof": True, "release": "2011-11"})
-    with pytest.raises(SystemExit) as caught:
+    with pytest.raises(as_disasm.UnsupportedModule) as caught:
         as_disasm.Module(str(module), {})
     said = str(caught.value)
     assert "2011-11" in said
@@ -930,6 +930,17 @@ def test_a_module_the_newer_reader_handles_is_untouched(monkeypatch, tmp_path):
     assert as_disasm.Module._read(str(module), {}) is good
 
 
+def test_the_refusal_is_an_ORDINARY_exception(monkeypatch, tmp_path):
+    """**Not `SystemExit`**, which derives from `BaseException` and so walked
+    straight through the `except Exception` in `bgt_project._origins` -- the
+    catch that exists precisely so a recovery carries on when the library
+    attribution cannot read a module. `bgt recover` died on every one of the
+    five early titles, and nothing caught it because nothing was meant to."""
+    as_disasm = _disasm()
+    assert issubclass(as_disasm.UnsupportedModule, Exception)
+    assert not issubclass(as_disasm.UnsupportedModule, SystemExit)
+
+
 def test_neither_reader_is_reported_as_neither(monkeypatch, tmp_path):
     as_disasm = _disasm()
     module = tmp_path / "m.bin"
@@ -938,6 +949,145 @@ def test_neither_reader_is_reported_as_neither(monkeypatch, tmp_path):
                         lambda *a, **k: (_ for _ in ()).throw(ValueError("no")))
     monkeypatch.setattr(as_disasm.as_early, "summarize",
                         lambda *a, **k: {"eof": False, "error": "bad tag"})
-    with pytest.raises(SystemExit) as caught:
+    with pytest.raises(as_disasm.UnsupportedModule) as caught:
         as_disasm.Module._read(str(module), {})
     assert "bad tag" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# A funcdef-typed slot's type comes from the CALL, not from a count
+# ---------------------------------------------------------------------------
+#
+# `objVariableTypes` records a funcdef-typed local as `_builtin_function_`
+# with no signature, and the reader guesses when the module declares exactly
+# one funcdef -- on the grounds that one makes it unambiguous, which is FALSE:
+# the engine declares one too, and every BGT binary registers
+# `pathfinder_callback`.
+#
+# Perilous Hearts is where it costs something. It declares one funcdef,
+# `menu_callback`, and one slot holds the engine's `pathfinder_callback`:
+#
+#     menu_callback@ local_16;
+#     @local_16 = @path_callback;
+#     sherlock.set_callback_function(local_16);
+#
+# -- two compiler errors, one slot. Declining the guess would be worse than
+# making it: most of that title's funcdef slots are in `dynamic_menu`, where
+# `menu_callback` is right. So the guess stands and the callee corrects it.
+
+
+def test_the_callee_corrects_a_guessed_funcdef_slot():
+    import bgt_asir as B
+    from nvgt.asreader import (DataType, Function, Instr, Module, ScriptVariable,
+                               TypeInfo)
+    menu = TypeInfo(name="menu_callback", kind="funcdef")
+    want = TypeInfo(name="pathfinder_callback", kind="app")
+
+    callee = Function.__new__(Function)
+    callee.name = "set_callback_function"
+    callee.param_types = [DataType(token_type=5, obj_type=want,
+                                   is_object_handle=True)]
+
+    def ins(name, w=0, ref=None):
+        i = Instr.__new__(Instr)
+        i.name = name
+        for f in ("w_arg", "w_arg2", "dw_arg", "qw_arg", "pos", "op", "size"):
+            setattr(i, f, 0)
+        i.w_arg = w
+        i.bc_type = "asBCTYPE_W_ARG"
+        i.func_ref = ref
+        return i
+
+    slot = ScriptVariable(stack_offset=16,
+                          type=DataType(token_type=5, obj_type=menu,
+                                        is_object_handle=True))
+    body = Function.__new__(Function)
+    body.name = "map_deserialize"
+    body.variables = [slot]
+    body.bytecode = [ins("VAR", 16), ins("PGA"), ins("ChkRefS"),
+                     ins("RDSPtr"), ins("GETOBJ", 1),
+                     ins("CALLSYS", 0, callee)]
+
+    m = Module.__new__(Module)
+    m.funcdefs = [type("F", (), {"name": "menu_callback"})()]
+    m.saved_functions = [body]
+
+    assert B.retype_funcdef_slots(m) == 1
+    assert slot.type.obj_type.name == "pathfinder_callback"
+    #: and it is idempotent -- the slot is no longer one the reader guessed
+    assert B.retype_funcdef_slots(m) == 0
+
+
+def test_a_callee_that_wants_the_MODULE_funcdef_changes_nothing():
+    """`dynamic_menu::set_callback(menu_callback@)` is the case the guess gets
+    right, and most of the corpus's funcdef slots are that one -- so this must
+    leave them exactly as they are."""
+    import bgt_asir as B
+    from nvgt.asreader import (DataType, Function, Instr, Module, ScriptVariable,
+                               TypeInfo)
+    menu = TypeInfo(name="menu_callback", kind="funcdef")
+    callee = Function.__new__(Function)
+    callee.name = "set_callback"
+    callee.param_types = [DataType(token_type=5, obj_type=menu,
+                                   is_object_handle=True)]
+
+    def ins(name, w=0, ref=None):
+        i = Instr.__new__(Instr)
+        i.name = name
+        for f in ("w_arg", "w_arg2", "dw_arg", "qw_arg", "pos", "op", "size"):
+            setattr(i, f, 0)
+        i.w_arg = w
+        i.bc_type = "asBCTYPE_W_ARG"
+        i.func_ref = ref
+        return i
+
+    slot = ScriptVariable(stack_offset=3,
+                          type=DataType(token_type=5, obj_type=menu,
+                                        is_object_handle=True))
+    body = Function.__new__(Function)
+    body.name = "set_callback"
+    body.variables = [slot]
+    body.bytecode = [ins("VAR", 3), ins("CALLINTF", 0, callee)]
+    m = Module.__new__(Module)
+    m.funcdefs = [type("F", (), {"name": "menu_callback"})()]
+    m.saved_functions = [body]
+    assert B.retype_funcdef_slots(m) == 0
+    assert slot.type.obj_type.name == "menu_callback"
+
+
+def test_a_callee_with_more_than_one_parameter_is_declined():
+    """The argument's position is then in question, so it is left alone
+    rather than guessed at from a window."""
+    import bgt_asir as B
+    from nvgt.asreader import (DataType, Function, Instr, Module, ScriptVariable,
+                               TypeInfo)
+    menu = TypeInfo(name="menu_callback", kind="funcdef")
+    want = TypeInfo(name="pathfinder_callback", kind="app")
+    callee = Function.__new__(Function)
+    callee.name = "two"
+    callee.param_types = [
+        DataType(token_type=5, obj_type=want, is_object_handle=True),
+        DataType(token_type=66),
+    ]
+
+    def ins(name, w=0, ref=None):
+        i = Instr.__new__(Instr)
+        i.name = name
+        for f in ("w_arg", "w_arg2", "dw_arg", "qw_arg", "pos", "op", "size"):
+            setattr(i, f, 0)
+        i.w_arg = w
+        i.bc_type = "asBCTYPE_W_ARG"
+        i.func_ref = ref
+        return i
+
+    slot = ScriptVariable(stack_offset=16,
+                          type=DataType(token_type=5, obj_type=menu,
+                                        is_object_handle=True))
+    body = Function.__new__(Function)
+    body.name = "f"
+    body.variables = [slot]
+    body.bytecode = [ins("VAR", 16), ins("CALLSYS", 0, callee)]
+    m = Module.__new__(Module)
+    m.funcdefs = [type("F", (), {"name": "menu_callback"})()]
+    m.saved_functions = [body]
+    assert B.retype_funcdef_slots(m) == 0

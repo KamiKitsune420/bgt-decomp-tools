@@ -17243,6 +17243,60 @@ the missing declaration: `tmpN` is the name for a slot with no recorded
 name, so by construction nothing declares it, and `objVariableTypes` has the
 type that would.
 
+### A funcdef-typed slot's type comes from the CALL, not from a count
+
+`objVariableTypes` records a funcdef-typed local as `_builtin_function_`
+with no signature, so which funcdef it is cannot be read off the record. The
+reader guesses when the module declares exactly one, *"on the grounds that
+one makes it unambiguous"* -- **and that is false**, because the ENGINE
+declares one too. This file establishes that as a complete answer rather
+than a sample: every BGT binary available here registers exactly one
+funcdef, `pathfinder_callback`. So one module funcdef means two candidates.
+
+Perilous Hearts is where it costs something, and the two errors are one
+slot:
+
+```
+menu_callback@ local_16;
+@local_16 = @path_callback;
+sherlock.set_callback_function(local_16);
+
+    Can't implicitly convert from '<function>@const' to 'menu_callback@'
+    No matching signatures to
+        'pathfinder::set_callback_function(menu_callback@&)'
+```
+
+**And declining the guess would be worse than making it.** Most of that
+title's funcdef slots are in `dynamic_menu`, where `menu_callback` is
+right -- 7 such slots on Perilous Hearts and 4 on Palace Punch-up, of which
+exactly **one** is wrong. Refusing on two candidates would break the many to
+fix the one, which is the trade this file refuses.
+
+So the guess stands and the **callee corrects it**, which is reading the
+authority rather than counting: `name_engine_funcdefs` has already given
+`pathfinder::set_callback_function` its real parameter type, and the
+parameter of the call a slot is passed to says what the slot is.
+
+```
+VAR 16                                   <- the argument
+PGA 77 ; ChkRefS ; RDSPtr ; GETOBJ 1     <- the receiver
+CALLSYS set_callback_function            <- params: ['pathfinder_callback']
+```
+
+Three things keep it narrow. The callee takes exactly **one** parameter, so
+the argument's position is not in question. The slot's current type must be
+one the reader **guessed**, so nothing the records state is overwritten --
+which is also what makes it idempotent. And the argument is found by
+scanning back a bounded window for the `VAR` or `PshVPtr` that names it,
+which is the call frame this file derives from the bytecode: arguments
+pushed first, the receiver last.
+
+**One line of output changes on one title** -- `menu_callback@ local_16;`
+becomes `pathfinder_callback@ local_16;` -- and Perilous Hearts converts at
+11 errors rather than 12. Palace Punch-up and every newer title render
+byte-identical, the newer ones because they declare several funcdefs and the
+guess never fired for them at all.
+
 #### `bgt audit` is blind to the whole early corpus, and now SAYS so
 
 The strongest instrument this project has for *"did the recovery lose
@@ -17279,6 +17333,24 @@ of them noise, and every row shaped exactly like a real finding.
 | bodies paired, Perilous Hearts | 0 of 0 | 267 of 452 | 0 -- it declines |
 | constant rows | 0 | **141** | -- |
 | what a reader learns | nothing | a wrong number | the format, and which tool reads it |
+
+**And the refusal must be an ORDINARY exception**, which cost a regression
+on the way: raised as `SystemExit` it derives from `BaseException` and walked
+straight through the `except Exception` in `bgt_project._origins` -- the
+catch that exists precisely so a recovery carries on when the library
+attribution cannot read a module. `bgt recover` then **died on every one of
+the five early titles**, and nothing caught it because nothing was meant to.
+The message was right and the class was wrong.
+
+`as_disasm.UnsupportedModule` is it now: the CLI turns it into a clean
+refusal and `_origins` reports it as a problem, which is better than before
+-- the problem line used to say only that the attribution could not read the
+module and now says what format it is.
+
+It is pinned by a test that the class is a subclass of `Exception` and not of
+`SystemExit`, because a passing suite did not notice: nothing in it runs
+`bgt recover` on an early title, and I measured `bgt audit` and `bgt disasm`
+-- the two tools I was thinking about -- and not the one that matters most.
 
 So it declines, and the message names the release and the reader that does
 handle it:
@@ -17988,14 +18060,15 @@ wants the five-title measurement.
 in both engines -- 281 of its 588 conversion errors, and the 2010 beta is
 the only title with any. Not run down.
 
-**Perilous Hearts' 12 are read and 10 are the RECOVERY's.** Two are engine
-gaps the converter names with their sites -- `open_sound_device` and
-`pathfinder::create_map`, neither of which NVGT registers. The other ten are
-the 2011 generation's own: the funcdef placeholder resolved to the module's
-`menu_callback` where the callee's signature says `pathfinder_callback`; a
-handle compared with the literal `0` where this file's own rule says a zero
-meeting a reference type is `null`, twice; a `const int` assigned to a
-`surface[]@`; and a body that does not return on every path.
+**Perilous Hearts is 11 and 9 are the RECOVERY's.** Two are engine gaps the
+converter names with their sites -- `open_sound_device` and
+`pathfinder::create_map`, neither of which NVGT registers. **One is fixed**:
+see **A funcdef-typed slot's type comes from the CALL** below. The other nine
+are the 2011 generation's own: a bare function assigned to a funcdef handle
+without the wrapper NVGT wants; a handle compared with the literal `0` where
+this file's own rule says a zero meeting a reference type is `null`, twice; a
+`const int` assigned to a `surface[]@`; and two bodies that do not return on
+every path.
 
 **NVGT payloads from unverified builds.** Official NVGT releases get fresh
 packaging parameters per build, so executables from releases without a verified

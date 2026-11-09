@@ -1589,7 +1589,84 @@ def load(module_path: str, exe_path: Optional[str] = None,
     # which is the one executable always on hand. Neither available changes
     # nothing.
     name_engine_funcdefs(m, exe=exe_path)
+    # ...and a slot the module left as the placeholder was guessed from a
+    # COUNT, which the call it is passed to can answer outright.
+    retype_funcdef_slots(m)
     return m
+
+
+def retype_funcdef_slots(m: Module) -> int:
+    """Take a funcdef-typed slot's type from the call it is passed to.
+
+    `objVariableTypes` records a funcdef-typed local as `_builtin_function_`
+    with no signature, so which funcdef it is cannot be read off the record.
+    The reader guesses when the module declares exactly one, on the grounds
+    that one makes it unambiguous -- and **that is false**, because the
+    ENGINE declares one too. Every BGT binary available here registers
+    `pathfinder_callback`, which this file establishes as a complete answer
+    rather than a sample, so one module funcdef means two candidates.
+
+    Perilous Hearts is where it costs something, and the two errors are the
+    same slot:
+
+        menu_callback@ local_16;
+        @local_16 = @path_callback;
+        sherlock.set_callback_function(local_16);
+
+        Can't implicitly convert from '<function>@const' to 'menu_callback@'
+        No matching signatures to
+            'pathfinder::set_callback_function(menu_callback@&)'
+
+    **The call says which, and declining the guess would be worse than
+    making it.** Most of that title's funcdef slots are in `dynamic_menu`,
+    where `menu_callback` is right, so refusing on two candidates would
+    break the many to fix the one -- measured: 7 such slots on Perilous
+    Hearts and 4 on Palace Punch-up, of which exactly one is wrong.
+
+    So the guess stands and is CORRECTED where the callee disagrees. Kept
+    narrow by three things: the callee takes exactly one parameter, so the
+    argument's position is not in question; the slot's current type is one
+    the reader guessed, so nothing the records state is overwritten; and the
+    argument is found by scanning back a bounded window for the `VAR` or
+    `PshVPtr` that names it, which is the call frame this file derives from
+    the bytecode -- arguments pushed first, the receiver last.
+    """
+    guessed = {f.name for f in m.funcdefs}
+    if not guessed:
+        return 0
+    changed = 0
+    for f in m.saved_functions:
+        body = f.bytecode or []
+        if not body:
+            continue
+        slots = {v.stack_offset: v for v in (f.variables or [])}
+        for k, ins in enumerate(body):
+            ref = getattr(ins, "func_ref", None)
+            if ref is None or len(getattr(ref, "param_types", ()) or ()) != 1:
+                continue
+            want = ref.param_types[0]
+            if want.obj_type is None or want.obj_type.name in guessed:
+                continue
+            for back in body[max(0, k - _FUNCDEF_ARG_WINDOW):k][::-1]:
+                if back.name not in ("VAR", "PshVPtr"):
+                    continue
+                var = slots.get(_s16(back.w_arg))
+                if var is None or var.type.obj_type is None:
+                    continue
+                if var.type.obj_type.name not in guessed:
+                    continue
+                var.type = DataType(token_type=5, obj_type=want.obj_type,
+                                    is_object_handle=True)
+                changed += 1
+                break
+    return changed
+
+
+#: How far back to look for the argument of a one-parameter call. The frame is
+#: the argument then the receiver, with the receiver's own address built in
+#: between -- `VAR 16 ; PGA 77 ; ChkRefS ; RDSPtr ; GETOBJ 1 ; CALLSYS` is the
+#: site this exists for, which is five.
+_FUNCDEF_ARG_WINDOW = 8
 
 
 if __name__ == "__main__":

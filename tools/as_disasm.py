@@ -205,6 +205,22 @@ def signature(f: Dict[str, Any]) -> str:
     return "%s %s(%s)" % (type_name(f.get("returns")), function_label(f), params)
 
 
+class UnsupportedModule(Exception):
+    """This path cannot read this module's generation, and says which.
+
+    **An ordinary exception rather than `SystemExit`**, which is the mistake
+    this replaces. `SystemExit` derives from `BaseException`, so it walked
+    straight through the `except Exception` in `bgt_project._origins` -- the
+    catch that exists precisely so a recovery carries on when the library
+    attribution cannot read a module -- and `bgt recover` died on every one
+    of the five early titles. The message was right and the class was wrong,
+    and nothing caught it because nothing was meant to.
+
+    The CLI turns it into a clean refusal; a caller that can do without this
+    step catches it and carries on.
+    """
+
+
 class Module:
     """A parsed module plus the tables needed to name things in its bytecode."""
 
@@ -292,7 +308,7 @@ class Module:
             data = fh.read()
         early = as_early.summarize(data, opcodes)
         if early is not None and early.get("eof"):
-            raise SystemExit(
+            raise UnsupportedModule(
                 "this module is the %s BGT format, which this path cannot "
                 "decode: its bodies store their operands as raw words and "
                 "quadwords rather than as encoded integers, so the "
@@ -301,7 +317,7 @@ class Module:
                 % (early.get("release") or "2010-2012"))
         if info is not None:
             return info
-        raise SystemExit(
+        raise UnsupportedModule(
             "neither reader could parse this module: %s"
             % ((early or {}).get("error") or "unknown"))
 
