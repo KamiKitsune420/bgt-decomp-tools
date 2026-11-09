@@ -870,3 +870,74 @@ def test_pop_is_a_popptr_at_either_operand():
     assert marker in source
     window = source[source.index(marker):source.index(marker) + 300]
     assert "ins.w_arg in (0, 1)" in window
+
+
+# ---------------------------------------------------------------------------
+# `as_disasm` DECLINES the early format rather than answering wrongly
+# ---------------------------------------------------------------------------
+#
+# `as_module` cannot read these modules at all, so the tail came back empty
+# and every tool built on `as_disasm` saw a module with no bodies -- `bgt
+# audit` paired 0 of 0 and said so, which is honest and says nothing about
+# why.
+#
+# Falling back to `as_early` was tried and taken back out: it parses the
+# records, and the BODIES still cannot be stepped, because their operands are
+# raw words and quadwords rather than encoded integers. Palace Punch-up's
+# `sound_is_active` came out as 20 instructions of 91 declared, and the audit
+# then reported 76 lost constants on that title and 141 on Perilous Hearts,
+# every one of them noise. An instrument that answers anyway is worse than
+# one that declines.
+
+
+def _disasm():
+    import importlib
+    return importlib.import_module("as_disasm")
+
+
+def test_an_early_module_is_declined_with_its_release_named(monkeypatch,
+                                                            tmp_path):
+    as_disasm = _disasm()
+    module = tmp_path / "m.bin"
+    module.write_bytes(b"\x00" * 8)
+    monkeypatch.setattr(as_disasm.as_module, "summarize",
+                        lambda *a, **k: {"tail": None, "dialect": "tagged",
+                                         "blocks": [], "parse_errors": []})
+    monkeypatch.setattr(as_disasm.as_early, "summarize",
+                        lambda *a, **k: {"eof": True, "release": "2011-11"})
+    with pytest.raises(SystemExit) as caught:
+        as_disasm.Module(str(module), {})
+    said = str(caught.value)
+    assert "2011-11" in said
+    assert "bgt early" in said, "the message must name the reader that CAN"
+
+
+def test_a_module_the_newer_reader_handles_is_untouched(monkeypatch, tmp_path):
+    """The fallback must not reach a module that parsed -- `as_early` is not
+    even asked, so it cannot re-describe one."""
+    as_disasm = _disasm()
+    module = tmp_path / "m.bin"
+    module.write_bytes(b"\x00" * 8)
+    good = {"tail": {"used_functions": []}, "dialect": "tagged",
+            "blocks": [], "parse_errors": []}
+    monkeypatch.setattr(as_disasm.as_module, "summarize",
+                        lambda *a, **k: good)
+
+    def refuse(*_a, **_k):
+        raise AssertionError("as_early must not be consulted")
+
+    monkeypatch.setattr(as_disasm.as_early, "summarize", refuse)
+    assert as_disasm.Module._read(str(module), {}) is good
+
+
+def test_neither_reader_is_reported_as_neither(monkeypatch, tmp_path):
+    as_disasm = _disasm()
+    module = tmp_path / "m.bin"
+    module.write_bytes(b"\x00" * 8)
+    monkeypatch.setattr(as_disasm.as_module, "summarize",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("no")))
+    monkeypatch.setattr(as_disasm.as_early, "summarize",
+                        lambda *a, **k: {"eof": False, "error": "bad tag"})
+    with pytest.raises(SystemExit) as caught:
+        as_disasm.Module._read(str(module), {})
+    assert "bad tag" in str(caught.value)

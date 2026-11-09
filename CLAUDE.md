@@ -17243,11 +17243,66 @@ the missing declaration: `tmpN` is the name for a slot with no recorded
 name, so by construction nothing declares it, and `objVariableTypes` has the
 type that would.
 
-**And `bgt audit` cannot judge these titles at all** -- 0 of 0 bodies paired
-on Perilous Hearts, because it reads a module through the newer reader
-only. So the strongest instrument this project has for "was anything lost?"
-is blind to the whole 2010-2012 corpus, which is worth more than either item
-above.
+#### `bgt audit` is blind to the whole early corpus, and now SAYS so
+
+The strongest instrument this project has for *"did the recovery lose
+anything?"* could not judge a single one of the five 2010-2012 titles. Asked
+of Perilous Hearts it paired **0 of 0** bodies and reported
+`NOTHING PAIRED -- this audit measured nothing`, which is honest and says
+nothing about why: `as_disasm.Module` reads a module through `as_module`
+alone, and that reader cannot read this format at all, so the tail comes
+back empty and every tool built on it sees a module with no bodies.
+
+**The obvious fix was tried and taken back out, which is the finding.**
+`as_early` parses those modules end to end, and `bgt_asir` already falls
+back to it -- so giving `as_disasm` the same fallback is four lines and it
+makes things worse. It supplies the RECORDS and not the BODIES: an early
+body's operands are raw words and quadwords rather than encoded integers,
+read out of `ReadByteCode`'s own switch, which is exactly why
+`as_opcodes.disassemble` cannot step them.
+
+Measured rather than reasoned about. Palace Punch-up's `sound_is_active`
+came out as
+
+```
+; instructions: 20 decoded / 91 declared   <-- MISMATCH
+    PshV4      -18375530906935973120
+    SetV1      0 2
+```
+
+and `bgt audit` then compared that against the recovered text and reported
+**76 lost constants on that title and 141 on Perilous Hearts** -- every one
+of them noise, and every row shaped exactly like a real finding.
+
+| | `as_module` alone | with the fallback | as it now stands |
+|---|---|---|---|
+| bodies paired, Perilous Hearts | 0 of 0 | 267 of 452 | 0 -- it declines |
+| constant rows | 0 | **141** | -- |
+| what a reader learns | nothing | a wrong number | the format, and which tool reads it |
+
+So it declines, and the message names the release and the reader that does
+handle it:
+
+```
+this module is the 2011-11 BGT format, which this path cannot decode: its
+bodies store their operands as raw words and quadwords rather than as
+encoded integers, so the instruction stream cannot be stepped here.
+`bgt early` reads it, and `bgt recover` goes through its own decoder.
+```
+
+**An instrument that answers anyway is worse than one that declines**, which
+is this file's own rule about the dialect probe -- and a refusal turned into
+a wrong number is the worst of the three. The newer titles are untouched and
+that is checked rather than assumed: Psycho Strike 41 call rows, 1 literal
+and 2 constants, The Gate 143 / 2 / 5, Aliens attack 25 / 4 / 0, all exactly
+the figures recorded for them.
+
+**What auditing the early corpus really needs** is the early operand reading
+in `as_opcodes.disassemble`, which is the same job as `bgt lift` not
+supporting that generation -- and this file already records three further
+gaps on that path for Aliens attack alone: the token numbering is four below
+the IR's where `as_disasm` applies 1.3's two, the per-method `_beh_4_` AddRef
+has no handling, and the factory has no owner to name its type by.
 
 ### Palace Punch-up: `string@`, in the 2010 beta alone
 

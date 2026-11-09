@@ -63,8 +63,9 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional
 
 try:                      # installed as a package
-    from . import as_module, as_opcodes
+    from . import as_early, as_module, as_opcodes
 except ImportError:       # run directly from a checkout
+    import as_early
     import as_module
     import as_opcodes
 
@@ -214,11 +215,11 @@ class Module:
             self.data = fh.read()
         self.path = path
         self.opcodes = opcodes
-        self.info = as_module.summarize(path, opcodes=opcodes)
+        self.info = self._read(path, opcodes)
         self.dialect = self.info["dialect"]
-        self.blocks = self.info["blocks"]
+        self.blocks = self.info["blocks"] or []
         self.tail = self.info["tail"] or {}
-        self.parse_errors = self.info["parse_errors"]
+        self.parse_errors = self.info.get("parse_errors") or []
 
         self.used_functions = self.tail.get("used_functions", [])
         self.used_strings = self.tail.get("used_string_constants", [])
@@ -247,6 +248,62 @@ class Module:
         self.functions = self._collect_functions()
         self.register_returns = self._register_returns()
         self.plain_global_index = self._plain_global_index()
+
+    @staticmethod
+    def _read(path: str, opcodes: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+        """Parse the module, or say precisely why this path cannot.
+
+        **The 2010-2012 generation is a different format, not a third
+        dialect**, and `as_module` cannot read it: the tail comes back empty,
+        so every tool built on this got a module with **no bodies at all**.
+        `bgt audit` then paired 0 of 0 and reported `NOTHING PAIRED -- this
+        audit measured nothing`, which is honest and says nothing about why.
+
+        **And reading the records is not enough**, which is the thing worth
+        recording here. `as_early` parses those modules end to end, and
+        `bgt_asir` already falls back to it -- so giving this class the same
+        fallback is four lines, and it makes things worse. It supplies the
+        RECORDS and not the BODIES: an early body's operands are raw words
+        and quadwords rather than encoded integers, read out of
+        `ReadByteCode`'s own switch, which is exactly why
+        `as_opcodes.disassemble` cannot step them.
+
+        Tried, and the measurement is why it was taken back out. Palace
+        Punch-up's `sound_is_active` decoded as **20 instructions of 91
+        declared** with operands like -18375530906935973120, and `bgt audit`
+        then compared that against the recovered text and reported **76 lost
+        constants on that title and 141 on Perilous Hearts** -- every one of
+        them noise, and every row shaped exactly like a real finding.
+
+        An instrument that answers anyway is worse than one that declines,
+        and a refusal turned into a wrong number is the worst of the three.
+        So it declines, and names the release and the reader that does handle
+        it: `bgt early` reads these modules, and `bgt recover` goes through
+        `bgt_asir`, which has its own decoder for them.
+        """
+        info = None
+        try:
+            info = as_module.summarize(path, opcodes=opcodes)
+        except Exception:                            # noqa: BLE001
+            info = None
+        if info is not None and info.get("tail"):
+            return info
+        with open(path, "rb") as fh:
+            data = fh.read()
+        early = as_early.summarize(data, opcodes)
+        if early is not None and early.get("eof"):
+            raise SystemExit(
+                "this module is the %s BGT format, which this path cannot "
+                "decode: its bodies store their operands as raw words and "
+                "quadwords rather than as encoded integers, so the "
+                "instruction stream cannot be stepped here. `bgt early` "
+                "reads it, and `bgt recover` goes through its own decoder."
+                % (early.get("release") or "2010-2012"))
+        if info is not None:
+            return info
+        raise SystemExit(
+            "neither reader could parse this module: %s"
+            % ((early or {}).get("error") or "unknown"))
 
     def _plain_global_index(self) -> bool:
         """Is a global-pointer operand a plain index, or `2 * index + tag`?
