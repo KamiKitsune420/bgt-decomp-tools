@@ -2643,3 +2643,35 @@ class SignedComparisonTests(unittest.TestCase):
         fd.var_types = {}
         atom = Atom("var", "local_4", 1)
         self.assertIs(fd._as_signed(atom, 4, "CMPIi"), atom)
+
+    def test_a_name_declared_unsigned_in_a_debug_build_is_cast(self):
+        """A debug build reuses one slot for a `uint` loop counter and the
+        `int` of `get_player_index`, and hoists one `uint i_2` declaration.
+        `i_2 = get_player_index(...)` retypes the slot `int` an instruction
+        before `if (i_2 > -1)`, so the slot type AND the value type are `int`
+        there -- and the slot is still DECLARED `uint`, so the comparison
+        warns. Keyed on the NAME, not the live slot type, the cast stands.
+        111tk's server, slot 16, three sites.
+        """
+        from decompile import Atom, DataType, FuncDecompiler, NUMERIC_TYPES
+        fd = object.__new__(FuncDecompiler)
+        fd.var_types = {16: DataType(token_type=NUMERIC_TYPES["i"])}
+        fd.var_names = {16: "i_2"}
+        fd._unsigned_decl_names = {"i_2"}
+        atom = Atom("var", "i_2", 1, data_type=DataType(token_type=NUMERIC_TYPES["i"]))
+        self.assertEqual(fd._as_signed(atom, 16, "CMPIi").text, "int(i_2)")
+
+    def test_an_int_name_sharing_a_slot_with_a_uint_name_is_left_alone(self):
+        """The slot carries a `uint` counter in one scope, but the name read
+        HERE is the `int index` of another, declared `int`. Keyed on the slot
+        the cast would be noise on every int-named view of the slot; keyed on
+        the name it is not emitted.
+        """
+        from decompile import Atom, DataType, FuncDecompiler, NUMERIC_TYPES
+        fd = object.__new__(FuncDecompiler)
+        fd.var_types = {16: DataType(token_type=NUMERIC_TYPES["i"])}
+        fd.var_names = {16: "index_2"}
+        fd._unsigned_decl_names = {"i_2"}      # a different name on the slot
+        atom = Atom("var", "index_2", 1,
+                    data_type=DataType(token_type=NUMERIC_TYPES["i"]))
+        self.assertIs(fd._as_signed(atom, 16, "CMPIi"), atom)

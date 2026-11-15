@@ -2032,6 +2032,20 @@ class FuncDecompiler:
                            and _jump_target(i) < i.pos]
         self.var_names = {v.stack_offset: v.name for v in fn.variables if v.name}
         self.var_types = {v.stack_offset: v.type for v in fn.variables}
+        #: Names the source declared UNSIGNED in some scope. A debug build
+        #: reuses one slot for several source locals and hoists ONE
+        #: declaration per name, so a name declared `uint` anywhere is
+        #: declared `uint` in the output -- and `var_types[off]` does not say
+        #: so, because it tracks the value momentarily in the slot (111tk's
+        #: server reuses slot 16 for `uint i_2` and the `int` of
+        #: `get_player_index`, and the assignment retypes it `int` right
+        #: before `if (i_2 > -1)`). So `_as_signed` keys the cast on the NAME,
+        #: not the live slot type. A release build carries no variable list,
+        #: so this is empty and the existing release-build reasoning stands.
+        self._unsigned_decl_names = {
+            v.name for v in fn.variables
+            if v.name and v.type is not None and not v.type.obj_type
+            and v.type.format().startswith("uint")}
         self.var_names.update(_parameter_layout(fn))
         self.parameter_slots = {off for off, _ in _parameter_layout(fn)}
         self.var_types.update({off: dt for (off, _), dt in
@@ -3765,17 +3779,32 @@ class FuncDecompiler:
         form is the same question with no literal to key on: recorded, not
         done.
         """
-        #: A value whose own type is already signed needs nothing: the slot
-        #: is declared `uint` for another local's sake, and what is in it
-        #: here is, say, `array<T>::find`'s `int`. Without this the cast is
-        #: emitted around it -- harmless, and noise.
-        if a.data_type is not None and not a.data_type.obj_type:
-            own = a.data_type.format()
-            if own.startswith("int"):
+        #: A debug build names the source's own local and hoists ONE
+        #: declaration per name, so a name declared `uint` in some scope is
+        #: `uint` in the output whatever value momentarily occupies the slot
+        #: -- which is what the two narrowings below read, and here they are
+        #: both wrong. 111tk's server reuses one slot for `uint i_2` and the
+        #: `int` of `get_player_index`, so `i_2 = get_player_index(...)`
+        #: retypes the slot `int` an instruction before `if (i_2 > -1)`, and
+        #: the slot is still DECLARED `uint`. Keyed on the name, the cast is
+        #: emitted; release builds carry no variable list, so the set is empty
+        #: and the measured release-build narrowings stand.
+        #: Empty on a release build (no variable list) and absent for an
+        #: `fd` built in isolation, and either way the name check is skipped
+        #: so the measured release-build narrowings below decide alone.
+        unsigned_names = getattr(self, "_unsigned_decl_names", None)
+        if not unsigned_names or self.name_of(off) not in unsigned_names:
+            #: A value whose own type is already signed needs nothing: the
+            #: slot is declared `uint` for another local's sake, and what is
+            #: in it here is, say, `array<T>::find`'s `int`. Without this the
+            #: cast is emitted around it -- harmless, and noise.
+            if a.data_type is not None and not a.data_type.obj_type:
+                own = a.data_type.format()
+                if own.startswith("int"):
+                    return a
+            dt = self.var_types.get(off)
+            if dt is None or dt.obj_type or not dt.format().startswith("uint"):
                 return a
-        dt = self.var_types.get(off)
-        if dt is None or dt.obj_type or not dt.format().startswith("uint"):
-            return a
         signed = "int64" if opcode.endswith("64") else "int"
         return Atom(a.kind, "%s(%s)" % (signed, a.text), a.dw_size,
                     data_type=DataType(token_type=NUMERIC_TYPES[
