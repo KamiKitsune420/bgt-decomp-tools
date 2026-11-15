@@ -1050,6 +1050,75 @@ def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
     return missing + lines
 
 
+def _hoist_escaping_declarations(lines: list[str], indent: int) -> list[str]:
+    r"""Hoist a declaration whose name is used outside its own block.
+
+    The pre-structuring hoist pulls reused *scalar* slots to the function
+    top, but an OBJECT local (a `vector`, a `sound`) is declared where the
+    bytecode constructs it -- so a `sound s;` keeps its place and a `const`
+    initialiser is not stripped. When one object slot serves several sibling
+    branches, that construction site is inside the first branch, and every
+    later branch is "'local_20' is not declared". 111tk's `rotation.bgt`
+    `move(string)` is four `if` arms, each `me = move(..., facing, deg)`
+    through one reused `vector` slot, declared only in the first.
+
+    Only a declaration whose name genuinely **escapes its block** is touched,
+    so a single-scope object local keeps its construction-site declaration
+    and its initialiser -- which is what avoids a default-constructor
+    regression: a declaration that escapes must have a default constructor
+    for *any* rendering to compile, so hoisting it to the top cannot break a
+    case that compiled before, while a no-default-constructor object local
+    used in one scope is never reached.
+    """
+    depth_before, d = [], 0
+    for line in lines:
+        depth_before.append(d)
+        d += line.count("{") - line.count("}")
+    masked = [_mask_strings(line) for line in lines]
+    uses: dict[str, list[int]] = {}
+    for k, mk in enumerate(masked):
+        for name in set(_IDENT.findall(mk)):
+            uses.setdefault(name, []).append(k)
+
+    def block_end(i: int) -> int:
+        di, d = depth_before[i], depth_before[i]
+        for j in range(i, len(lines)):
+            d += lines[j].count("{") - lines[j].count("}")
+            if d < di:
+                return j
+        return len(lines)
+
+    top = "    " * indent
+    hoisted, seen, rewritten = [], set(), {}
+    for i, line in enumerate(lines):
+        if depth_before[i] <= 0:          # top-level: whole-function scope
+            continue
+        match = DECL_RE.match(line)
+        if not match:
+            continue
+        name = match.group(1)
+        end = block_end(i)
+        if not any(k < i or k >= end for k in uses.get(name, [])):
+            continue                      # stays inside its own block
+        ws = line[:len(line) - len(line.lstrip())]
+        type_str = line[len(ws):match.start(1)].strip().removeprefix("const ").strip()
+        if name not in seen:
+            seen.add(name)
+            hoisted.append("%s%s %s;" % (top, type_str, name))
+        tail = line[match.end(1):].lstrip()
+        if tail.startswith("="):
+            rewritten[i] = "%s%s %s" % (ws, name, tail)
+        elif tail.startswith("("):        # constructor form -> assignment
+            rewritten[i] = "%s%s = %s%s" % (ws, name, type_str, tail)
+        else:                             # bare `type name;` -- hoist covers it
+            rewritten[i] = None
+    if not hoisted:
+        return lines
+    body = [rewritten[i] if i in rewritten else line
+            for i, line in enumerate(lines)]
+    return hoisted + [line for line in body if line is not None]
+
+
 def _mask_strings(line: str) -> str:
     """The line with string literals blanked, so a name inside one is not a use."""
     out, in_str, escape = [], False, False
@@ -8362,6 +8431,7 @@ class ModuleDecompiler:
             st = Structurer(ev, f, scopes)
             body = _use_compound_assignment(declarations + st.render(indent))
             body = _declare_read_before_written(body, fd, indent)
+            body = _hoist_escaping_declarations(body, indent)
             body = _drop_unreachable(body)
             return _drop_redundant_parens(_reconstruct_for_loops(body))
         except Exception as ex:               # decompilation must not crash

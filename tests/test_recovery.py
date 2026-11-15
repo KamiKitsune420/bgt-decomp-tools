@@ -1276,6 +1276,47 @@ def test_a_word_that_merely_starts_with_return_is_not_a_terminator():
     assert len(kept) == 2
 
 
+def test_a_reused_object_local_is_hoisted_out_of_its_branch():
+    r"""An object local reused across sibling blocks escapes its declaration.
+
+    The scalar hoist pulls reused scalars to the function top, but an object
+    local (a `vector`) is declared where the bytecode constructs it -- inside
+    the first branch. 111tk's `rotation.bgt move(string)` reuses one `vector`
+    slot across four `if` arms, so the three later arms were
+    "'local_20' is not declared". The declaration is hoisted to the top and
+    the construction becomes a plain assignment.
+    """
+    body = [
+        "    if (dir == a) {",
+        "        local_20 = move(x, 0.0);",       # typed decl, inside the branch
+        "        me = local_20;",
+        "    }",
+        "    if (dir == b) {",
+        "        local_20 = move(x, 180.0);",     # reused -- out of scope before
+        "        me = local_20;",
+        "    }",
+    ]
+    body[1] = "        vector local_20 = move(x, 0.0);"
+    out = decompile._hoist_escaping_declarations(body, 1)
+    assert out[0] == "    vector local_20;"
+    assert "        local_20 = move(x, 0.0);" in out
+    assert out.count("    vector local_20;") == 1
+
+
+def test_a_single_scope_object_local_keeps_its_construction_site():
+    """A local used only inside its own block is left where it is built, so a
+    `sound s = ...;` keeps its construction-site declaration and no
+    no-default-constructor type is hoisted to a bare declaration it cannot
+    make."""
+    body = [
+        "    if (ready) {",
+        "        sound s = make();",
+        "        s.play();",
+        "    }",
+    ]
+    assert decompile._hoist_escaping_declarations(body, 1) == body
+
+
 # -- braces, which the compiler blames on the wrong line --------------------
 
 def test_unbalanced_braces_are_reported_per_file():
