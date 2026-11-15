@@ -1032,7 +1032,18 @@ def _declare_read_before_written(lines: list[str], fd: "FuncDecompiler",
             frame.setdefault(variable.name, variable.type)
     used: dict[str, int] = {}
     for line in lines:
-        for name in _IDENT.findall(_mask_strings(line)):
+        masked = _mask_strings(line)
+        for mo in _IDENT.finditer(masked):
+            #: A member access (`this.pitch`, `obj.pitch`) is not a read of a
+            #: local that happens to share the property's name, so it must not
+            #: force a declaration. 111tk's `vehicle::loop` has a `double
+            #: pitch` member and an `int pitch` local, and the only `pitch`
+            #: the body holds is inside `this.pitch`: counted, the hoisted
+            #: `int pitch;` shadowed the member -- `'pitch' is not
+            #: initialized`.
+            if mo.start() and masked[mo.start() - 1] == ".":
+                continue
+            name = mo.group()
             if name in frame:
                 used.setdefault(name, 0)
     missing = []
@@ -2046,6 +2057,19 @@ class FuncDecompiler:
             v.name for v in fn.variables
             if v.name and v.type is not None and not v.type.obj_type
             and v.type.format().startswith("uint")}
+        #: Every name the source declares as a local or parameter ANYWHERE in
+        #: the body. A member access is written bare (`pitch`) and qualified
+        #: `this.pitch` only when a local of that name would shadow it -- and
+        #: that test read the LIVE `var_names`, which holds the one name each
+        #: slot ended the walk with, so a local live only in another scope was
+        #: missing from it. `_declare_read_before_written` declares that local
+        #: from this same `fn.variables` list, so the two disagreed: 111tk's
+        #: `vehicle::loop` has a `double pitch` member and an `int pitch`
+        #: local, the member read came out bare `pitch`, and the hoisted
+        #: `int pitch;` shadowed it -- `'pitch' is not initialized`. A release
+        #: build carries no variable list, so this is empty and member
+        #: accesses render exactly as before.
+        self._local_names = {v.name for v in fn.variables if v.name}
         self.var_names.update(_parameter_layout(fn))
         self.parameter_slots = {off for off, _ in _parameter_layout(fn)}
         self.var_types.update({off: dt for (off, _), dt in
@@ -3499,7 +3523,8 @@ class FuncDecompiler:
             pname = self._short_prop(ins.prop_name, ins.w_arg)
             if self.fn.object_type is None:
                 pname = f"{self._slot_atom(0).text}.{pname}"
-            elif pname in self.var_names.values() or self._inherited_property(pname):
+            elif (pname in self.var_names.values() or pname in self._local_names
+                  or self._inherited_property(pname)):
                 pname = f"this.{pname}"
             self.value_reg = Atom("prop", pname, 1, is_ptr=True,
                                   data_type=self.property_types.get(ins.prop_name))
@@ -3541,6 +3566,7 @@ class FuncDecompiler:
                 base = self._deref(self.stack[-1]).text
                 text = pname if base in ("this", pname) else f"{base}.{pname}"
                 if base == "this" and (pname in self.var_names.values()
+                                       or pname in self._local_names
                                        or self._inherited_property(pname)):
                     text = f"this.{pname}"
                 self.stack[-1] = Atom("prop", text, 1, is_ptr=True,

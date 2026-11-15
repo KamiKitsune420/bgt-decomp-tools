@@ -144,6 +144,30 @@ class DeclaringARealNameTests(unittest.TestCase):
         self.assertEqual(
             decompile._declare_read_before_written(lines, fd, 1), lines)
 
+    def test_a_member_access_is_not_a_read_of_a_same_named_local(self):
+        """`vehicle::loop` has a `double pitch` member and an `int pitch`
+        local, and the only `pitch` the body holds is inside `this.pitch`.
+        Counted as a read of the local, the hoisted `int pitch;` shadowed the
+        member and `update_moving_sound(..., pitch)` read the uninitialised
+        local -- `'pitch' is not initialized`. An identifier after a `.` is a
+        member access, not a local read, so no declaration is forced.
+        """
+        fd = fd_for([ScriptVariable(name="pitch", stack_offset=22,
+                                    type=_formats_as("int"))])
+        lines = ["    update_moving_sound(id, x, y, this.pitch);"]
+        self.assertEqual(
+            decompile._declare_read_before_written(lines, fd, 1), lines)
+
+    def test_a_bare_read_is_still_declared_when_the_name_also_appears_as_a_member(self):
+        """The member-access exclusion must not lose a genuine local: a bare
+        read is declared even when the same name is also a property elsewhere.
+        """
+        fd = fd_for([ScriptVariable(name="pitch", stack_offset=22,
+                                    type=_formats_as("int"))])
+        out = decompile._declare_read_before_written(
+            ["    pitch = 100;", "    sendint(this.pitch, owner);"], fd, 1)
+        self.assertEqual(out[0], "    int pitch;")
+
 
 if __name__ == "__main__":
     unittest.main()
