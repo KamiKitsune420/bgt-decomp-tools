@@ -257,6 +257,35 @@ RECORDS_13 = {
     #: has 202 entries and 16 disagree with the newer numbering, Perilous
     #: Hearts' 202 and 22, and Psycho Strike's 200 and none.
     "early_opcodes": False,
+    #: Whether each interface a class implements is followed by an encoded
+    #: vtable offset. 1.3's tagged reader writes one; AngelScript 2.26's
+    #: `ReadObjectTypeDeclaration` reads the interface list as type-infos
+    #: and nothing else -- `size = ReadEncodedUInt(); for n: intf =
+    #: ReadObjectType();` -- so an offset read there swallows the next
+    #: record's first byte.
+    "interface_offset": True,
+    #: Where the body's shared/traits byte sits when it is not last. False
+    #: puts it straight after the line numbers, which is the 2012-07
+    #: engine's order; True puts it after the scriptSections list, which is
+    #: AngelScript 2.26's: `lineNumbers, sectionIdxs, isShared, variables`.
+    "traits_after_sections": False,
+    #: Whether a funcType-1 body closes with one more byte AFTER the
+    #: variables. AngelScript 2.26 writes `dontCleanUpOnException` there,
+    #: outside the debug guard -- so a release body ends in two bytes, the
+    #: shared flag and this one, where the 2012-07 engine writes one.
+    "cleanup_byte": False,
+    #: Whether the one-string script section that `section_per_record`
+    #: reads is itself guarded by `noDebugInfo`. The 2012-07 engine has no
+    #: such flag and always writes it; AngelScript 2.26 reads it only
+    #: `if( !noDebugInfo )`, so a release module carries nothing there.
+    "section_needs_debug": False,
+    #: The bit that marks a script class, where the dialect's default is
+    #: wrong for this release. None keeps the dialect default (0x100000
+    #: tagged, 0x200000 len2); AngelScript 2.26 declares
+    #: `asOBJ_SCRIPT_OBJECT = 0x80000`, and `IsInterface` decides whether a
+    #: class block has a behaviour section, so the wrong bit desynchronises
+    #: on the first interface.
+    "script_object_flag": None,
 }
 
 #: Screaming Strike's engine (2012-07-24, 394 registered names): 1.3's
@@ -300,9 +329,68 @@ RECORDS_2012_03 = dict(RECORDS_2012,
                        template_subtype_early=True,
                        early_opcodes=True)
 
+#: **AngelScript 2.26.1 and 2.26.2** -- the BGT builds of 2012-12-28 (420
+#: registered names, zompocalypse) and 2013-04-24 (427, River Raiders,
+#: X-Wheel, Active Soundscape Engine). Written from AngelScript's own
+#: published `as_restore.cpp` for those two tags, which differ from each
+#: other only in an internal mask (`funcId & 0xFFFF` against `funcId &
+#: ~FUNC_IMPORTED`) and not in one byte of the format -- and checked against
+#: the modules, which land exactly on EOF under it.
+#:
+#: Relative to 1.3 it is the 2012-07 engine's records with the `noDebugInfo`
+#: byte back, the scriptSections list kept, and four things neither earlier
+#: profile has: no vtable offset after an interface, the shared byte AFTER
+#: the section list, a second body byte (`dontCleanUpOnException`) after
+#: the variables, and the per-record script section guarded by the debug
+#: flag.
+#:
+#: **`ALLOC`'s callee is meaningless for a registered type here too**, which
+#: the published source does not say -- its writer translates the callee
+#: one-based for every type. The modules disagree: zompocalypse writes
+#: `ALLOC 4, 33` 105 times for `string`, and `usedFunctions[32]` is
+#: `sound::get_active`; X-Wheel writes `ALLOC 0, 11` 558 times. A constant
+#: is not a callee, so this takes the 2012-07 engine's rule and the
+#: decompiler takes the arity from the stack.
+RECORDS_2013 = dict(
+    RECORDS_13,
+    datatype_early=True,
+    global_init_gate=True,
+    traits_last=False,
+    traits_after_sections=True,
+    cleanup_byte=True,
+    section_per_record=True,
+    section_needs_debug=True,
+    token_shift=4,
+    early_behaviours=True,
+    interface_offset=False,
+    script_object_flag=0x80000,
+    alloc_callee_script_only=True,
+)
+
+#: **AngelScript 2.25.1 to 2.26.0** -- zompocalypse's engine (2012-12-28,
+#: 420 names). 2.26.1's records with the two things that tag changed taken
+#: back out, both read from the published source:
+#:
+#: - a template type-info names ONE subtype and no count -- `'a'`, the
+#:   name, then the subtype's own `'s'` or `'t'` tag. The engine's template
+#:   had a single `templateSubType` until 2.26.1 made it an array, and
+#:   2.26.0's `ReadObjectType` still has no count. zompocalypse's first
+#:   object variable is `61 6e 05 "array" 74 3f`: array, 't', 63 = `bool`.
+#: - the debug block has no scriptSections list (2.25.x writes none, and
+#:   2.26.0's is plain indices with no strings, which no profile here reads
+#:   -- so a DEBUG 2.26.0 build would not land; a release one does).
+#:
+#: 2.25.0 writes no `dontCleanUpOnException` byte; no sample of it is here,
+#: so it is not a profile.
+RECORDS_2012_12 = dict(RECORDS_2013,
+                       template_subtype_count=False,
+                       debug_sections=False)
+
 #: Tried in order, verified first.
 RECORD_PROFILES = (("1.3", RECORDS_13), ("2012-07", RECORDS_2012),
-                   ("2012-03", RECORDS_2012_03))
+                   ("2012-03", RECORDS_2012_03), ("2.26", RECORDS_2013),
+                   ("2.25", RECORDS_2012_12))
+RECORDS_BY_NAME = dict(RECORD_PROFILES)
 
 
 class Reader:
@@ -923,7 +1011,7 @@ class Reader:
             # 6, column 7.
             rec["lineNumbers"] = [self.eu() for _ in range(count)]
 
-        if not self.records["traits_last"]:
+        if not self.records["traits_last"]                 and not self.records["traits_after_sections"]:
             # The 2013 engine closes the line numbers with the traits byte and
             # only then reads the variables -- the one-byte read at 0x41AC1F,
             # immediately after the loop at 0x41ABE4. 1.3 writes it after the
@@ -939,10 +1027,7 @@ class Reader:
             # build.
             rec["traits"] = self.raw(1)[0]
 
-        if not self.debug_info:
-            return
-
-        if self.records["debug_sections"]:
+        if self.debug_info and self.records["debug_sections"]:
             count = self.eu()
             if not 0 <= count <= 1 << 16:
                 raise ParseError("implausible section count %d" % count)
@@ -951,6 +1036,22 @@ class Reader:
                 sections.append(self.eu() if i % 2 == 0 else self.string())
             rec["sections"] = sections
 
+        if not self.records["traits_last"]                 and self.records["traits_after_sections"]:
+            # AngelScript 2.26 writes `isShared` here, between the section
+            # list and the variables -- and outside the debug guard, so a
+            # release body carries it too.
+            rec["traits"] = self.raw(1)[0]
+
+        if self.debug_info:
+            self._debug_variables(rec)
+
+        if self.records["cleanup_byte"]:
+            # ...and `dontCleanUpOnException` after the variables, again
+            # unguarded. Two bytes where the 2012-07 engine writes one.
+            rec["cleanup"] = self.raw(1)[0]
+
+    def _debug_variables(self, rec: Dict[str, Any]) -> None:
+        """The debug block's variable list. See `debug_head`."""
         count = self.eu()
         if not 0 <= count <= 1 << 16:
             raise ParseError("implausible variable count %d" % count)
@@ -980,6 +1081,8 @@ class Reader:
         way: River Raiders is the first RELEASE build of a generation whose
         only earlier sample, Screaming Strike, is a debug one.
         """
+        if self.records["section_per_record"]                 and self.records["section_needs_debug"]                 and not self.debug_info:
+            return
         if self.records["section_per_record"]:
             # One string and nothing else, read at the join after the
             # funcType switch (0x41ADBB), so a funcdef carries an empty one
@@ -1147,6 +1250,8 @@ class Reader:
 
     @property
     def script_object_flag(self) -> int:
+        if self.records["script_object_flag"] is not None:
+            return self.records["script_object_flag"]
         return (ASOBJ_SCRIPT_OBJECT_TAGGED if self.dialect == TAGGED
                 else ASOBJ_SCRIPT_OBJECT)
 
@@ -1185,7 +1290,8 @@ class Reader:
             out["interfaces"].append(self.type_info())
             # The newer reader skips the vftable offset when the *declaring*
             # type is itself an interface; the older one always reads it.
-            if not iface or self.dialect == TAGGED:
+            if (not iface or self.dialect == TAGGED) \
+                    and self.records["interface_offset"]:
                 self.eu()                       # interface vftable offset
 
         flags = decl["flags"]
@@ -1719,6 +1825,7 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
             "early_opcodes": r.records["early_opcodes"],
             "alloc_callee_script_only":
                 r.records["alloc_callee_script_only"],
+            "script_object_flag": r.records["script_object_flag"],
             "enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
@@ -1805,7 +1912,11 @@ def trace_module(path: str,
                template_namespace=info["template_namespace"],
                unguarded_lists=info["unguarded_lists"],
                objvar_three=info["objvar_three"],
-               legacy_body=info["legacy_body"])
+               legacy_body=info["legacy_body"],
+               # The release `summarize` landed under, not 1.3's by default:
+               # a second read under different records is a third reading
+               # of one format, and the tracer refuses one that disagrees.
+               records=RECORDS_BY_NAME[info["records"]])
     r.trace = [("raw", data[:start])]          # the header detect() stepped over
     for _ in range(len(enums)):
         r.enum()
@@ -1851,6 +1962,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "early_behaviours": walk["early_behaviours"],
             "early_opcodes": walk["early_opcodes"],
             "alloc_callee_script_only": walk["alloc_callee_script_only"],
+            "script_object_flag": walk["script_object_flag"],
             # The module's own first byte -- unless the build writes no such
             # byte, in which case there is nothing to report and a 0 here
             # would read as "a debug build" for every release module of that

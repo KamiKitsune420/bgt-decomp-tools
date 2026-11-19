@@ -2735,6 +2735,9 @@ for the `for` headers it now writes.
 | Screaming Strike (2012-07 engine, **debug**) | 951 | 0 | 0 | yes | 346 | **yes** |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Aliens attack (2012-03) | 5,766 | 0 | 0 | yes | 1,662 | not asked -- a fifth engine, see **A FIFTH generation** |
+| zompocalypse (2012-12, AngelScript 2.25) | 2,828 | 0 | 0 | yes | 707 | not asked -- see **AngelScript 2.25 and 2.26** |
+| Active Soundscape Engine (2013-04, AngelScript 2.26) | 3,733 | 0 | 0 | yes | 968 | not asked |
+| X-Wheel (2013-04, AngelScript 2.26) | 9,151 | 0 | 0 | yes | 2,102 | not asked |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
 | Palace Punch-up (2010 beta) | 3,200 -> **3,147** | 0 | 0 | yes | 823 | not asked |
@@ -4091,12 +4094,11 @@ Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
 
-**Three of those rows are new, and two of them are not supported.** Aliens
+**Three of those rows are new, and all three are supported now.** Aliens
 Attack's 2012-03 engine reads end to end -- see **A FIFTH generation**
-below -- and the 2012-12 and 2013-04 builds do not: a product of every
-record field this reader has, 16,384 walks, gets 5% through River Raiders
-and no further, so that generation needs a field that is not here yet. See
-**The 2012-12 and 2013-04 engines are open**. `adventure at c` is a 190 MB
+below -- and the 2012-12 and 2013-04 builds are AngelScript 2.25 and 2.26,
+read from that library's own published reader: see **The 2012-12 and
+2013-04 engines are AngelScript 2.25 and 2.26, and they open**. `adventure at c` is a 190 MB
 stock-1.3 title whose runtime registers two names more than `bgt.exe`
 does, which is not looked into.
 
@@ -14287,33 +14289,137 @@ field names the reader actually looks up and requires each to be declared;
 it finds ten, and it fails if one is removed. A baseline that is itself
 wrong is not a baseline, for the umpteenth time in this file.
 
-## The 2012-12 and 2013-04 engines are open
+## The 2012-12 and 2013-04 engines are AngelScript 2.25 and 2.26, and they open
 
-Two more releases turn up in the same batch of executables, and neither
-opens: **zompocalypse** (2012-12-28, 420 registered names) and **River
-Raiders** and **casino** (2013-04-24, 427 names, the same build as the 2013
-BGT this file already dates from somebody's pack tool). All three carry
-**189 opcodes**, contiguous from 0 and in 1.3's numbering with not one name
-disagreeing -- so the renumbering happened between 2012-03 and 2012-12 and
-the count went 202, 189, 200 as AngelScript reorganised.
+This section said those two releases were open, with a bound: a product of
+every record field this reader had -- 16,384 walks over River Raiders --
+reached about 5% and landed nowhere, so the generation needed a field that
+was not here. It needed **five**, and the way to get them was the one this
+file opens with, from a direction it had not tried for BGT: **AngelScript's
+own published `as_restore.cpp`**, fetched for every tag from 2.19.0 to
+2.28.0. The runtime does not name its AngelScript, so the version is pinned
+by the format rather than by a string.
 
-What is established, and it is a bound rather than a reading: a product of
-**every** record field this reader has -- 16,384 walks over River Raiders,
-both body shapes and both legacy-body answers included -- gets to 0x1167 of
-0x12929, about 5%, and no combination lands. So this generation needs at
-least one field that is not here, and the way to get it is the one this
-file opens with: read that build's own `asCReader`.
+| engine | registered names | AngelScript | profile |
+|---|---|---|---|
+| zompocalypse (2012-12-28) | 420 | 2.25.1 to 2.26.0 | `"2.25"`, `RECORDS_2012_12` |
+| X-Wheel, Active Soundscape Engine, River Raiders (2013-04-24) | 427 | **2.26.1 or 2.26.2** | `"2.26"`, `RECORDS_2013` |
 
-Two things that were read and are worth keeping for whoever does:
+**2.26.1 and 2.26.2 are one format.** The only difference between the two
+tags' `as_restore.cpp` is an internal mask -- `funcId & 0xFFFF` against
+`funcId & ~FUNC_IMPORTED` -- and not one byte of what is written. The
+2.26.0 -> 2.26.1 change is the one that matters: `templateSubType` became an
+array and a template type-info gained a subtype count. That is the whole
+difference between the two profiles, plus the debug block's section list
+(absent in 2.25; plain indices with no strings in 2.26.0, which no profile
+reads, so a DEBUG 2.26.0 build would not land and a release one does).
 
-- **Its funcdef parses** under `datatype_early` with 1.3's trailing
-  namespace, so `sig_namespace_first` is off and the signature is 1.3's.
-- **Its `you` constructor ends exactly where the factory's `f` tag begins**
-  when the body is read as 1.3's -- stackNeeded, `{typeinfo, eu, eu}` per
-  object variable, `objVariablesOnHeap`, `objVariableInfo`, then the traits
-  byte -- which is what the unconditional-traits correction above was found
-  from. The factory after it does not, so something between the two is
-  still unread.
+What 2.26 writes that no earlier profile had, every one read from the source
+and every one confirmed by a module landing:
+
+| record | 2.26 | the nearest earlier profile |
+|---|---|---|
+| `noDebugInfo` byte | **present** | 2012-07: absent |
+| an interface in a class block | the type-info and **nothing else** | 1.3 tagged: an encoded vtable offset after it |
+| the body's closing bytes | lineNumbers, sectionIdxs, **isShared**, variables, **dontCleanUpOnException** | 2012-07: one byte, after the line numbers |
+| the per-record script section | **only `if( !noDebugInfo )`** | 2012-07: always |
+| the script-object flag | **0x80000** | tagged default 0x100000 |
+
+and the rest is the 2012-07 engine's: data types token-first with split flag
+bytes, a gated global initialiser, the four-below token numbering, the
+early behaviour numbering, the signature's namespace last.
+
+**Measured on the three modules on this machine:**
+
+| title | module | tail | parse errors | `bgt validate` |
+|---|---|---|---|---|
+| X-Wheel | 167,434 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+| Active Soundscape Engine | 83,180 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+| zompocalypse | 49,993 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+
+The earlier releases are untouched by construction -- both profiles are
+tried after every verified one -- and by measurement: Battle Zone, TubeSim,
+Treasure Troll and Perilous Hearts recover byte-identical to the commit
+before.
+
+**`trace_module` re-read every module under 1.3's records**, whichever
+profile `summarize` had landed under, which is a third reading of one format
+and would have refused the rewrite of every non-1.3 title. It passes the
+release now.
+
+### Two things the source does NOT say, and the modules do
+
+**`ALLOC`'s callee is meaningless for a registered type here too.** The
+2.26.1 writer translates the callee one-based for every type. zompocalypse
+writes `ALLOC 4, 33` 105 times for `string`, and `usedFunctions[32]` is
+`sound::get_active`; X-Wheel writes `ALLOC 0, 11` 558 times. A constant is
+not a callee, so both profiles take the 2012-07 engine's
+`alloc_callee_script_only`. Whether BGT patched its AngelScript or writes
+`ALLOC` some other way is not settled; the bytes are.
+
+**...and the arity rule that reads the stack instead had two holes**, both
+closed in `_alloc_arity_from_stack`:
+
+- **It only fired when the bogus callee HAD parameters.** Screaming Strike's
+  constant resolves to the two-parameter `random`; these resolve to
+  zero-parameter getters, so the rule never ran, the string literal above the
+  destination was popped AS the destination, and every literal in all three
+  titles came out `"LWorks" = string();` with `null` where it was passed.
+- **It took the whole run of addresses minus one.** That held for Screaming
+  Strike's `[local_7, tmp6]` and miscounts as soon as the enclosing call has
+  already pushed an address: zompocalypse's menu builds
+  `add_item_tts(text, id)` as `[VAR 4, PSF 7, PSF 1]`, and the run took two
+  arguments, made the first item's id the destination and passed `<?>`.
+
+Values that are not addresses, above the nearest address, are the arguments;
+an address on top is one argument, the copy constructor's. Before and after:
+
+```
+before:  "Zompocalypse Concept Demo" = string();
+         game_data.setup(null, null, null);
+         local_3.add_item_tts(null, <?>);
+after:   local_5 = "Zompocalypse Concept Demo";
+         game_data.setup("LWorks", local_5, false);
+         local_3.add_item_tts("Play Zompocalypse", "play");
+```
+
+**Screaming Strike is the one title already on that path, and it is not on
+this machine**, so its row in the standings is owed a re-measurement. The
+second hole is the only one that can reach it, and only where an enclosing
+call had already pushed an address below an `ALLOC`'s destination.
+
+### `?` is 57 in this numbering, and it was never mapped
+
+The four-below token numbering shifts only the type tokens, and `?` -- the
+`?&in` parameter -- is not one, so it stayed 57 where the decompiler looks
+for the IR's 60. Every `?&in` argument then lost its meaning: the hidden
+TYPEID slot read as a value, and Active Soundscape Engine's `library::call`
+came out `dll.call(sig, path, string, 4294967295, int, ...)`.
+
+57 in **every** AngelScript from 2.19.0 to 2.28.0, read out of each tag's
+own `as_tokendef.h` -- so it reaches the 2010-2012 titles too, and Perilous
+Hearts is byte-identical with it, having no `?&in` argument. It moves by
+three rather than four because both inserts that make up the shift sit
+below it, which is why it is named in `as_early.token` rather than left to
+the general rule.
+
+### What they recover to
+
+| title | lines | goto | split | calls read back | `bgt audit` calls / literals / constants |
+|---|---|---|---|---|---|
+| zompocalypse | 2,828 | 0 | verified | 707 | **0 / 0 / 0** |
+| Active Soundscape Engine | 3,733 | 0 | verified | 968 | 2 / **0** / 2 |
+| X-Wheel | 9,151 | 0 | verified | 2,102 | 2 / 1 / 1 |
+
+0 unmodelled opcodes, 0 bodies given up on, 0 dangling gotos and 0 `<?>`
+on all three. The call rows are a constructor's generated member
+construction, the benign kind this file lists; X-Wheel's literal is an empty
+string; ASE's two constants are dead initialisers (`disk_free_space`'s
+`-1.0` stores, each overwritten by a `dictionary::get` before any read).
+`bgt signatures`: 2 `empty_arm` on X-Wheel, 1 `double_assign` on ASE, 6
+`empty_arm` on zompocalypse, none read down yet. **None of the three has
+been compiled or driven**, which is the stronger claim the standings ask
+for.
 
 ## Build to Survive is three DEBUG builds, and every free check passed
 

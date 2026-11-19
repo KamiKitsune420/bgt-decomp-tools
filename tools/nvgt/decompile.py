@@ -692,6 +692,27 @@ class Atom:
     ternary: tuple[str, Atom, Atom] | None = None
 
 
+def _alloc_arity_from_stack(stack: list) -> int:
+    """How many arguments an `ALLOC` takes when its callee cannot be read.
+
+    The destination is a slot ADDRESS, pushed before the arguments. Values
+    that are not addresses, sitting above the nearest address, are the
+    arguments -- a string literal arrives that way (the factory's
+    `const string&` pushed by `PshRPtr`), and so does a constant. When the
+    top is itself an address it is ONE argument: an object built in a temp
+    slot and passed by reference, which for a registered type is the copy
+    constructor. See `FuncDecompiler._alloc` for the builds this is for.
+    """
+    above = 0
+    for atom in reversed(stack):
+        if atom.is_ptr:
+            break
+        above += 1
+    if above and above < len(stack):
+        return above
+    return 1 if len(stack) >= 2 else 0
+
+
 #: the object a call is made on, and the method: `this.terrain.getTailleX()`
 #: has receiver `this.terrain`, not `this`. Taking the leading identifier
 #: instead made `this` the receiver of every method call on a member, and
@@ -6034,13 +6055,33 @@ class FuncDecompiler:
         # owner is not the allocated type is not this type's constructor.
         # The arity then comes from the stack, where the destination is the
         # DEEPEST pushed value: everything above it is an argument.
-        if fr is not None and nparams and not self._alloc_callee_is_readable(ins):
-            ptrs = 0
-            for atom in reversed(self.stack):
-                if not atom.is_ptr:
-                    break
-                ptrs += 1
-            nparams = max(0, ptrs - 1)
+        #
+        # **Whatever the bogus callee's arity happens to be.** This was gated
+        # on `nparams`, which held for Screaming Strike only because its
+        # constant resolves to a two-parameter function. AngelScript 2.25 and
+        # 2.26 builds write `ALLOC 4, 33` and `ALLOC 0, 11`, which resolve to
+        # zero-parameter getters, so the rule never fired, the string literal
+        # above the destination was popped AS the destination, and every
+        # literal came out `"LWorks" = string();` with a `null` where it was
+        # passed. An unreadable operand says nothing at all, including that
+        # there are no arguments -- so `fr` is dropped with it.
+        if not self._alloc_callee_is_readable(ins):
+            fr = None
+            # The destination is a slot ADDRESS. Values that are not
+            # addresses, sitting above the nearest one, are arguments --
+            # a string literal arrives that way, as the factory's
+            # `const string&` pushed by `PshRPtr`, and so does a constant.
+            #
+            # When the top is itself an address it is ONE argument -- an
+            # object built in a temp slot and passed by reference, which for
+            # a registered type is the copy constructor. This used to take
+            # the whole run of addresses minus one, which held for Screaming
+            # Strike's `[local_7, tmp6]` and miscounts as soon as the
+            # enclosing call has already pushed an address of its own:
+            # zompocalypse's menu builds `add_item_tts(id, text)` as
+            # `[VAR 4, PSF 7, PSF 1]`, and the run took two arguments, made
+            # the first item's id the destination and passed `<?>`.
+            nparams = _alloc_arity_from_stack(self.stack)
         # VM layout: [dest pushed first] [args reversed] (obj pushed by VM);
         # pops yield args in forward order, then the destination slot.
         args = [self._deref(self.stack.pop() if self.stack else Atom("raw", "<?>"))
