@@ -532,8 +532,19 @@ class Builder:
         #: ...and whether an `ALLOC`'s callee operand is worth reading at
         #: all for a type the module does not declare. Carried on the
         #: module, because the decompiler is where the arity is used.
+        #: The 2011 and 2012 engines read by `as_early` are such builds too,
+        #: and leaving them out cost every one of them the strings it copied
+        #: into an argument: `PSF 6 ; <member> ; ALLOC string 33` resolved 33
+        #: to a callee with no parameters, so the member became the
+        #: destination and the call got `null` -- 101 such arguments in
+        #: Antony, 77 in Grodan Gun, 12 in Ljudfarmen, and Survive would not
+        #: compile. **The 2010 beta is not one**: its operand names the copy
+        #: constructor, and taking the stack rule there instead puts 18
+        #: `null`s INTO Palace Punch-up. So it is the release, measured both
+        #: ways, that decides.
         self.m.alloc_callee_script_only = bool(
-            info.get("alloc_callee_script_only"))
+            info.get("alloc_callee_script_only")
+            or (info.get("early") and info.get("release") != "2010-07"))
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}
@@ -905,9 +916,15 @@ class Builder:
         object_slots = {ov[-1] for ov in rec.get("objVars", [])}
         for index, ins in enumerate(f.bytecode):
             if ins.name == "PSF":
+                # `GETOBJREF n` between them converts a value further down
+                # the stack and leaves the destination where it is:
+                # `VAR 8 ; PSF 6 ; GETOBJREF 1 ; REFCPY` is `@slot6 = slot8`
+                # in BGT's own `dynamic_menu::run_extended`, and missed it
+                # declared `sound local_6;` and assigned it by value.
                 nxt = next((f.bytecode[j] for j in
-                            range(index + 1, min(index + 3, len(f.bytecode)))
-                            if f.bytecode[j].name != "SUSPEND"), None)
+                            range(index + 1, min(index + 4, len(f.bytecode)))
+                            if f.bytecode[j].name not in
+                            ("SUSPEND", "GETOBJREF", "GETREF")), None)
                 if nxt is not None and nxt.name == "REFCPY":
                     handles.add(_s16(ins.w_arg))
             elif (ins.name in ("SetV4", "SetV8") and not ins.dw_arg

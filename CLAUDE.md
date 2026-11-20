@@ -14543,6 +14543,64 @@ only constructor and only in a statement ending in `;` -- a method's
 signature ends in `{` and its parameters are its own. Recovered and renamed
 afresh, Sable compiles cleanly.
 
+## Survive: the 2011 and 2012 engines lost every string they COPIED
+
+`Survive` (2012-02, Antony's engine, a debug build) recovered with 0 gotos,
+a verified split and 567 calls read back, and the compiler said well over
+**a hundred** things, nearly all of one shape:
+
+```
+loopsound = string();
+loopslot = pool.play_2d(null, null, y, x, oy, (ox != 0));
+```
+
+The bytecode is a member copied into an argument:
+
+```
+PSF 6 ; PshVPtr 0 ; ADDSi object::loopsound ; RDSPtr
+ALLOC string 33 ; VAR 6 ; ... ; CALLINTF sound_pool::play_2d
+```
+
+This file already records that the 2010-2012 builds translate an `ALLOC`'s
+callee **only for a script class**, and `bgt_asir` carried that rule for the
+2012-03, 2012-07 and 2.25 profiles -- through `as_module`. The `as_early`
+path never set it, so 33 resolved to a callee with no parameters, the member
+became the destination, and `play_2d` got two `null`s and its arguments
+shifted by one.
+
+**It was in every 2011 and 2012 title, and the audit had been saying so.**
+Measured against the commit before, on the four carved from their
+installers:
+
+| title | null arguments | `bgt audit` literals lost | lines |
+|---|---|---|---|
+| Antony (2012-02) | 101 -> **0** | 70 in 19 bodies -> **0** | 2,572 -> 2,514 |
+| Grodan Gun (2011-09) | 77 -> **0** | 51 in 22 bodies -> **0** | 2,970 -> 2,925 |
+| Ljudfarmen (2011-02) | 14 -> **0** | 0 -> 0 | 3,029 -> 3,045 |
+| Palace Punch-up (2010-07) | 0 -> 0 | **byte-identical** | 3,200 |
+
+`show_game_window(null)` in Antony's `main` is `show_game_window("Antony")`
+again, and its creatures play `"ant_hurt.wav"` rather than nothing.
+
+**The beta is the exception, and it was measured rather than assumed.**
+Applied to Palace Punch-up the stack rule put 18 `null`s and `<?>`s INTO a
+recovery that had none, because that build's operand really does name the
+copy constructor. So the release decides: every `as_early` profile but
+2010-07.
+
+**And one more handle shape, in BGT's own `dynamic_menu`.** The unfused
+`PSF v ; REFCPY` witness that a slot is a handle required the two to be
+adjacent, and `run_extended` writes
+
+```
+VAR 8 ; PSF 6 ; GETOBJREF 1 ; REFCPY        @menu_sound = temp
+```
+
+`GETOBJREF` converts the value BELOW and leaves the destination where it is,
+so it is skipped like `SUSPEND`. Missed, the slot was declared `sound
+local_6;` and assigned by value -- "No appropriate opAssign method found in
+'sound'", the last four errors. With both, **Survive compiles cleanly**.
+
 ## Build to Survive is three DEBUG builds, and every free check passed
 
 Three stock BGT 1.3 executables by Air Puck's author -- a client, a server
