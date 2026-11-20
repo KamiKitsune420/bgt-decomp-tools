@@ -2755,7 +2755,7 @@ for the `for` headers it now writes.
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
 | Paladin of the Sky | 23,106 | 0 | 0 | yes | 6,975 | not asked -- see **the compiler is the judge** |
 | Psycho Strike | 23,935 | 0 | 0 | yes | 6,421 | no -- **`elias`**, which no stock BGT registers |
-| The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
+| The Gate | 33,975 | 0 | 0 | yes | 8,680 | **yes** -- with Philip's elias build of BGT, music and all; see **Philip's own elias build** |
 | Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
 | Manamon 2 | 160,305 | 0 | 0 | yes | 51,016 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
@@ -4526,8 +4526,30 @@ unavoidable:
 | The Gate | "no -- `elias`, which no stock BGT registers" | **compiles cleanly**: 33,975 lines, 0 gotos, a verified split, 8,680 calls read back |
 | the three demos | -- | recovered against their own source: identical but for names, and `bool paused` read as an `int` |
 
-The Gate has not been driven or played with it yet; that needs its
-`sounds.dat` and `elias.dll` beside the project.
+**And it RUNS, music and all.** Recovered with its pack (323.9 MB) and
+`elias.dll` beside it, built release with Philip's engine and driven with
+`bgt drive`, the game's own code answers:
+
+```bash
+bgt drive gate/ --build release \
+    --setup 'retreave.open("sounds.dat"); prepare_audio();' \
+    --watch 'play_theme("boss/boss.epro", "boss", 1, -1)' \
+    --watch 'theme.get_playing()' --watch 'theme.get_greatest_level()'
+```
+
+| watched | answer |
+|---|---|
+| `play_theme(...)` | **1**, then 0 -- the game's own "already loaded" guard |
+| `theme.get_playing()` | **1** |
+| `theme.get_greatest_level()` | **19**, the figure the DLL gave the renderer |
+| `set_theme_level(7)` | **1**, and `get_transitioning()` goes 0 -> 1: elias waits for the bar |
+
+So the recovered pack key, the pack read through `retreave.get_file`, the
+`.epro` XML, the binding and the DLL all work end to end. And the game's own
+code is the third witness to the range: `play_theme(..., 1, -1)` turns the
+-1 into the minimum and calls `start(1, 1)`, and `set_theme_level(level, -1)`
+does the same -- The Gate always asks elias for exactly one level. Not
+PLAYED: `bgt drive` mutes the master volume and opens no window.
 
 ##### elias never opens a file, and that is the whole design
 
