@@ -14533,6 +14533,16 @@ have read it -- so Sable computed an attack's damage twice.
 Sable has not been driven; it asks for an embedded pack (`"*"`) that the
 executable on this machine does not carry.
 
+**And `bgt rename` broke the parameter one again.** It renames a
+parameter in the signature and the body, and the member declaration that
+names it sits at class scope, outside both -- so after a rename the class
+read `player new_class(arg0, ...)` beside `class_type(string nameInitial)`,
+and the compiler said "'arg0' is not declared", the one error left. The
+rename now follows the parameter into a member declaration, for the class's
+only constructor and only in a statement ending in `;` -- a method's
+signature ends in `{` and its parameters are its own. Recovered and renamed
+afresh, Sable compiles cleanly.
+
 ## Build to Survive is three DEBUG builds, and every free check passed
 
 Three stock BGT 1.3 executables by Air Puck's author -- a client, a server
