@@ -14703,7 +14703,23 @@ bgt compile recovered/game.bgt --compiler stub.exe --run    # the 2010 beta
 
 So Antony's stub is no instrument at all, and the probe with a deliberate
 error is what says so: check a compiler on a known-bad script before
-believing it about a recovery. The beta talks in its own words, too -- a
+believing it about a recovery.
+
+**Why, from the person who knows BGT's history:** Antony's runtime comes
+from a short window in which the AngelScript compiler was still linked in
+but Philip had already made it not work. The file agrees as far as it can
+be asked. The **parser** is there -- "Expected identifier", "Expected
+expression value", `_builtin_function_` -- which AngelScript needs anyway
+to register the engine's own declarations. The **compiler's** diagnostics
+are not: "Can't implicitly convert", "Illegal operation", "Unexpected
+token" and "Failed while compiling default arg" are absent, and so is BGT's
+whole compile front end ("Compiling %s", "Compilation Result", "Select a
+BGT Script to compile"). Grodan Gun's stub, nine weeks older, has every one
+of those, and is 1.64 MB against Antony's 968 KB. So the stub cannot
+compile, and the instrument that would have said "is this stub a compiler?"
+in one second is that string search, before any probe is run.
+
+The beta talks in its own words, too -- a
 "Beta Release" notice before anything, which the driver now answers and
 waits past (read as the script's own window, every beta run "compiled
 cleanly, and ran"), and `Line: 3 (13)` where later engines write
@@ -14762,7 +14778,7 @@ module whose source is three lines above. What it took:
 | Palace Punch-up (2010-07) | **compiles cleanly, and runs** | 1 error: `network::setup_server` takes four arguments in the beta and three in 1.3 -- an API difference, not a recovery defect |
 | Ljudfarmen (2011-02) | **compiles cleanly** | **compiles cleanly** |
 | Grodan Gun (2011-09) | **compiles cleanly** | **compiles cleanly** |
-| Antony (2012-02) | its stub cannot be asked | **compiles cleanly** |
+| Antony (2012-02) | its stub has no working compiler | **compiles cleanly** |
 
 Survive, X-Wheel, Sable, Antony and Power Player recover byte-identical to
 the commit before; Palace Punch-up, Ljudfarmen and Grodan Gun move by the
