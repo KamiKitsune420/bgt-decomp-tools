@@ -725,6 +725,20 @@ def _alloc_arity_from_stack(stack: list) -> int:
     return 1 if len(stack) >= 2 else 0
 
 
+def _null_if_zero(value: "Atom") -> "Atom":
+    """A handle copied from the constant 0 is `null`.
+
+    The 2010-2012 engines have no `ClrVPtr`, so `cb@ h = null;` is
+    `PshC4 0 ; PSF 1 ; REFCPY` -- and a copy of a handle can only be a
+    handle, so the one constant it can hold is the null one. Rendered as
+    `@local_1 = 0;` it is "Can't implicitly convert from 'const uint' to
+    'menu_callback@'", in BGT's own `dynamic_menu` as Ljudfarmen ships it.
+    """
+    if value.kind == "const" and value.text in ("0", "0u", "0.0"):
+        return Atom("null", "null", value.dw_size)
+    return value
+
+
 def _alloc_destination_on_top(stack: list, instrs: list, k: int) -> bool:
     """Is the address on top of the stack this `ALLOC`'s DESTINATION?
 
@@ -1768,6 +1782,14 @@ def _constructor_type(dt: DataType) -> str:
     if (dt.obj_type is not None and dt.obj_type.template_syntax == "suffix"
             and dt.template_subtypes):
         inner = ", ".join(sub.format() for sub in dt.template_subtypes)
+        #: The 2010 beta names its array template `_builtin_array_`, which
+        #: that engine accepts in an expression and every later one does
+        #: not. The suffix form is the one both take -- `string[]()` was put
+        #: to the beta and to BGT 1.3 and compiles in each -- so it is used
+        #: wherever it parses, which is whenever no subtype is a handle.
+        if (dt.obj_type.name != "array"
+                and not any(sub.is_object_handle for sub in dt.template_subtypes)):
+            return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
         return "%s<%s>" % (dt.obj_type.name, inner)
     return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
 
@@ -1888,6 +1910,57 @@ def _drop_redundant_construction(dt: DataType, name: str, stmts, namespace=""):
             break              # the next statement READS it: not a dead store
         out.pop(0)
     return out
+
+
+_LIST_LITERAL = re.compile(
+    r'^(?:"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?[fu]?|true|false)$')
+
+
+def _fold_element_list(stmts, name: str) -> str | None:
+    """An initialiser list the 2010-2012 engines compiled element by element.
+
+    Those engines have no initialisation-list protocol: Ljudfarmen's
+    `string[] bull_objects = {"coffee", "hen_house", ...};` compiles to a
+    sized array and one store per element, so it came back as
+
+        string[] bull_objects = __nvgt_global_init_47();
+        string[] __nvgt_global_init_47() {
+            string[] bull_objects;
+            bull_objects = array<string>(6);
+            bull_objects[0] = "coffee";
+            ...
+
+    -- which BGT 1.3 accepts and Ljudfarmen's own engine refuses outright:
+    "Function calls are not allowed in global expressions", and every use
+    of the global after it "Use of uninitialized global variable". The
+    engine was asked, by building a probe with that game's own runtime:
+    `string[] w = {"coffee", "mud"};` compiles to exactly that shape, and
+    both engines accept the list form.
+
+    Only the exact shape: the size, then every index from 0 to N-1 once and
+    in order, each a literal. Anything else is real work and keeps its
+    helper.
+    """
+    if len(stmts) < 2:
+        return None
+    head = stmts[0].strip()
+    m = re.match(r"^" + re.escape(name) + r" = array<[^>]+>\((\d+)\);$", head)
+    if not m:
+        return None
+    count = int(m.group(1))
+    if count == 0 or count != len(stmts) - 1:
+        return None
+    values = []
+    for i, stmt in enumerate(stmts[1:]):
+        prefix = "%s[%d] = " % (name, i)
+        text = stmt.strip()
+        if not (text.startswith(prefix) and text.endswith(";")):
+            return None
+        value = text[len(prefix):-1].strip()
+        if not _LIST_LITERAL.match(value):
+            return None
+        values.append(value)
+    return "{" + ", ".join(values) + "}"
 
 
 def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
@@ -3675,6 +3748,24 @@ class FuncDecompiler:
         if name in ("CMPi", "CMPi64", "CMPu", "CMPu64", "CMPf", "CMPd"):
             self._flush_pending_call()
             dt = _numeric_type(name)
+            #: **Two handles compared as integers are compared as handles.**
+            #: The 2010-2012 engines have no `CmpPtr`, so BGT's own
+            #: `@handle == null` is `SetV4 5, 0 ; CMPi 4, 5` -- and the null
+            #: in slot 5 folds into the comparison, where normalising it to
+            #: `int` turned it back into `0`: `local_4 == 0`, "No conversion
+            #: from 'sound@&' to 'uint'", in Ljudfarmen's `sound_pool`.
+            a_dt = self.var_types.get(_s16(ins.w_arg))
+            b_dt = self.var_types.get(_s16(ins.w_arg2))
+            if name == "CMPi" and any(t is not None and t.is_object_handle
+                                      for t in (a_dt, b_dt)):
+                def handle_side(atom):
+                    return (Atom("null", "null", atom.dw_size)
+                            if atom.kind == "const" and atom.text == "0"
+                            else atom)
+                self.cmp_pair = (handle_side(self._compared(_s16(ins.w_arg))),
+                                 handle_side(self._compared(_s16(ins.w_arg2))))
+                self.cmp_is_handle = True
+                return
             self.cmp_pair = (self._normalize_arg(self._compared(_s16(ins.w_arg)), dt),
                              self._normalize_arg(self._compared(_s16(ins.w_arg2)), dt))
             return
@@ -3695,6 +3786,16 @@ class FuncDecompiler:
             left = self._compared(off)
             if name in ("CMPIi", "CMPIi64") and _s32(ins.dw_arg) < 0:
                 left = self._as_signed(left, off, name)
+            #: A handle compared with the immediate 0 is compared with
+            #: `null`: the 2011 engine writes BGT's own
+            #: `if (!looping && @handle == null)` as `CMPIi 4, 0` on a
+            #: `sound@` slot, and typed as a number it came out
+            #: `local_4 == 0` -- "No conversion from 'sound@&' to 'uint'".
+            slot_dt = self.var_types.get(off)
+            if (name == "CMPIi" and not ins.dw_arg and slot_dt is not None
+                    and slot_dt.is_object_handle):
+                self.cmp_pair = (left, self._typed_constant(0, slot_dt))
+                return
             self.cmp_pair = (left,
                              self._typed_constant(_s32(ins.dw_arg), _numeric_type(name)))
             return
@@ -5079,6 +5180,15 @@ class FuncDecompiler:
             # constant `null` settles the operator too, because
             # `_handle_comparison` answers that a `null` operand is a handle
             # comparison whatever opcode produced it.
+            #: ...and a slot DECLARED as a handle holds no other constant at
+            #: all, whatever its type: a funcdef handle is not a reference
+            #: type `_is_reference_type` knows, and neither is a registered
+            #: type nothing returned through the object register. The 2011
+            #: engine's `cb@ g = null;` and `sound@ s; ... s is null` both
+            #: store a `SetV4 v, 0`, and came out `@local_5 = 0;` -- "Can't
+            #: implicitly convert from 'const uint' to 'menu_callback@'".
+            if value == 0 and dt.is_object_handle:
+                return Atom("const", "null", data_type=dt, constant_bits=bits)
             if (value == 0 and dt.obj_type is not None
                     and self._is_reference_type(dt)):
                 return Atom("const", "null", data_type=dt, constant_bits=bits)
@@ -5560,11 +5670,11 @@ class FuncDecompiler:
                 self.temp_bound[off] = (self._pos(), self.stmt_count)
                 self.consumed_temps.add(off)
                 return
-            self._bind(off, self._deref(src))
+            self._bind(off, _null_if_zero(self._deref(src)))
         else:  # REFCPY
             dest = self.stack.pop() if self.stack else Atom("raw", "<?>")
             src = self.stack[-1] if self.stack else Atom("raw", "<?>")
-            value = self._deref(src)
+            value = _null_if_zero(self._deref(src))
             if dest.kind == "list_elem":
                 self.list_values.setdefault(dest.offset, {})[dest.list_index] = value
             elif dest.kind == "global":
@@ -8496,10 +8606,21 @@ class ModuleDecompiler:
             self._wrap_namespace(start, t.namespace_)
             self.emit()
 
-        for f in m.funcdefs:
+        # A funcdef that names one of the module's own classes goes after
+        # the classes in an engine that resolves no type forward (the 2010
+        # beta); everywhere else it stays here, ahead of them.
+        late_funcdefs = []
+        if getattr(m, "declare_before_use", False):
+            class_names = {c.name for c in m.classes}
+            late_funcdefs = [f for f in m.funcdefs if f.parent_class is None
+                             and any(re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])",
+                                               funcdef_declaration(f))
+                                     for n in class_names)]
+        early_funcdefs = [f for f in m.funcdefs if f not in late_funcdefs]
+        for f in early_funcdefs:
             if f.parent_class is None:
                 self.emit(namespace_block(funcdef_declaration(f), f.namespace_))
-        if m.funcdefs:
+        if early_funcdefs:
             self.emit()
 
         for imported in m.imported_functions:
@@ -8511,6 +8632,8 @@ class ModuleDecompiler:
             self.emit()
         for c in m.classes:
             self._render_class(c)
+        for f in late_funcdefs:
+            self._render_late_funcdef(f)
         self._member_funcs = {id(f) for c in m.classes
                               for f in (c.methods + c.constructors + c.factories
                                         + ([c.destructor] if c.destructor else []))}
@@ -8531,6 +8654,11 @@ class ModuleDecompiler:
             self._render_function(f)
             self.emit()
         return "\n".join(self.lines).rstrip() + "\n"
+
+    def _render_late_funcdef(self, f) -> None:
+        """A funcdef emitted after the classes it names (the 2010 beta)."""
+        self.emit(namespace_block(funcdef_declaration(f), f.namespace_))
+        self.emit()
 
     def _render_class(self, c: TypeInfo) -> None:
         start = len(self.lines)
@@ -8894,6 +9022,11 @@ class ModuleDecompiler:
             # anything else, because it subsumes the single-statement fold
             # below for exactly the cases that fold cannot express.
             qualified_name = (namespace + "::" if namespace else "") + g.name
+            listed = (_fold_element_list(stmts, qualified_name)
+                      or _fold_element_list(stmts, g.name))
+            if listed is not None:
+                self.emit(f"{g.type.format()} {g.name} = {listed};")
+                continue
             built = _fold_to_construction(g.type, stmts, qualified_name) \
                 or _fold_to_construction(g.type, stmts, g.name)
             if built is not None:

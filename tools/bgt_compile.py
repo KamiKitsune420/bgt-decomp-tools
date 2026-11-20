@@ -155,6 +155,20 @@ while ((Get-Date) -lt $deadline) {
                 }
             }
             $isReport = ($title -like "Compilation*")
+            # The 2010 BGT beta opens a notice of its own before it does
+            # anything ("This is a public beta version of BGT..."). It is the
+            # engine talking, not the script and not the compiler, so it is
+            # answered and the wait goes on -- read as the script's own
+            # window, every run of a beta "compiled cleanly, and ran" before
+            # it had compiled anything.
+            if ($title -eq "Beta Release") {
+                $handle = [IntPtr]$window.Current.NativeWindowHandle
+                [BgtKeys]::SetForegroundWindow($handle) | Out-Null
+                [BgtKeys]::PostMessage($handle, 0x0100, [IntPtr]0x0D, [IntPtr]0) | Out-Null
+                [BgtKeys]::PostMessage($handle, 0x0101, [IntPtr]0x0D, [IntPtr]0) | Out-Null
+                Start-Sleep -Milliseconds 1200
+                continue
+            }
             if ($isReport) {
                 # Accumulate, and do not let a later window drop an earlier
                 # one's diagnostics. The same window is read again every
@@ -214,8 +228,10 @@ if ($proc.HasExited) { $exit = $proc.ExitCode }
     ConvertTo-Json -Compress -Depth 3
 """
 
-# "On line: 5 (5)" -- the line, then the column in parentheses.
-LINE_RE = re.compile(r"^On line: (\d+) \((\d+)\)$")
+# "On line: 5 (5)" -- the line, then the column in parentheses. The 2010 BGT
+# beta writes "Line: 5 (5)" for the same thing; its source echo is
+# "Line:     <code>", which the digits-and-parenthesis shape cannot match.
+LINE_RE = re.compile(r"^(?:On line|Line): (\d+) \((\d+)\)$")
 
 
 @dataclass

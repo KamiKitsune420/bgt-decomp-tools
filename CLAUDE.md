@@ -14669,7 +14669,7 @@ argument passed on and destroyed.
 
 Calls read back are unchanged on all eight. The suite is 1,178 passing.
 
-**Ljudfarmen's two are the shapes this file already names** for Perilous
+**Both are fixed now -- see the next section, which compiled them with their own engines.** Ljudfarmen's two were the shapes this file already names for Perilous
 Hearts: `Can't implicitly convert from 'const int' to 'menu_callback@'` and
 a handle compared with a number. **Palace Punch-up's 300 are its own**, and
 they start at the class declarations -- `'crumbling_speed' is not a member
@@ -14680,6 +14680,94 @@ run down.
 `while (true)` comes out of these builds as `while (true) { if (false)
 break; ...` -- `SetV1 5 1 ; CpyVtoR4 5 ; JZ` tests a literal. Ugly and
 correct, and left alone.
+
+## A game's own runtime is a COMPILER, and four of these titles now pass theirs
+
+A BGT game is the runtime with the module appended, and the runtime carries
+the compiler -- the same `bgtgame` window, the same "Compilation Result"
+report. Cut at the overlay offset `bgtlib.read_trailer` gives, the stub is
+an engine of exactly the game's version, which is the one compiler this
+project never had for the 2010-2012 titles:
+
+```bash
+python -c "import bgtlib; d=open('game.exe','rb').read(); open('stub.exe','wb').write(d[:bgtlib.read_trailer(d)])"
+bgt compile recovered/game.bgt --compiler stub.exe          # -c, as for bgt.exe
+bgt compile recovered/game.bgt --compiler stub.exe --run    # the 2010 beta
+```
+
+| stub | `-c` | run, no switch |
+|---|---|---|
+| Ljudfarmen (2011-02), Grodan Gun (2011-09), Power Player (BGT 1.0) | **compiles** | -- |
+| Palace Punch-up (2010-07 beta) | "The compiler is not available in the demonstration version" | **compiles**, then runs `main` |
+| Antony (2012-02) | builds nothing, reports nothing | exits silently -- **a script with an error "compiles cleanly"** |
+
+So Antony's stub is no instrument at all, and the probe with a deliberate
+error is what says so: check a compiler on a known-bad script before
+believing it about a recovery. The beta talks in its own words, too -- a
+"Beta Release" notice before anything, which the driver now answers and
+waits past (read as the script's own window, every beta run "compiled
+cleanly, and ran"), and `Line: 3 (13)` where later engines write
+`On line: 3 (13)`, which `LINE_RE` now reads.
+
+**A probe built BY the 2011 engine is a known answer for the format**, which
+is the step past asking a compiler what it accepts:
+
+```
+funcdef int cb(int);
+string[] words = {"coffee", "mud"};
+cb@ h = null;            sound@ s;    if (s is null) { }
+```
+
+recovered as `__nvgt_global_init_0()`, `@local_1 = 0;` and
+`sound local_4; ... if (local_4 == local_5)` -- every one wrong, in a
+module whose source is three lines above. What it took:
+
+- **An initialiser list is compiled element by element** -- `array<T>(N)`
+  and a store per index -- because these engines have no list protocol. The
+  helper it came back as is "Function calls are not allowed in global
+  expressions" to Ljudfarmen's own engine, and every use after it "Use of
+  uninitialized global variable". `_fold_element_list` puts the `{...}`
+  back, for the exact shape only: indices 0 to N-1 in order, each a literal.
+- **A handle holds no constant but null.** `PshC4 0 ; PSF 1 ; REFCPY`,
+  `SetV4 v, 0` into a slot declared `T@`, and `CMPi` of two slots where one
+  is a handle all render `null` and `is` now; as numbers they were "Can't
+  implicitly convert from 'const uint' to 'menu_callback@'" and "No
+  conversion from 'sound@&' to 'uint'", in BGT's own `dynamic_menu` and
+  `sound_pool` as these games ship them.
+- **Two object slots compared as integers are handles.** A value object is
+  compared through `opEquals`; `CMPi` compares pointers. `sound@ s;` is
+  never written, so the comparison is the only witness it has.
+
+**The 2010 beta needed three of its own**, each found by its compiler:
+
+- **Its property byte is an OFFSET, not flags.** `property_offsets` already
+  proved that and nothing used the proof the other way, so 17 for
+  `allow_escape` set the private bit -- `private`, a keyword the beta has
+  never heard of -- and offsets carrying the inherited bit left members
+  undeclared: the 300 errors this file recorded for Palace Punch-up under
+  BGT 1.3 were that, plus one cascade. Proven offsets are not flags now.
+- **It resolves no type forward.** `funcdef int menu_callback(dynamic_menu@,
+  string);` ahead of the class is "Identifier 'dynamic_menu' is not a data
+  type", which is why BGT's own `dynamic_menu.bgt` declares it at the END of
+  the file. For that release only (`declare_before_use`), a funcdef naming a
+  module class is rendered after the classes, into `includes/funcdefs.bgt`.
+- **Its array template is `_builtin_array_`**, which the beta takes in an
+  expression and nothing later does. `string[]()` compiles in both, so that
+  form is used wherever no subtype is a handle; and `_builtin_array_` is no
+  longer reported as a type "built with a newer BGT".
+
+| title | own engine | BGT 1.3 |
+|---|---|---|
+| Power Player (BGT 1.0) | **compiles cleanly** | **compiles cleanly** |
+| Palace Punch-up (2010-07) | **compiles cleanly, and runs** | 1 error: `network::setup_server` takes four arguments in the beta and three in 1.3 -- an API difference, not a recovery defect |
+| Ljudfarmen (2011-02) | **compiles cleanly** | **compiles cleanly** |
+| Grodan Gun (2011-09) | **compiles cleanly** | **compiles cleanly** |
+| Antony (2012-02) | its stub cannot be asked | **compiles cleanly** |
+
+Survive, X-Wheel, Sable, Antony and Power Player recover byte-identical to
+the commit before; Palace Punch-up, Ljudfarmen and Grodan Gun move by the
+shapes above and nothing else. Calls read back are unchanged on all eight.
+The suite is 1,186 passing. None of these has been PLAYED.
 
 ## Build to Survive is three DEBUG builds, and every free check passed
 

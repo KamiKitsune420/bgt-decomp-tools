@@ -545,6 +545,14 @@ class Builder:
         self.m.alloc_callee_script_only = bool(
             info.get("alloc_callee_script_only")
             or (info.get("early") and info.get("release") != "2010-07"))
+        #: The 2010 beta resolves a type only once it has been declared: its
+        #: own compiler says "Identifier 'dynamic_menu' is not a data type"
+        #: for `funcdef int menu_callback(dynamic_menu@, string);` ahead of
+        #: the class -- which is why BGT's own `dynamic_menu.bgt` declares
+        #: that funcdef at the END of the file. Every later engine resolves
+        #: forward, so only this release changes where a funcdef goes.
+        self.m.declare_before_use = bool(
+            info.get("early") and info.get("release") == "2010-07")
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}
@@ -930,6 +938,18 @@ class Builder:
             elif (ins.name in ("SetV4", "SetV8") and not ins.dw_arg
                   and _s16(ins.w_arg) in object_slots):
                 handles.add(_s16(ins.w_arg))
+            #: ...and a slot COMPARED as an integer is a handle. An object
+            #: held by value is compared through its `opEquals`; `CMPi` on
+            #: two object slots compares the pointers, which is `is`. The
+            #: 2011 engine writes `sound@ s; if (s is null)` as
+            #: `SetV4 5, 0 ; CMPi 4, 5`, and slot 4 is never written at all,
+            #: so nothing else says it is a handle -- it came out
+            #: `sound local_4;` compared with `==`, which is no program.
+            elif (ins.name == "CMPi"
+                  and _s16(ins.w_arg) in object_slots
+                  and _s16(ins.w_arg2) in object_slots):
+                handles.add(_s16(ins.w_arg))
+                handles.add(_s16(ins.w_arg2))
 
         #: **A `STOREOBJ` of the string factory's result is not a handle.**
         #: The 2010 to 2011-02 engines hand a literal back in the object
@@ -1353,6 +1373,16 @@ class Builder:
             ti.properties = [(p["name"], self.dt(p["type"]), p["flags"])
                              for p in block.get("properties", [])]
             ti.property_offsets = self.property_offsets(ti)
+            #: ...and where that field is proven to be an offset it is not
+            #: flags as well. Read as flags, the beta's offsets set the
+            #: private bit and the inherited bit at random: `allow_escape`,
+            #: at offset 17, came out `private` -- a keyword that engine has
+            #: never heard of, "Expected method or property" -- and every
+            #: member whose offset happened to carry the inherited bit was
+            #: left undeclared, so Palace Punch-up reported 300 errors of
+            #: the form "'crumbling_speed' is not a member of 'square'".
+            if ti.property_offsets:
+                ti.properties = [(n, dt, 0) for n, dt, _o in ti.properties]
             for f in ti.constructors + ti.factories + ti.methods + ti.vft:
                 if f.object_type is None:
                     f.object_type = ti
