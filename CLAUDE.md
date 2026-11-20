@@ -2755,7 +2755,7 @@ for the `for` headers it now writes.
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
 | Paladin of the Sky | 23,106 | 0 | 0 | yes | 6,975 | not asked -- see **the compiler is the judge** |
 | Psycho Strike | 23,935 | 0 | 0 | yes | 6,421 | no -- **`elias`**, which no stock BGT registers |
-| The Gate | 33,975 | 0 | 0 | yes | 8,680 | **yes** -- with Philip's elias build of BGT, music and all; see **Philip's own elias build** |
+| The Gate | 33,536 | 0 | 0 | yes | 8,691 | **yes** -- PLAYED before the two fixes below, which it found; with Philip's elias build of BGT, music and all; see **Philip's own elias build** |
 | Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
 | Manamon 2 | 160,305 | 0 | 0 | yes | 51,016 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
@@ -4550,6 +4550,114 @@ code is the third witness to the range: `play_theme(..., 1, -1)` turns the
 -1 into the minimum and calls `start(1, 1)`, and `set_theme_level(level, -1)`
 does the same -- The Gate always asks elias for exactly one level. Not
 PLAYED: `bgt drive` mutes the master volume and opens no window.
+
+#### ...and PLAYED, which found two defects no check here could
+
+The first person to play the recovered The Gate reported two things, and
+neither is visible to any count in this file: every menu choice had to be
+made twice, and the first stage died with
+
+```
+Null pointer access
+In function: character@ character::find_target()
+```
+
+**The menu ran twice.** `main_menu` came out
+
+```
+local_10 = menu.run_extended("sounds/speech/menu/welcome_to_gate.wav", ...);
+if (menu.run_extended("sounds/speech/menu/welcome_to_gate.wav", ...) == -1)
+```
+
+-- the `file_menu` defect this file records from Paladin, reached a new way.
+The result's slot is not named at the `CMPIi`, so that read folds the call
+in; the next read finds the value stale (`menu_error` may have run between)
+and PROMOTES it, which puts `local_10 = ...` back at the bind -- after the
+first read had already written the call. A value folded once is never
+"folded more than once", so `duplicate_binds` could not see it. A call
+promoted after a read folded it is now carried into the next pass as if it
+were a duplicate (`promoted_after_fold`), so it is promoted before its
+first read. The Gate loses 14 such calls, among them every menu, and Sable
+26 -- its `yes_no` asked its question twice, `active_enemy.find` and
+`check_class` ran twice per condition.
+
+**A member read before the null test guarding it.** The source is
+
+```
+if (last_attacker !is null && last_attacker.state != 1
+    && last_attacker.state != 0 && last_attacker.current_weapon !is null)
+```
+
+and `expr !is null` compiles to a handle copy whose whole life is one
+comparison:
+
+```
+RefCpyV 6 ; PopPtr ; ClrVPtr 7 ; CmpPtr 6 7 ; TNZ ; CpyRtoV4 5 ; FREE 6
+```
+
+`objVariableTypes` names slot 6, so the copy was a statement -- and a
+statement inside a short-circuit arm sorts ahead of the whole condition,
+which is the `find_walls` shape this file already records. So
+`last_attacker.current_weapon` was read first, on a fighter with no
+attacker. `_borrowed_for_a_null_test` treats that window -- one `CmpPtr`,
+no jump, then the `FREE` -- as a borrow, which folds the copy into the
+comparison where the source wrote it.
+
+It reaches every title that tests an expression against null, and it was
+hiding a third defect: Sable's menu dispatch read
+
+```
+if (((local_2 !is local_3) && (local_2 !is local_3)) && (local_2 !is local_3))
+```
+
+-- one slot compared with itself three times, where the source compares
+with three different menus. It now reads `(local_2 !is terrain_menu) &&
+(local_2 !is projects) && (local_2 !is saved_maps)`, and five more
+conditions like it. `collapsed_chain` cannot see that shape, because it
+looks for `!= 0` and `== 0` tests rather than `is`.
+
+| title | lines | calls read back | files differing |
+|---|---|---|---|
+| The Gate | 33,975 -> **33,451** | 8,680 -> **8,666** | -- |
+| Sable | 55,965 -> **55,592** | 14,398 -> **14,372** | 29 |
+| X-Wheel | 9,117 -> 9,094 | 2,103 | 4 |
+| Antony | 2,514 -> 2,500 | 484 | 3 |
+| Survive | 2,332 -> 2,318 | 567 | 3 |
+| Power Player, Palace Punch-up, Ljudfarmen, Grodan Gun | unchanged | unchanged | **0** |
+
+Every call that went is a duplicate, every line that went is a dead handle
+alias, the suite is 1,190 passing and `bgt oracle` is 55/55.
+
+**And then: "he walks at half speed, and enemies never die."** Both were
+one body -- the one this file had always listed as given up on for The
+Gate, `character::set_state`, "a jump table neither matcher claimed". It
+rendered as an empty function, so no character ever changed state:
+
+- `prepare_for_use` calls `set_state(5)` for the player, who is constructed
+  in state 4, and `walk` doubles the step interval in state 4 -- **half
+  speed**, which is exactly what was reported;
+- `handle_death` kills through `set_state(0)` and `set_state(1)` --
+  **nobody died**, and nothing dropped its weapon, item or money.
+
+The table is a `switch` over 0..12 whose case 8 arm is only a `break`, and
+an arm follows its table directly. So `_dense_table`, which took the whole
+run of consecutive `JMP`s as the table, read **fourteen** entries; case 8
+then pointed back into its own table and the backward-entry guard refused,
+correctly, a table that was never that long. The upper bound is in the
+guard -- `CMPIi sel, 12 ; JP` -- and the smallest such bound is the table's
+own, so the run is cut to `upper - low + 1` entries. Only ever cut: a
+shorter run is left exactly as it was.
+
+The body comes back whole, with all 25 calls the audit said were missing.
+`bgt audit` on The Gate is now down to base-constructor rows and one
+member construction. All eight other titles are byte-identical.
+
+**What this shows about the instruments.** The Gate had passed every check
+in this file -- 0 gotos, a verified split, compiled cleanly, ran its music
+under `bgt drive` -- with a body counted as given up on, in its standings
+row. A counted failure is still a failure, and this one was the game's
+whole state machine. The audit said so outright -- 25 values missing from
+one body -- and nothing acted on it until somebody played the game.
 
 ##### elias never opens a file, and that is the whole design
 
@@ -14765,6 +14873,40 @@ run down.
 `while (true)` comes out of these builds as `while (true) { if (false)
 break; ...` -- `SetV1 5 1 ; CpyVtoR4 5 ; JZ` tests a literal. Ugly and
 correct, and left alone.
+
+## Maestro Monster: BGT 1.0's `form.bgt`, and two more ways to copy a string
+
+`Maestro monster.exe` (VT Studios) is a second BGT 1.0 title: runtime
+2010-12-30, 240 names, the 2011-02 profile, landing exactly on EOF. It
+recovered with every free check clean, and its own runtime stub said **127
+errors**. Nearly all of them were in the copy of BGT 1.0's `form.bgt` it
+includes, and they were three shapes:
+
+- **A METHOD returning a string by value.** The rule that stops a `STOREOBJ`
+  of a by-value return being read as a handle only looked at a preceding
+  `CALL` or `CALLSYS`. `control::type_to_name()` is a `CALLINTF`, so every
+  slot it filled was declared `string@` -- 116 of the 127 errors.
+- **A copy with the SOURCE pushed after the `ALLOC`.** Power Player copies
+  as `PshRPtr ; PSF 6 ; ALLOC ; PshV4 6 ; opAssign`. This build also writes
+  `PSF 6 ; ALLOC ; PshV4 -1 ; PshV4 6 ; opAssign`, so the destination is the
+  SECOND push. `_alloc_destination_on_top` accepts that only when the third
+  instruction is an `opAssign`. Missed, `string_replace(caption, "&", "",
+  true)` came out `string_replace(null, "", string(1), <?>)`.
+- **A receiver pushed BY VALUE.** `return arg0;` is
+  `PSF 1 ; ALLOC ; PshV4 1 ; opAssign ; LOADOBJ 1`. The receiver reaches the
+  call as the temp's atom, `string()`, so it came out
+  `string() = arg0; return string();` ("Reference is temporary"). An
+  unnamed temp pushed that way now takes the assigned value.
+
+| | before | after |
+|---|---|---|
+| Maestro Monster, its own engine | 127 errors | **compiled cleanly** |
+| Maestro Monster, BGT 1.3 | -- | **compiled cleanly** |
+| Power Player, Ljudfarmen, Antony, Survive, X-Wheel, Sable, The Gate | -- | byte-identical |
+| Palace Punch-up | -- | one copy folded (`sound_error(tmp3, arg0)`); still compiles and runs with its own engine |
+| Grodan Gun | -- | `event local_5 = objects[i].serialize();` where it read `@local_5 = @...` of a by-value `event serialize()`; still compiles with its own engine |
+
+The suite is 1,196 passing and `bgt oracle` is 55/55. Not played.
 
 ## A game's own runtime is a COMPILER, and four of these titles now pass theirs
 

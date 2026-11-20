@@ -746,13 +746,29 @@ def _alloc_destination_on_top(stack: list, instrs: list, k: int) -> bool:
     assigning: `PshRPtr ; PSF 6 ; ALLOC string ; PshV4 6 ; opAssign`. The
     sign is that the very next instruction pushes the slot the top address
     names, making the new object a receiver rather than passing it on.
+
+    The SOURCE may also be pushed after the `ALLOC` rather than before it,
+    which is how Maestro Monster's BGT 1.0 `form.bgt` copies a parameter:
+    `PSF 6 ; ALLOC string ; PshV4 -1 ; PshV4 6 ; string::opAssign`. Then the
+    destination is the second push, and the `opAssign` that follows is what
+    says so -- a constructor argument is never immediately assigned into.
     """
     top = stack[-1] if stack else None
-    nxt = next((instrs[j] for j in range(k + 1, min(k + 4, len(instrs)))
-                if instrs[j].name != "SUSPEND"), None)
-    return (top is not None and top.is_ptr and top.offset is not None
-            and nxt is not None and nxt.name in ("PshV4", "PshVPtr")
-            and _s16(nxt.w_arg) == top.offset)
+    if top is None or not top.is_ptr or top.offset is None:
+        return False
+    after = [instrs[j] for j in range(k + 1, min(k + 6, len(instrs)))
+             if instrs[j].name != "SUSPEND"]
+    pushes = ("PshV4", "PshVPtr")
+    if after and after[0].name in pushes and _s16(after[0].w_arg) == top.offset:
+        return True
+    if (len(after) >= 3 and after[0].name in pushes
+            and after[1].name in pushes
+            and _s16(after[1].w_arg) == top.offset
+            and _s16(after[0].w_arg) != top.offset
+            and after[2].name.startswith("CALL")
+            and getattr(after[2].func_ref, "name", None) == "opAssign"):
+        return True
+    return False
 
 
 #: the object a call is made on, and the method: `this.terrain.getTailleX()`
@@ -2602,6 +2618,20 @@ class FuncDecompiler:
         #: once. Promoted on sight here, which is the only way to get the
         #: assignment in before the first read rather than after it.
         self.duplicate_binds: set[tuple[int, int]] = set()
+        #: (slot, bind position) pairs PROMOTED after a read had already
+        #: folded them. The promotion puts the assignment back at the bind,
+        #: and the read before it has already written the call -- so the
+        #: call runs twice. The Gate's `main_menu` is the shape:
+        #:
+        #:     local_10 = menu.run_extended("...welcome_to_gate.wav", ...);
+        #:     if (menu.run_extended("...welcome_to_gate.wav", ...) == -1)
+        #:
+        #: The `CMPIi` folded the result (one read, so never "folded more
+        #: than once"), and the next read found it stale -- `menu_error` may
+        #: have run -- and promoted it. Every menu in that game had to be
+        #: answered TWICE. Carried into the next pass like a duplicate, so
+        #: the value is promoted before its first read.
+        self.promoted_after_fold: set[tuple[int, int]] = set()
         #: [(bind position, call text)] for every call parked in a slot.
         #: A call is not a value, it is something the program did, so one
         #: whose text reaches no statement was not simplified away -- it was
@@ -2743,6 +2773,25 @@ class FuncDecompiler:
         before returning them; indexing `instrs` with one is out of range.
         """
         return len([pos for pos in web if pos not in self.sc_defs]) >= 2
+
+    def _value_pushed_temp(self) -> Optional[int]:
+        """The unnamed slot whose VALUE was pushed just before this call.
+
+        A receiver pushed with `PshV4 n` / `PshVPtr n` reaches the call as
+        whatever atom the slot held, so the slot itself is lost. Only an
+        unnamed temp qualifies: a named slot is a variable, and an assignment
+        to it is a statement.
+        """
+        for j in range(self.k - 1, max(self.k - 4, -1), -1):
+            ins = self.instrs[j]
+            if ins.name == "SUSPEND":
+                continue
+            if ins.name in ("PshV4", "PshVPtr"):
+                off = _s16(ins.w_arg)
+                if off > 0 and not self.is_named_here(off):
+                    return off
+            return None
+        return None
 
     def is_named_here(self, off: int) -> bool:
         """Is the value in this slot AT THIS POSITION a named variable?
@@ -4896,6 +4945,9 @@ class FuncDecompiler:
         """
         value = self.temps[off]
         pos, _ = self.temp_bound[off]
+        if (getattr(self, "fold_reads", {}).get((off, pos))
+                and value.text in getattr(self, "invocations", {})):
+            self.promoted_after_fold.add((off, pos))
         name = self.var_names.setdefault(off, f"local_{off}")
         #: **Already promoted.** This method ends by putting the slot's own
         #: name into `temps[off]`, so a second promotion of the same offset
@@ -5574,6 +5626,50 @@ class FuncDecompiler:
 
 
 
+    def _borrowed_for_a_null_test(self, off: int) -> bool:
+        """Is this `RefCpyV` the compiler's copy for one `x !is null`?
+
+        `expr !is null` copies the handle into a slot, compares it with a
+        slot `ClrVPtr` just nulled, and releases it:
+
+            RefCpyV 6 ; PopPtr ; ClrVPtr 7 ; CmpPtr 6 7 ; TNZ ;
+            CpyRtoV4 5 ; FREE 6
+
+        The slot's whole life is that one comparison. Read as a variable,
+        the copy became a statement -- and inside a short-circuit arm a
+        statement sorts ahead of the whole condition, so The Gate's
+        `character::find_target`, whose source is
+
+            if (last_attacker !is null && last_attacker.state != 1
+                && last_attacker.state != 0
+                && last_attacker.current_weapon !is null)
+
+        came out reading `last_attacker.current_weapon` BEFORE the null test
+        that guards it: "Null pointer access" as soon as a fighter with no
+        attacker looked for a target, which is every fighter at the start
+        of a stage.
+
+        Exactly one `CmpPtr` may read the slot, no jump may fall between,
+        and the `FREE` closes it -- so the value is read once, where it was
+        computed, and folding it changes nothing but where it is written.
+        """
+        compared = False
+        for ins in self.instrs[self.k + 1:self.k + 9]:
+            if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
+                return False
+            if ins.name == "FREE" and _s16(ins.w_arg) == off:
+                return compared
+            if ins.name == "CmpPtr" and off in (_s16(ins.w_arg),
+                                                _s16(ins.w_arg2)):
+                if compared:
+                    return False
+                compared = True
+                continue
+            if _s16(getattr(ins, "w_arg", 0)) == off \
+                    or _s16(getattr(ins, "w_arg2", 0)) == off:
+                return False
+        return False
+
     def _borrowed_handle(self, off: int) -> bool:
         """Is this `RefCpyV` only keeping an object alive for one expression?
 
@@ -5625,6 +5721,8 @@ class FuncDecompiler:
         instructions against the original's 79.
         """
         if off not in self.read_slots and off in self.freed_slots:
+            return True
+        if self._borrowed_for_a_null_test(off):
             return True
         for ins in self.instrs[self.k + 1:self.k + 1 + self.BORROW_WINDOW]:
             if ins.name == "FREE" and _s16(ins.w_arg) == off:
@@ -6230,6 +6328,16 @@ class FuncDecompiler:
                     self.list_values.setdefault(pop_this.offset, {})[pop_this.list_index] = args[0]
                 elif pop_this.is_ptr and pop_this.offset is not None:
                     self._bind(pop_this.offset, args[0])
+                elif (unnamed := self._value_pushed_temp()) is not None:
+                    #: The 2010 engines copy a string into a fresh temp by
+                    #: constructing it and then assigning, with the receiver
+                    #: pushed BY VALUE: `PSF 1 ; ALLOC string ; PshV4 1 ;
+                    #: opAssign ; LOADOBJ 1` is `return arg0;`. The receiver
+                    #: is then the temp's atom, `string()`, and writing an
+                    #: assignment to it gave Maestro Monster's
+                    #: `string() = arg0; return string();` -- "Reference is
+                    #: temporary". The temp simply takes the value.
+                    self._bind(unnamed, args[0])
                 else:
                     self._stmt(f"{obj.text} = {args[0].text};")
                 self.value_reg = receiver
@@ -6971,6 +7079,37 @@ class FuncDecompiler:
             selector = _s16(previous.w_arg2)
             delta = _s32(previous.dw_arg)
             offset = delta if previous.name == "SUBIi" else -delta
+
+        # **The table is as long as its range, not as long as the run of
+        # jumps.** The arms follow the table directly, and an arm that is
+        # only a `break` is a `JMP` too -- so The Gate's
+        # `character::set_state`, a `switch` over 0..12 whose case 8 arm is
+        # exactly that, read as FOURTEEN entries. Case 8 then pointed back
+        # into its own table, the backward-entry guard refused, and the
+        # whole body was given up on: no character ever changed state, so
+        # enemies never died and movement went through the wrong state.
+        # The upper bound is in the guard -- `CMPIi sel, 12 ; JP` -- and the
+        # nearest (smallest) one is this table's own; a longer run is cut
+        # to it, and a shorter one is left exactly as it was.
+        selector_slot = _s16(jmpp.w_arg)
+        normaliser = self.instrs[index - 1] if index else None
+        if (normaliser is not None and normaliser.name in ("SUBIi", "ADDIi")
+                and _s16(normaliser.w_arg) == selector_slot):
+            switched = _s16(normaliser.w_arg2)
+            low = (_s32(normaliser.dw_arg) if normaliser.name == "SUBIi"
+                   else -_s32(normaliser.dw_arg))
+            uppers = []
+            window = self.instrs[max(0, index - 8):index]
+            for prev, op in zip(window, window[1:]):
+                if (op.name in ("JP", "JNP") and prev.name in ("CMPIi", "CMPIu")
+                        and _s16(prev.w_arg) == switched):
+                    uppers.append(_s32(prev.dw_arg) if prev.name == "CMPIi"
+                                  else prev.dw_arg)
+            if uppers:
+                length = min(uppers) - low + 1
+                if 2 <= length < len(targets):
+                    targets = targets[:length]
+                    cursor = index + 1 + length
 
         # The guards before it: the last one skips this table's own range, the
         # ones before it bound the switch as a whole.
@@ -8787,7 +8926,7 @@ class ModuleDecompiler:
             # and compared the result three ways; the menu came back after
             # every selection.
             duplicates = {key for key, n in fd.fold_reads.items()
-                          if n >= _fold_limit(fd, key)}
+                          if n >= _fold_limit(fd, key)} | fd.promoted_after_fold
             # An `ALLOC`'s destination is on the stack, so only a pass that
             # has RUN knows which slots it constructs -- and a slot
             # constructed more than once is the compiler's scratch rather
@@ -8838,7 +8977,8 @@ class ModuleDecompiler:
                 # counted, and re-adding it would loop.
                 duplicates = {key for key, n in fd.fold_reads.items()
                               if n >= _fold_limit(fd, key)
-                              and key not in carried}
+                              and key not in carried} | (
+                    fd.promoted_after_fold - carried)
             lost = _lost_calls(fd, ev)
             if lost:
                 # Put each one back where the bytecode ran it. Events are

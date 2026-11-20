@@ -979,9 +979,12 @@ class Builder:
             #: an object by value rather than a handle: `string::opAdd`
             #: returns a `string` the same way, so `"music\\" + list[0]`
             #: landed in a `string@` too. The record says it outright --
-            #: a return type with no handle flag cannot be a handle.
+            #: a return type with no handle flag cannot be a handle. A
+            #: METHOD is no different: Maestro Monster's `form.bgt` stores
+            #: `control::type_to_name()`, a `CALLINTF`, the same way.
             returns = ((used[prev.dw_arg] or {}).get("returns")
-                       if prev is not None and prev.name in ("CALLSYS", "CALL")
+                       if prev is not None
+                       and prev.name in ("CALLSYS", "CALL", "CALLINTF")
                        and 0 <= prev.dw_arg < len(used) else None)
             if (early and ins.name == "STOREOBJ" and returns
                     and returns.get("token") == 5 and returns.get("type")
