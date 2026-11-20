@@ -14458,6 +14458,81 @@ string; ASE's two constants are dead initialisers (`disk_free_space`'s
 to none with the two fixes above. None has been driven, which is the
 stronger claim the standings ask for.
 
+## Sable: three shapes a stock 1.3 game would not compile with
+
+`Sable proof of concept - Beta version 1.9` is stock BGT 1.3 (runtime
+2014-06-01, 432 names) and a big one: 72 classes, 1,774 bodies, 56,000
+lines. It recovered with every structural check clean and the compiler said
+**6 errors and 4 warnings**, all three causes this decompiler's own.
+
+**A by-value member built with a string argument.** Five members, e.g.
+`menus reward_items("Please select")`. The member-initialiser rule
+(`sound_pool piano_pool(500)`, `key_hold back(KEY_BACK, 500, 40)`) read a
+literal or a named global pushed straight before the call; a STRING is not
+pushed, it is built in a temp slot and passed by `VAR`:
+
+```
+PSF 3 ; STR "Please select" ; _string_factory_ ; PshRPtr
+PSF 1 ; $beh0 ; PSF 1 ; ALLOC string ; PSF 1 ; $beh2
+VAR 3 ; GETOBJ 0 ; CALL menus
+```
+
+Refused, the declaration stood alone and "No default constructor for object
+of type 'menus'" followed. `_string_literal_in_slot` reads that shape, and
+`_written_arguments` skips `GETOBJ`/`GETREF`, which move an argument and
+push nothing.
+
+**...or with the constructor's own PARAMETER.** `class_type` builds
+`player new_class` from its first parameter, which no declaration can name
+-- unless a member initialiser is compiled inside the constructor, and it
+is. Asked of BGT 1.3: `needs2 n(x, 5);` beside `holder2(int x)` compiles
+cleanly and runs to `35` for `x == 3`. So it is emitted as
+`player new_class(arg0, "", 0, 0, ...)`, **and only where the class has
+exactly one constructor**, because the name is resolved in every one of
+them. The arguments are not adjacent -- each temp slot's construction sits
+between its `VAR` and the argument pushed ahead of it -- so the walk resumes
+before each construction.
+
+**An out argument copied before the call that fills it.** The four
+warnings, `'__nvgt_out_2_3372' is not initialized`:
+
+```
+local_33 = __nvgt_out_2_3372;
+if (!map_dimensions(__nvgt_out_3_3372, __nvgt_out_1_3372, __nvgt_out_2_3372, true)) {
+```
+
+The copy is a temp PROMOTED later, and `_promote_temp` writes its
+assignment at the bind without asking `_order_out_arguments` -- so the call,
+folded into the `if`, came out after the copies. Asking at `_bind` instead,
+the moment a slot takes a value that reads an out local, catches it while
+the call is still pending. And a call returning a value type through the
+hidden return slot (`use_affect`, a `string`) never registered its out
+locals at all.
+
+Ordering at the bind has to commit before it knows whether the call's
+result is used, so where it is not, a save loader came out with an unused
+`bool __nvgt_ret_178 = savedValues.get(...)`. `_drop_unread_returns` turns a
+holder mentioned only in its declaration and one assignment back into a bare
+call -- including the ones the old path already left, which is TubeSim's
+whole diff.
+
+**It also removed five duplicated calls**, which this file counts as the
+result rather than a side effect: `damage_calculation`, `check_immunity`,
+`check_reflect`, `game_deletables` and `map_dimensions` were each called
+twice -- once into the holder and once again in the expression that should
+have read it -- so Sable computed an attack's damage twice.
+
+| | before | after |
+|---|---|---|
+| Sable, BGT 1.3 compiler | 6 errors, 4 warnings | **compiles cleanly** |
+| calls read back | 14,403 | 14,398 -- the five duplicates |
+| Battle Zone, Treasure Troll, Perilous Hearts | -- | byte-identical |
+| TubeSim | -- | 12 lines: four unused `__nvgt_ret` holders dropped |
+| X-Wheel, Active Soundscape Engine, zompocalypse | compile cleanly | still compile cleanly |
+
+Sable has not been driven; it asks for an embedded pack (`"*"`) that the
+executable on this machine does not carry.
+
 ## Build to Survive is three DEBUG builds, and every free check passed
 
 Three stock BGT 1.3 executables by Air Puck's author -- a client, a server

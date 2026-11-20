@@ -1184,7 +1184,7 @@ def _mask_strings(line: str) -> str:
     return "".join(out)
 
 
-def _written_arguments(code, call_at: int, count: int):
+def _written_arguments(code, call_at: int, count: int, params=None):
     """The `count` arguments pushed before a call, in SOURCE order, when
     every one of them is something source can be written as.
 
@@ -1205,10 +1205,30 @@ def _written_arguments(code, call_at: int, count: int):
     args = []
     at = call_at - 1
     for _ in range(count):
+        # `GETOBJ`/`GETREF` move an argument already pushed; they push
+        # nothing themselves.
+        while at >= 0 and code[at].name in ("GETOBJ", "GETOBJREF", "GETREF"):
+            at -= 1
         if at < 0:
             return None
         ins = code[at]
-        if ins.name == "PshC4":
+        literal = None
+        if ins.name == "VAR":
+            found = (_string_literal_in_slot(code, at, ins.w_arg)
+                     or _parameter_in_slot(code, at, ins.w_arg, params))
+            if found is not None:
+                # Resume BEFORE the slot's own construction, which sits
+                # between this argument and the one pushed ahead of it.
+                literal, start = found
+                args.append(literal)
+                at = start - 1
+                continue
+        elif params and ins.name in ("PshV4", "PshV8", "PshVPtr"):
+            # A constructor parameter passed as it stands.
+            literal = params.get(_s16(ins.w_arg))
+        if literal is not None:
+            args.append(literal)
+        elif ins.name == "PshC4":
             args.append(str(_s32(ins.dw_arg)))
         elif ins.name == "PshG4" and getattr(ins, "global_name", None):
             args.append(ins.global_name)
@@ -1219,6 +1239,155 @@ def _written_arguments(code, call_at: int, count: int):
             args.append(read)
         at -= 1
     return args
+
+
+_RET_HOLDER = re.compile(r"__nvgt_ret_\d+")
+
+
+def _drop_unread_returns(body: list[str]) -> list[str]:
+    """A call's held result that nothing reads goes back to a bare call.
+
+    `_order_out_arguments` holds a call's result in `__nvgt_ret_N` so a
+    later read of its out argument cannot come before it -- and it has to
+    decide when the out argument is first READ, before it can know whether
+    the result is used at all. Where it is not, every save loader in the
+    corpus came out with an unused `bool __nvgt_ret_178;` and
+    `__nvgt_ret_178 = savedValues.get(...)`. The program is the same; the
+    holder is noise, and this removes exactly that: a holder whose name
+    appears only in its declaration and in one `name = call;` statement.
+    """
+    text = "\n".join(body)
+    counts: dict[str, int] = {}
+    for m in _RET_HOLDER.finditer(text):
+        counts[m.group(0)] = counts.get(m.group(0), 0) + 1
+    candidates = {n for n, c in counts.items() if c == 2}
+    if not candidates:
+        return body
+    # Exactly one bare declaration and one `name = ...;`, so a declaration
+    # paired with a READ is never mistaken for an unread holder.
+    declared, assigned = set(), set()
+    for line in body:
+        stripped = line.strip()
+        parts = stripped.split()
+        if len(parts) == 2 and stripped.endswith(";") \
+                and parts[1][:-1] in candidates:
+            declared.add(parts[1][:-1])
+        for n in candidates:
+            if stripped.startswith(n + " = "):
+                assigned.add(n)
+    unread = declared & assigned
+    if not unread:
+        return body
+    out = []
+    for line in body:
+        stripped = line.strip()
+        parts = stripped.split()
+        if len(parts) == 2 and parts[1].rstrip(";") in unread \
+                and stripped.endswith(";") and "=" not in stripped:
+            continue                       # the declaration
+        for n in unread:
+            prefix = n + " = "
+            if stripped.startswith(prefix):
+                line = line[:len(line) - len(stripped)] + stripped[len(prefix):]
+                break
+        out.append(line)
+    return out
+
+
+#: How far back a string literal's construction into a temp slot may sit
+#: from the `VAR` that passes it: `PSF 3 ; STR "" ; _string_factory_ ;
+#: PshRPtr ; PSF 1 ; $beh0 ; PSF 1 ; ALLOC string ; PSF 1 ; $beh2 ; VAR 3`
+#: is ten.
+_LITERAL_SLOT_WINDOW = 12
+
+
+def _string_literal_in_slot(code, at: int, slot: int):
+    """The literal a temp string slot was just built from, and where that
+    construction starts -- or None.
+
+    A by-value member constructed with a STRING argument does not push the
+    literal: it builds a string in a temp slot and passes that by `VAR`.
+    Sable's `droppable_items` is the shape --
+
+        PSF 3 ; STR "" ; CALLSYS _string_factory_ ; PshRPtr
+        PSF 1 ; CALLSYS string::$beh0 ; PSF 1 ; ALLOC string
+        PSF 1 ; CALLSYS string::$beh2
+        VAR 3 ; GETOBJ 0 ; CALL menu_items
+        STOREOBJ 4 ; PshVPtr 4 ; PshVPtr 0 ; ADDSi droppable_menu_item ; REFCPY
+
+    -- and refusing it left `menu_items droppable_menu_item;`, which is "No
+    default constructor for object of type 'menu_items'" because its only
+    constructor takes a string. Six of Sable's errors.
+
+    Narrow by construction: the slot must be a frame temp (positive), the
+    nearest earlier write naming it must be the `PSF` that opens an
+    `ALLOC string` within the window, and exactly one `STR` must sit between
+    that `PSF` and the `ALLOC`. Anything else is None, and the caller keeps
+    refusing.
+    """
+    if slot is None or slot <= 0:
+        return None
+    lo = max(0, at - _LITERAL_SLOT_WINDOW)
+    alloc = None
+    for k in range(at - 1, lo - 1, -1):
+        ins = code[k]
+        if ins.name == "ALLOC":
+            alloc = k
+            break
+        if ins.name in ("CALL", "CALLINTF", "CALLBND", "Thiscall1"):
+            return None
+    if alloc is None or code[alloc].type_ref is None \
+            or code[alloc].type_ref.format_name() != "string":
+        return None
+    opener = None
+    for k in range(alloc - 1, lo - 1, -1):
+        ins = code[k]
+        if ins.name == "PSF" and ins.w_arg == slot:
+            opener = k
+            break
+    if opener is None:
+        return None
+    strs = [code[k] for k in range(opener + 1, alloc)
+            if code[k].name == "STR"]
+    if len(strs) != 1 or strs[0].string_const is None:
+        return None
+    return f'"{_esc(strs[0].string_const)}"', opener
+
+
+def _parameter_in_slot(code, at: int, slot: int, params):
+    """The constructor parameter a temp string slot was just copied from.
+
+    Sable's `class_type` builds its by-value `player new_class` from its own
+    constructor's first parameter --
+
+        PSF 13 ; PshVPtr -1 ; ALLOC string ; VAR 13 ; ... ; CALL player
+
+    -- and a member's initialiser is compiled INSIDE the constructor, so the
+    declaration may name that parameter. BGT was asked rather than assumed:
+    `needs2 n(x, 5);` beside `holder2(int x)` compiles cleanly and runs to
+    `n.v == 35` for `x == 3`. `params` is None unless the class has exactly
+    one constructor, because the name is resolved in every constructor and
+    another one need not have it.
+    """
+    if not params or slot is None or slot <= 0:
+        return None
+    lo = max(0, at - _LITERAL_SLOT_WINDOW)
+    alloc = None
+    for k in range(at - 1, lo - 1, -1):
+        if code[k].name == "ALLOC":
+            alloc = k
+            break
+        if code[k].name in ("CALL", "CALLINTF", "CALLBND", "Thiscall1"):
+            return None
+    if alloc is None or code[alloc].type_ref is None \
+            or code[alloc].type_ref.format_name() != "string":
+        return None
+    if alloc < 2 or code[alloc - 2].name != "PSF" \
+            or code[alloc - 2].w_arg != slot \
+            or code[alloc - 1].name != "PshVPtr":
+        return None
+    name = params.get(_s16(code[alloc - 1].w_arg))
+    return None if name is None else (name, alloc - 2)
 
 
 def _global_accessor_before(code, at: int):
@@ -1362,7 +1531,14 @@ def _member_array_sizes(c: TypeInfo) -> dict:
             # standing alone: "No default constructor for object of type
             # 'key_hold'", once per member, which is a class that cannot
             # compile at all.
-            args = _written_arguments(code, k, len(params))
+            #
+            # A member initialiser is compiled inside EACH constructor, so it
+            # may name a parameter only when there is one constructor to
+            # resolve it in.
+            names = (dict(_parameter_layout(f))
+                     if len(c.constructors) == 1 and f in c.constructors
+                     else None)
+            args = _written_arguments(code, k, len(params), names)
             if args is None:
                 continue              # not all of them are writable
             out[name] = ", ".join(args)
@@ -2751,6 +2927,19 @@ class FuncDecompiler:
         are handled where they happen.
         """
         a = self._deref(a) if a.is_ptr else a
+        #: **Reading an out argument means its call has run.** A copy-back
+        #: is bound here straight after the call, while the call is still
+        #: pending -- and if the slot is later PROMOTED, `_promote_temp`
+        #: writes the assignment at this position without asking
+        #: `_order_out_arguments`, so the call, folded into a later `if`,
+        #: came out after the copies that read what it fills:
+        #:
+        #:     local_33 = __nvgt_out_2_3372;
+        #:     if (!map_dimensions(__nvgt_out_3_3372, ..., true)) {
+        #:
+        #: -- "'__nvgt_out_2_3372' is not initialized", three times in
+        #: Sable's `edit_menu`, and the map size taken from nothing.
+        self._order_out_arguments(a.text)
         if (a.kind == "const" and off in self.var_types
                 # ...unless this constant was typed from where it is stored
                 # rather than from the slot it passes through. Re-normalising
@@ -6004,6 +6193,14 @@ class FuncDecompiler:
             #: name" did nothing at all.
             self._record_call(ins, calltxt, fr, ret)
             self._bind(pop_out.offset, Atom("call", calltxt))
+            #: A value-type return goes into its slot rather than the
+            #: register, and the out arguments still need ordering: Sable's
+            #: `use_affect` wrote `arg7 = __nvgt_out_3_64;` ahead of the
+            #: `local_1 += affects[i].use(..., __nvgt_out_3_64)` that fills
+            #: it. Registered AFTER the bind, so the bind's own text does
+            #: not trigger it.
+            if out_locals:
+                self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         elif ret is not None and ret.format() != "void":
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)
             self.pending_value_call = calltxt
@@ -8541,6 +8738,7 @@ class ModuleDecompiler:
             body = _declare_read_before_written(body, fd, indent)
             body = _hoist_escaping_declarations(body, indent)
             body = _drop_unreachable(body)
+            body = _drop_unread_returns(body)
             return _drop_redundant_parens(_reconstruct_for_loops(body))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
