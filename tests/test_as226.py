@@ -73,10 +73,31 @@ def test_both_profiles_come_after_every_verified_one():
     assert as_module.RECORDS_BY_NAME["2.25"] is as_module.RECORDS_2012_12
 
 
-def test_two_25_differs_from_two_26_in_exactly_the_two_records_2_26_1_changed():
+def test_two_25_differs_from_two_26_in_exactly_what_2_26_1_changed():
+    """The subtype count, the debug section list, and how `ALLOC` names its
+    constructor -- each read from the two tags' own source."""
     differing = {k for k in as_module.RECORDS_2013
                  if as_module.RECORDS_2013[k] != as_module.RECORDS_2012_12[k]}
-    assert differing == {"template_subtype_count", "debug_sections"}
+    assert differing == {"template_subtype_count", "debug_sections",
+                         "alloc_callee_script_only", "alloc_callee_plain"}
+
+
+def test_2_26_reads_the_alloc_callee_one_based_for_every_type():
+    """`1 + FindFunctionIndex(...)` in 2.26.1's writer, for every type: 636
+    of X-Wheel's 636 ALLOCs name the allocated type's own constructor read
+    that way. Treated as unreadable, a global initialiser lost its literal
+    -- `"X-Wheel" = product; product = <?>;` -- and the title would not
+    compile."""
+    assert as_module.RECORDS_2013["alloc_callee_script_only"] is False
+    assert as_module.RECORDS_2013["alloc_callee_plain"] is False
+
+
+def test_2_25_reads_a_script_class_callee_plain_and_nothing_else():
+    """`if( ot->flags & asOBJ_SCRIPT_OBJECT ) ... = FindFunctionIndex(...)`:
+    a plain index, and only for a script class. All 18 of zompocalypse's
+    script-class ALLOCs name their own constructor read plain."""
+    assert as_module.RECORDS_2012_12["alloc_callee_script_only"] is True
+    assert as_module.RECORDS_2012_12["alloc_callee_plain"] is True
 
 
 # ---------------------------------------------------------------- the body
@@ -192,3 +213,45 @@ def test_several_value_arguments_are_counted():
     stack = [_atom(True, "local_2"), _atom(False, "3"), _atom(False, "2"),
              _atom(False, "1")]
     assert decompile._alloc_arity_from_stack(stack) == 3
+
+
+def test_a_globals_address_on_top_is_the_destination_with_no_arguments():
+    """A global initialiser: `STR "X-Wheel" ; PshRPtr ; PGA product ; ALLOC
+    string ; PshGPtr product ; opAssign`. The literal is `opAssign`'s, left
+    on the stack beneath the ALLOC."""
+    stack = [_atom(False, '"X-Wheel"'),
+             decompile.Atom("global", "product", is_ptr=True)]
+    assert decompile._alloc_arity_from_stack(stack) == 0
+
+
+# ------------------------------------------------ the funcdef slot retyping
+
+def test_a_funcdef_slot_is_not_retyped_through_an_earlier_call():
+    """`retype_funcdef_slots` corrects a guessed funcdef slot from the
+    one-parameter call it is passed to. X-Wheel's `reset_menu(callback)` is
+    followed by `string`'s copy constructor, and its backward scan reached
+    past `reset_menu`'s own call to `VAR 6` and declared the callback
+    `string@`. A call in between consumed that argument."""
+    from nvgt import asreader
+    import bgt_asir
+    menu_callback = asreader.TypeInfo(kind="funcdef", name="menu_callback")
+    string = asreader.TypeInfo(kind="app", name="string")
+    cb = asreader.DataType(token_type=5, obj_type=menu_callback,
+                           is_object_handle=True)
+    reset_menu = asreader.Function(name="reset_menu", param_types=[cb])
+    copy = asreader.Function(name="$beh0", param_types=[
+        asreader.DataType(token_type=5, obj_type=string)])
+
+    def ins(name, w=0, func=None):
+        return asreader.Instr(pos=0, op=0, name=name, bc_type="", size=1,
+                              w_arg=w, func_ref=func)
+
+    body = [ins("VAR", 6), ins("CALL", func=reset_menu),
+            ins("PSF", 2), ins("CALLSYS", func=copy)]
+    var = asreader.ScriptVariable(stack_offset=6, type=cb)
+    f = asreader.Function(name="initialise_menu", bytecode=body,
+                          variables=[var])
+    m = asreader.Module(funcdefs=[asreader.Function(name="menu_callback")],
+                        saved_functions=[f])
+    assert bgt_asir.retype_funcdef_slots(m) == 0
+    assert var.type.obj_type is menu_callback

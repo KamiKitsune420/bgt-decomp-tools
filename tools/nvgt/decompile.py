@@ -702,7 +702,19 @@ def _alloc_arity_from_stack(stack: list) -> int:
     top is itself an address it is ONE argument: an object built in a temp
     slot and passed by reference, which for a registered type is the copy
     constructor. See `FuncDecompiler._alloc` for the builds this is for.
+
+    **A global's address on top IS the destination**, with nothing above it:
+    a global initialiser pushes what it will assign afterwards, then the
+    global's address, then default-constructs it and calls `opAssign` --
+
+        STR "X-Wheel" ; _string_factory_ ; PshRPtr
+        PGA product ; ALLOC string ; PshGPtr product ; opAssign
+
+    Counted as an argument, the global was popped as one and the literal
+    became the destination: `"X-Wheel" = product; product = <?>;`.
     """
+    if stack and stack[-1].kind == "global":
+        return 0
     above = 0
     for atom in reversed(stack):
         if atom.is_ptr:

@@ -198,6 +198,14 @@ RECORDS_13 = {
     #: the compiler put there and means nothing to a reader. Read out of
     #: that build's own `TranslateFunction` at 0x418F6E.
     "alloc_callee_script_only": False,
+    #: Whether a script class's `ALLOC` callee is a PLAIN `usedFunctions`
+    #: index rather than one plus it. AngelScript 2.26.1's writer stores
+    #: `1 + FindFunctionIndex(...)` for every type, keeping 0 for "no
+    #: constructor"; 2.25 to 2.26.0 store `FindFunctionIndex(...)`, and only
+    #: `if( ot->flags & asOBJ_SCRIPT_OBJECT )`. zompocalypse settles it: all
+    #: 18 of its script-class ALLOCs name the allocated class's own
+    #: constructor read plain, and 6 of 18 read one-based.
+    "alloc_callee_plain": False,
     #: Whether a function signature carries its NAMESPACE immediately after
     #: the name. 1.3 writes it last, after the owner and the traits byte;
     #: the generation before it writes it first. Aliens Attack (2012-03) is
@@ -344,13 +352,14 @@ RECORDS_2012_03 = dict(RECORDS_2012,
 #: the variables, and the per-record script section guarded by the debug
 #: flag.
 #:
-#: **`ALLOC`'s callee is meaningless for a registered type here too**, which
-#: the published source does not say -- its writer translates the callee
-#: one-based for every type. The modules disagree: zompocalypse writes
-#: `ALLOC 4, 33` 105 times for `string`, and `usedFunctions[32]` is
-#: `sound::get_active`; X-Wheel writes `ALLOC 0, 11` 558 times. A constant
-#: is not a callee, so this takes the 2012-07 engine's rule and the
-#: decompiler takes the arity from the stack.
+#: **`ALLOC`'s callee is readable, one-based, for every type**, exactly as
+#: the 2.26.1 writer says: `1 + FindFunctionIndex(...)`, 0 kept for "no
+#: constructor". Measured: 636 of X-Wheel's 636 ALLOCs and 364 of Active
+#: Soundscape Engine's 364 name the allocated type's own constructor --
+#: `ALLOC 0, 11` is `string`'s copy constructor at `usedFunctions[10]`.
+#: (This said the callee was unreadable here, from checking index 32 for
+#: both titles when X-Wheel's operand is 11. Read as unreadable, a global's
+#: initialiser lost its literal: `"X-Wheel" = product; product = <?>;`.)
 RECORDS_2013 = dict(
     RECORDS_13,
     datatype_early=True,
@@ -364,7 +373,6 @@ RECORDS_2013 = dict(
     early_behaviours=True,
     interface_offset=False,
     script_object_flag=0x80000,
-    alloc_callee_script_only=True,
 )
 
 #: **AngelScript 2.25.1 to 2.26.0** -- zompocalypse's engine (2012-12-28,
@@ -380,11 +388,19 @@ RECORDS_2013 = dict(
 #:   2.26.0's is plain indices with no strings, which no profile here reads
 #:   -- so a DEBUG 2.26.0 build would not land; a release one does).
 #:
+#: - `ALLOC`'s callee is translated only for a script class, and then as a
+#:   PLAIN index: `if( ot->flags & asOBJ_SCRIPT_OBJECT ) ... =
+#:   FindFunctionIndex(...)`. For a registered type it is the engine's raw
+#:   function id -- zompocalypse writes `ALLOC 4, 33` 105 times for
+#:   `string` -- and means nothing to a reader.
+#:
 #: 2.25.0 writes no `dontCleanUpOnException` byte; no sample of it is here,
 #: so it is not a profile.
 RECORDS_2012_12 = dict(RECORDS_2013,
                        template_subtype_count=False,
-                       debug_sections=False)
+                       debug_sections=False,
+                       alloc_callee_script_only=True,
+                       alloc_callee_plain=True)
 
 #: Tried in order, verified first.
 RECORD_PROFILES = (("1.3", RECORDS_13), ("2012-07", RECORDS_2012),
@@ -1826,6 +1842,7 @@ def _walk(data: bytes, dialect: str, start: int, n_enums: int,
             "alloc_callee_script_only":
                 r.records["alloc_callee_script_only"],
             "script_object_flag": r.records["script_object_flag"],
+            "alloc_callee_plain": r.records["alloc_callee_plain"],
             "enums": enums, "classes": classes, "classes_declared": declared,
             "funcdefs": funcdefs, "funcdefs_declared": funcdefs_declared,
             "blocks": blocks, "tail": tail, "tail_error": tail_error,
@@ -1963,6 +1980,7 @@ def summarize(path: str, opcodes: Optional[Dict[int, Dict[str, Any]]] = None) ->
             "early_opcodes": walk["early_opcodes"],
             "alloc_callee_script_only": walk["alloc_callee_script_only"],
             "script_object_flag": walk["script_object_flag"],
+            "alloc_callee_plain": walk["alloc_callee_plain"],
             # The module's own first byte -- unless the build writes no such
             # byte, in which case there is nothing to report and a 0 here
             # would read as "a debug build" for every release module of that

@@ -1531,6 +1531,19 @@ class Builder:
                     # operand is still left unhandled rather than guessed
                     # at: `POP 3` would really pop three.
                     ins.name = "PopPtr"
+                elif (ins.name == "ALLOC" and self.info.get("alloc_callee_plain")
+                        and 0 <= ins.qw_arg < len(m.used_types)
+                        and any(m.used_types[ins.qw_arg] is c
+                                for c in (m.classes or ()))):
+                    # AngelScript 2.25 to 2.26.0 store a script class's
+                    # constructor as a PLAIN usedFunctions index, where
+                    # TranslateFunction reads `index + 1` with 0 meaning none.
+                    # Read unshifted, every script class was built by the
+                    # function one place lower in the table: zompocalypse's
+                    # `enemy` by `sound_pool::clean_unused`. A registered
+                    # type's operand is the engine's raw id and is left for
+                    # the decompiler's stack rule.
+                    ins.dw_arg += 1
                 elif ins.name == "STR":
                     # STR's string index is a word operand here and a dword one
                     # there. Left in the word field it resolves to whichever
@@ -1648,6 +1661,15 @@ def retype_funcdef_slots(m: Module) -> int:
             if want.obj_type is None or want.obj_type.name in guessed:
                 continue
             for back in body[max(0, k - _FUNCDEF_ARG_WINDOW):k][::-1]:
+                # **A call in between has consumed what was pushed before
+                # it.** Without this the window reached past one call to the
+                # argument of another: X-Wheel's `reset_menu(callback)` is
+                # followed by `string`'s copy constructor, one `string`
+                # parameter, whose scan found `reset_menu`'s `VAR 6` and
+                # retyped the menu callback `string@` -- "Object handle is
+                # not supported for this type", ten times over.
+                if back.name in _CALL_OPS:
+                    break
                 if back.name not in ("VAR", "PshVPtr"):
                     continue
                 var = slots.get(_s16(back.w_arg))
@@ -1667,6 +1689,10 @@ def retype_funcdef_slots(m: Module) -> int:
 #: between -- `VAR 16 ; PGA 77 ; ChkRefS ; RDSPtr ; GETOBJ 1 ; CALLSYS` is the
 #: site this exists for, which is five.
 _FUNCDEF_ARG_WINDOW = 8
+
+#: Every instruction that calls something and so pops its own arguments.
+_CALL_OPS = frozenset(("CALL", "CALLSYS", "CALLINTF", "CALLBND", "Thiscall1",
+                       "CallPtr", "ALLOC"))
 
 
 if __name__ == "__main__":

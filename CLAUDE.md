@@ -2735,9 +2735,9 @@ for the `for` headers it now writes.
 | Screaming Strike (2012-07 engine, **debug**) | 951 | 0 | 0 | yes | 346 | **yes** |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Aliens attack (2012-03) | 5,766 | 0 | 0 | yes | 1,662 | not asked -- a fifth engine, see **A FIFTH generation** |
-| zompocalypse (2012-12, AngelScript 2.25) | 2,828 | 0 | 0 | yes | 707 | not asked -- see **AngelScript 2.25 and 2.26** |
-| Active Soundscape Engine (2013-04, AngelScript 2.26) | 3,733 | 0 | 0 | yes | 968 | not asked |
-| X-Wheel (2013-04, AngelScript 2.26) | 9,151 | 0 | 0 | yes | 2,102 | not asked |
+| zompocalypse (2012-12, AngelScript 2.25) | 2,828 | 0 | 0 | yes | 707 | compiles cleanly; not driven -- see **AngelScript 2.25 and 2.26** |
+| Active Soundscape Engine (2013-04, AngelScript 2.26) | 3,733 | 0 | 0 | yes | 968 | compiles cleanly; not driven |
+| X-Wheel (2013-04, AngelScript 2.26) | 9,118 | 0 | 0 | yes | 2,103 | compiles cleanly; not driven |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
 | Palace Punch-up (2010 beta) | 3,200 -> **3,147** | 0 | 0 | yes | 823 | not asked |
@@ -14347,18 +14347,40 @@ profile `summarize` had landed under, which is a third reading of one format
 and would have refused the rewrite of every non-1.3 title. It passes the
 release now.
 
-### Two things the source does NOT say, and the modules do
+### `ALLOC`'s callee changed meaning at 2.26.1, and I read it wrong once
 
-**`ALLOC`'s callee is meaningless for a registered type here too.** The
-2.26.1 writer translates the callee one-based for every type. zompocalypse
-writes `ALLOC 4, 33` 105 times for `string`, and `usedFunctions[32]` is
-`sound::get_active`; X-Wheel writes `ALLOC 0, 11` 558 times. A constant is
-not a callee, so both profiles take the 2012-07 engine's
-`alloc_callee_script_only`. Whether BGT patched its AngelScript or writes
-`ALLOC` some other way is not settled; the bytes are.
+The writer says it, and the modules agree once they are asked properly:
 
-**...and the arity rule that reads the stack instead had two holes**, both
-closed in `_alloc_arity_from_stack`:
+| AngelScript | what `ALLOC`'s second operand holds | measured |
+|---|---|---|
+| 2.25 to 2.26.0 | a script class: a **plain** `usedFunctions` index; a registered type: the engine's raw function id, untranslated | zompocalypse: 18 of 18 script-class sites name their own constructor read plain, 6 read one-based; `ALLOC 4, 33` 105 times for `string` |
+| 2.26.1 and later | `1 + FindFunctionIndex(...)` for **every** type, 0 for none | X-Wheel 636 of 636, Active Soundscape Engine 364 of 364 name their own constructor |
+
+So 2.26 reads its callee like 1.3, and 2.25 takes `alloc_callee_script_only`
+plus a new `alloc_callee_plain`, which `bgt_asir.normalise` turns into the
+one-based convention the translator reads by adding one to a script class's
+operand. Unshifted, zompocalypse's `enemy` was built by
+`sound_pool::clean_unused`.
+
+**This section first said both releases were unreadable**, from checking
+`usedFunctions[32]` for both titles when X-Wheel's operand is 11 -- which is
+`string`'s copy constructor at index 10. That was caught by compiling: a
+global initialiser is the one shape where the destination is pushed LAST,
+
+```
+STR "X-Wheel" ; _string_factory_ ; PshRPtr
+PGA product ; ALLOC string ; PshGPtr product ; opAssign
+```
+
+so read with no callee the global was popped as an argument and the literal
+became the destination -- `"X-Wheel" = product; product = <?>;`, six times,
+and 12 of X-Wheel's 27 compiler errors. The bytecode audit could not see it,
+because an initialiser is not a body it pairs. A global's address on top of
+the stack is now the destination with no arguments, for the builds that do
+still need the stack rule.
+
+**The stack rule had two more holes**, both closed in
+`_alloc_arity_from_stack`:
 
 - **It only fired when the bogus callee HAD parameters.** Screaming Strike's
   constant resolves to the two-parameter `random`; these resolve to
@@ -14388,6 +14410,19 @@ this machine**, so its row in the standings is owed a re-measurement. The
 second hole is the only one that can reach it, and only where an enclosing
 call had already pushed an address below an `ALLOC`'s destination.
 
+### A funcdef slot was retyped through someone else's call
+
+The other 15 of X-Wheel's 27 errors were one pass. `retype_funcdef_slots`
+corrects a guessed funcdef slot from the one-parameter call it is passed to,
+scanning back eight instructions for the argument -- and it did not stop at
+an earlier call. `reset_menu(callback)` is followed by `string`'s copy
+constructor, one `string` parameter, whose scan reached past `reset_menu`'s
+own `CALL` to `VAR 6` and declared the menu callback `string@`: "Object
+handle is not supported for this type" and "No matching signatures to
+`reset_menu(string)`", five functions over. A call in between has consumed
+what was pushed before it, so the scan stops there. Perilous Hearts, the
+title the pass exists for, is byte-identical.
+
 ### `?` is 57 in this numbering, and it was never mapped
 
 The four-below token numbering shifts only the type tokens, and `?` -- the
@@ -14409,7 +14444,7 @@ the general rule.
 |---|---|---|---|---|---|
 | zompocalypse | 2,828 | 0 | verified | 707 | **0 / 0 / 0** |
 | Active Soundscape Engine | 3,733 | 0 | verified | 968 | 2 / **0** / 2 |
-| X-Wheel | 9,151 | 0 | verified | 2,102 | 2 / 1 / 1 |
+| X-Wheel | 9,118 | 0 | verified | 2,103 | 2 / 1 / 1 |
 
 0 unmodelled opcodes, 0 bodies given up on, 0 dangling gotos and 0 `<?>`
 on all three. The call rows are a constructor's generated member
@@ -14417,9 +14452,11 @@ construction, the benign kind this file lists; X-Wheel's literal is an empty
 string; ASE's two constants are dead initialisers (`disk_free_space`'s
 `-1.0` stores, each overwritten by a `dictionary::get` before any read).
 `bgt signatures`: 2 `empty_arm` on X-Wheel, 1 `double_assign` on ASE, 6
-`empty_arm` on zompocalypse, none read down yet. **None of the three has
-been compiled or driven**, which is the stronger claim the standings ask
-for.
+`empty_arm` on zompocalypse, none read down yet.
+
+**All three compile cleanly** under BGT 1.3 -- X-Wheel went from 27 errors
+to none with the two fixes above. None has been driven, which is the
+stronger claim the standings ask for.
 
 ## Build to Survive is three DEBUG builds, and every free check passed
 
