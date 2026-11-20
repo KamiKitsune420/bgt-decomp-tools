@@ -5724,12 +5724,48 @@ class FuncDecompiler:
             return True
         if self._borrowed_for_a_null_test(off):
             return True
+        if self._borrowed_for_one_address(off):
+            return True
         for ins in self.instrs[self.k + 1:self.k + 1 + self.BORROW_WINDOW]:
             if ins.name == "FREE" and _s16(ins.w_arg) == off:
                 return True
             if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
                 return False
             if _s16(getattr(ins, "w_arg", 0)) == off and ins.name != "RefCpyV":
+                return False
+        return False
+
+    def _borrowed_for_one_address(self, off: int) -> bool:
+        """Is this handle copy read ONCE, by address, and then released?
+
+        `@loader.handle = temp;` -- a handle taken to a local held by value
+        -- is compiled by the 2012-03 engine as a handle copy into a slot of
+        its own, passed on by address and freed:
+
+            PshVPtr 4 ; PSF 7 ; REFCPY ; PopPtr     ; slot 7 = @temp
+            VAR 7 ; ... ADDSi preload::handle ; GETOBJREF 1 ; REFCPY
+            FREE 7
+
+        `objVariableTypes` does not even record slot 7, so emitted as a
+        statement it was `tmp7 = temp;` with no declaration at all -- the
+        one error left in the recovered Metronome. The `VAR` is the copy's
+        whole life, exactly as a `CmpPtr` is in
+        `_borrowed_for_a_null_test`, so it folds into the one expression
+        that reads it.
+        """
+        read = False
+        for ins in self.instrs[self.k + 1:self.k + 13]:
+            if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
+                return False
+            if ins.name == "FREE" and _s16(ins.w_arg) == off:
+                return read
+            if ins.name == "VAR" and _s16(ins.w_arg) == off:
+                if read:
+                    return False
+                read = True
+                continue
+            if (_s16(getattr(ins, "w_arg", 0)) == off
+                    or _s16(getattr(ins, "w_arg2", 0)) == off):
                 return False
         return False
 

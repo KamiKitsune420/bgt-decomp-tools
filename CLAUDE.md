@@ -14908,6 +14908,37 @@ includes, and they were three shapes:
 
 The suite is 1,196 passing and `bgt oracle` is 55/55. Not played.
 
+## Metronome: a handle copy read once by ADDRESS is borrowed too
+
+`metronome.exe` is a 2012-03 build (322 names, Aliens Attack's engine), and
+its recovery had one error: `tmp7 = temp; @loader.handle = tmp7;` with
+`tmp7` declared nowhere. The source is `@loader.handle = temp;`, and the
+compiler writes it as a handle copy into a slot of its own that is passed
+on by address and freed:
+
+    PshVPtr 4 ; PSF 7 ; REFCPY ; PopPtr     ; slot 7 = @temp
+    VAR 7 ; ... ADDSi preload::handle ; GETOBJREF 1 ; REFCPY
+    FREE 7
+
+`objVariableTypes` does not record slot 7, which is why nothing declared
+it. `_borrowed_handle` already folds a copy whose whole life is one
+`CmpPtr`; `_borrowed_for_one_address` is the same rule for one `VAR`.
+Exactly one, no jump, and nothing else naming the slot before its `FREE`.
+
+It reaches far more than Metronome, because BGT's own `dynamic_menu` and
+`form.bgt` write `@tts_handle = handle;` the same way in every engine:
+
+| title | what moved | and the compiler |
+|---|---|---|
+| Metronome | the one error | **compiled cleanly** |
+| Sable (1.3) | 29 files: `@x = y` aliases gone, `find(@temp_status)` folded | compiled cleanly, 14,372 calls unchanged |
+| The Gate (1.3) | 24 files, 33,536 -> 33,449 lines | compiled cleanly, 8,691 calls unchanged |
+| Perilous Hearts, Palace, Ljudfarmen, Grodan Gun, Antony, Survive, Maestro Monster | the `dynamic_menu`/`form.bgt` aliases only | each still compiles, with its own engine where it has one |
+| Power Player, X-Wheel | -- | byte-identical |
+
+The suite is 1,198 passing and `bgt oracle` is 55/55. Every diff line was
+checked to be a dead alias going away; no call count moved anywhere.
+
 ## A game's own runtime is a COMPILER, and four of these titles now pass theirs
 
 A BGT game is the runtime with the module appended, and the runtime carries

@@ -119,3 +119,27 @@ def test_a_jump_table_is_as_long_as_its_range():
     assert table is not None
     cursor = table[0]
     assert cursor == 6 + 13
+
+
+def test_a_handle_copied_for_one_address_is_borrowed():
+    """Metronome's `@loader.handle = temp;` in the 2012-03 engine:
+
+        PshVPtr 4 ; PSF 7 ; REFCPY ; PopPtr ;
+        VAR 7 ; PshVPtr 6 ; ADDSi ; GETOBJREF 1 ; REFCPY ; FREE 7
+
+    Emitted as a statement it was `tmp7 = temp;`, declared nowhere."""
+    code = [_ins("REFCPY"), _ins("PopPtr"), _ins("VAR", 7),
+            _ins("PshVPtr", 6), _ins("ADDSi", 16), _ins("GETOBJREF", 1),
+            _ins("REFCPY"), _ins("FREE", 7)]
+    assert _at(code, 0)._borrowed_for_one_address(7)
+
+
+def test_a_handle_read_twice_or_never_by_address_is_not():
+    twice = [_ins("REFCPY"), _ins("VAR", 7), _ins("VAR", 7), _ins("FREE", 7)]
+    assert not _at(twice, 0)._borrowed_for_one_address(7)
+    by_value = [_ins("REFCPY"), _ins("PshVPtr", 7), _ins("FREE", 7)]
+    assert not _at(by_value, 0)._borrowed_for_one_address(7)
+    unread = [_ins("REFCPY"), _ins("FREE", 7)]
+    assert not _at(unread, 0)._borrowed_for_one_address(7)
+    jump = [_ins("REFCPY"), _ins("VAR", 7), _ins("JZ"), _ins("FREE", 7)]
+    assert not _at(jump, 0)._borrowed_for_one_address(7)
