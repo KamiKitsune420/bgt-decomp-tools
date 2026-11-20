@@ -931,9 +931,54 @@ class Builder:
                   and _s16(ins.w_arg) in object_slots):
                 handles.add(_s16(ins.w_arg))
 
+        #: **A `STOREOBJ` of the string factory's result is not a handle.**
+        #: The 2010 to 2011-02 engines hand a literal back in the object
+        #: register, so it reaches its slot by `STOREOBJ` -- the opcode that
+        #: is otherwise the plainest handle witness there is. Counted as one,
+        #: every string temp was declared `string@`, which is "Object handle
+        #: is not supported for this type" in every engine: 22 errors in BGT
+        #: 1.0's Power Player, and the 281 this file records for Palace
+        #: Punch-up, with Ljudfarmen's 73 declarations beside them.
+        used = ((getattr(self, "info", None) or {}).get("tail")
+                or {}).get("used_functions") or []
+        factory_stores = set()
+        #: Only the early generation hands a VALUE type back this way. From
+        #: 2011-09 a string comes back through a hidden return address, so
+        #: a `STOREOBJ` of a non-handle return there is a reference type --
+        #: Sable's `find_sounds` returns a `string[]` -- and whether the
+        #: source held it by handle is not this rule's to change.
+        early = bool(getattr(self, "early", False))
+        ret = (rec or {}).get("returns") or {}
+        returns_by_value = bool(ret.get("token") == 5 and ret.get("type")
+                                and not ret.get("handle"))
+        prev = None
+        for ins in f.bytecode:
+            if ins.name == "SUSPEND":
+                continue
+            #: ...and the same is true of ANY call whose declared return is
+            #: an object by value rather than a handle: `string::opAdd`
+            #: returns a `string` the same way, so `"music\\" + list[0]`
+            #: landed in a `string@` too. The record says it outright --
+            #: a return type with no handle flag cannot be a handle.
+            returns = ((used[prev.dw_arg] or {}).get("returns")
+                       if prev is not None and prev.name in ("CALLSYS", "CALL")
+                       and 0 <= prev.dw_arg < len(used) else None)
+            if (early and ins.name == "STOREOBJ" and returns
+                    and returns.get("token") == 5 and returns.get("type")
+                    and not returns.get("handle")):
+                factory_stores.add(id(ins))
+            #: ...and `LOADOBJ` returning a slot from a function that
+            #: returns an object BY VALUE is the same thing at the other end:
+            #: the 2010 engines hand a returned `string` back in the object
+            #: register, so Palace Punch-up's `serialize_player` declared its
+            #: result `string@`.
+            if early and ins.name == "LOADOBJ" and returns_by_value:
+                factory_stores.add(id(ins))
+            prev = ins
+
         for ins in f.bytecode:
             slots = SLOT_FIELDS.get(ins.bc_type, ())
-            if ins.name in HANDLE_SLOT_OPS:
+            if ins.name in HANDLE_SLOT_OPS and id(ins) not in factory_stores:
                 handles.add(_s16(ins.w_arg))
             typed = TYPED_SLOT_OPS.get(ins.name)
             if typed is not None:

@@ -725,6 +725,22 @@ def _alloc_arity_from_stack(stack: list) -> int:
     return 1 if len(stack) >= 2 else 0
 
 
+def _alloc_destination_on_top(stack: list, instrs: list, k: int) -> bool:
+    """Is the address on top of the stack this `ALLOC`'s DESTINATION?
+
+    The 2010 engines copy a string by default-constructing it and then
+    assigning: `PshRPtr ; PSF 6 ; ALLOC string ; PshV4 6 ; opAssign`. The
+    sign is that the very next instruction pushes the slot the top address
+    names, making the new object a receiver rather than passing it on.
+    """
+    top = stack[-1] if stack else None
+    nxt = next((instrs[j] for j in range(k + 1, min(k + 4, len(instrs)))
+                if instrs[j].name != "SUSPEND"), None)
+    return (top is not None and top.is_ptr and top.offset is not None
+            and nxt is not None and nxt.name in ("PshV4", "PshVPtr")
+            and _s16(nxt.w_arg) == top.offset)
+
+
 #: the object a call is made on, and the method: `this.terrain.getTailleX()`
 #: has receiver `this.terrain`, not `this`. Taking the leading identifier
 #: instead made `this` the receiver of every method call on a member, and
@@ -2110,6 +2126,31 @@ class FuncDecompiler:
         for index, op in enumerate(self.instrs):
             if op.name in _SLOT_WRITE_OPS:
                 self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
+                continue
+            #: **...and the 2010 to 2011-02 engines' string factory hands its
+            #: string back in the OBJECT REGISTER**, so a literal reaches its
+            #: slot by `STOREOBJ` rather than through a pushed address:
+            #:
+            #:     STR "music" ; CALLSYS _string_factory_ ; STOREOBJ 1
+            #:     VAR 1 ; GETOBJREF 0 ; CALLSYS directory_exists ; FREE 1
+            #:
+            #: That is a construction of slot 1 as much as the later
+            #: engines' `PSF 1 ; _string_factory_` is, and unseen here the
+            #: slot looked declared once -- so every literal in BGT 1.0's
+            #: Power Player, Palace Punch-up and Ljudfarmen came out routed
+            #: through a named local. Only the factory: a script function
+            #: returning a class by value is `STOREOBJ` too, and that is a
+            #: real value rather than a scratch literal.
+            if op.name == "STOREOBJ":
+                prev = next((self.instrs[j] for j in range(index - 1,
+                                                           max(index - 3, -1), -1)
+                             if self.instrs[j].name != "SUSPEND"), None)
+                callee = getattr(getattr(prev, "func_ref", None), "name", "") or ""
+                if _is_string_factory(callee):
+                    self.construct_sites.setdefault(
+                        _s16(op.w_arg), []).append(op.pos)
+                    self.behaviour_writes.setdefault(
+                        _s16(op.w_arg), []).append(op.pos)
                 continue
             #: **An object slot is written by a BEHAVIOUR, not by an opcode
             #: that names it**, and this set was built from opcodes alone --
@@ -3887,7 +3928,16 @@ class FuncDecompiler:
         if name == "STOREOBJ":
             src = self.obj_reg or (self.value_reg
                                    if not self.value_reg.is_ptr else None)
-            self._bind(_s16(ins.w_arg), src or Atom("raw", "<?objreg>"))
+            #: The pre-pass counts a factory literal stored this way as a
+            #: construction of the slot; the bind has to say so too, or
+            #: `_reused_object_slot` is never asked about it.
+            prev = next((self.instrs[j] for j in range(self.k - 1,
+                                                       max(self.k - 3, -1), -1)
+                         if self.instrs[j].name != "SUSPEND"), None)
+            from_factory = _is_string_factory(
+                getattr(getattr(prev, "func_ref", None), "name", "") or "")
+            self._bind(_s16(ins.w_arg), src or Atom("raw", "<?objreg>"),
+                       constructed=from_factory)
             self.obj_reg = None
             self.value_reg = Atom("raw", "<?reg>")
             self.pending_value_call = None
@@ -6291,6 +6341,25 @@ class FuncDecompiler:
             # `[VAR 4, PSF 7, PSF 1]`, and the run took two arguments, made
             # the first item's id the destination and passed `<?>`.
             nparams = _alloc_arity_from_stack(self.stack)
+            #: **...unless what follows reads the slot the top address
+            #: names.** The 2010 engines -- the 2010-07 beta and BGT 1.0
+            #: itself -- copy a string by DEFAULT-constructing a heap object
+            #: and then assigning into it:
+            #:
+            #:     PshRPtr                    ; the source, for opAssign
+            #:     PSF 6 ; ALLOC string       ; the destination, on TOP
+            #:     PshV4 6 ; string::opAssign
+            #:
+            #: so the address on top is the destination and the value below
+            #: it belongs to the `opAssign`, not to the constructor. Read as
+            #: a copy constructor it took the destination as its argument
+            #: and the source as the destination, and Power Player's
+            #: `"music\\" + list[0]` came out `list[0] = null; local_6 = <?>;`
+            #: The next instruction pushing that very slot is the test: an
+            #: argument built in a temp slot is passed on and destroyed, not
+            #: immediately made the receiver of a call.
+            if _alloc_destination_on_top(self.stack, self.instrs, self.k):
+                nparams = 0
         # VM layout: [dest pushed first] [args reversed] (obj pushed by VM);
         # pops yield args in forward order, then the destination slot.
         args = [self._deref(self.stack.pop() if self.stack else Atom("raw", "<?>"))

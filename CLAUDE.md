@@ -14601,6 +14601,86 @@ so it is skipped like `SUSPEND`. Missed, the slot was declared `sound
 local_6;` and assigned by value -- "No appropriate opAssign method found in
 'sound'", the last four errors. With both, **Survive compiles cleanly**.
 
+## Power Player: BGT 1.0 itself, and a string that comes back in a REGISTER
+
+`powerplayer.exe` (SDJNick) is the first title in the corpus built by the
+released **BGT 1.0** -- its runtime is dated 2010-12-30 03:16, which is
+`bgt.exe` 1.0's own timestamp to the minute, and it registers the same 240
+names. The module reads under the 2011-02 profile and lands exactly on EOF;
+it is a debug build, so the three files come out under their real names. The
+recovery passed every structural check, and BGT said **22 errors**.
+
+All of them were one thing seen from two sides. **These engines -- the
+2010-07 beta, 1.0 and Ljudfarmen's 2011-02 -- hand a `string` back in the
+OBJECT REGISTER**, where 2011-09 and later build it in a hidden return
+address:
+
+```
+2010 to 2011-02:   STR "music" ; CALLSYS _string_factory_ ; STOREOBJ 1
+                   VAR 1 ; GETOBJREF 0 ; CALLSYS directory_exists ; FREE 1
+2011-09 onward:    STR "music" ; PSF 1 ; CALLSYS _string_factory_
+```
+
+Counted per module, the factory is followed by `STOREOBJ` 183 times in
+Palace Punch-up and 214 in Ljudfarmen, and by `PSF ; ALLOC` in Antony. So:
+
+- **A `STOREOBJ` of a call returning an object BY VALUE is not a handle.**
+  `HANDLE_SLOT_OPS` holds `STOREOBJ` because it is the plainest handle
+  witness there is, and in these builds every string temp went through it --
+  declared `string@`, which is "Object handle is not supported for this
+  type" in every engine. The same goes for `string::opAdd`, which returns a
+  `string` the same way, and for `LOADOBJ` in a function returning one.
+- **...and it is a CONSTRUCTION of the slot.** The construction pre-pass
+  read only `PSF v ; <factory>`, so a slot rebuilt at four sites looked
+  declared once, and every literal was routed through a named local --
+  `@local_1 = "music"; directory_exists(local_1)`. Counted as a construction
+  it goes through `_reused_object_slot` like the later engines' literals do,
+  and comes out `directory_exists("music")`.
+
+**Both are gated on the early reader**, and that was measured, not assumed:
+ungated, the by-value rule turned Sable's `string[]@ x = find_sounds(...)`
+into `string[] x = ...` in four files. An array is a reference type, and
+whether its source held it by handle is not this rule's to change; from
+2011-09 a value type never takes this path at all.
+
+**And a 2010 copy constructs first and assigns after.** `"music\\" +
+list[0]` copies the element like this:
+
+```
+PshRPtr                      ; list[0], for the opAssign
+PSF 6 ; ALLOC string         ; the destination, on TOP
+PshV4 6 ; string::opAssign
+```
+
+The stack rule for an unreadable `ALLOC` callee takes an address on top as
+the copy constructor's one argument, which is Screaming Strike's shape --
+and here it made the destination the argument and the source the
+destination: `list[0] = null; local_6 = <?>;`, six times.
+`_alloc_destination_on_top` is the test: the next instruction pushes the
+slot the top address names, so the new object is a receiver rather than an
+argument passed on and destroyed.
+
+| title | lines | `string@` | `<?>` | differing files | the compiler |
+|---|---|---|---|---|---|
+| Power Player (2010-12, BGT 1.0) | 365 -> **344** | 11 -> **0** | 6 -> **0** | 1 | 22 errors -> **compiles cleanly** |
+| Palace Punch-up (2010-07) | 3,200 -> **3,015** | 57 -> **0** | 0 | 3 | 300 errors, below |
+| Ljudfarmen (2011-02) | 3,045 -> **2,880** | 73 -> **0** | 0 | 7 | **2 errors** |
+| Antony, Grodan Gun, Survive, X-Wheel, Sable | unchanged | 0 | 0 | **0** | unchanged |
+
+Calls read back are unchanged on all eight. The suite is 1,178 passing.
+
+**Ljudfarmen's two are the shapes this file already names** for Perilous
+Hearts: `Can't implicitly convert from 'const int' to 'menu_callback@'` and
+a handle compared with a number. **Palace Punch-up's 300 are its own**, and
+they start at the class declarations -- `'crumbling_speed' is not a member
+of 'square'`, every member of `player` and `sound_pool_item` -- so they are a
+cascade from the beta's class records rather than from anything here. Not
+run down.
+
+`while (true)` comes out of these builds as `while (true) { if (false)
+break; ...` -- `SetV1 5 1 ; CpyVtoR4 5 ; JZ` tests a literal. Ugly and
+correct, and left alone.
+
 ## Build to Survive is three DEBUG builds, and every free check passed
 
 Three stock BGT 1.3 executables by Air Puck's author -- a client, a server
