@@ -4466,6 +4466,69 @@ Three honest gaps, recorded rather than smoothed over:
   rewind and that is consistent with every observation -- but a seek that
   carries a position would look the same until a title needed one.
 
+#### Philip's own elias build, and the API note that came with it
+
+A folder BGT's author gave a tester (`elias_bgt_api.txt`, three demo scripts
+with their built executables and themes, `elias.dll`, and a `bgt.exe` with
+its `exec.bin`) settles most of what the sections above could only infer.
+
+**The two ints are a RANGE.** Philip's note gives the binding verbatim as
+
+```
+bool start(int min_level, int max_level);
+bool set_level(int min_level, int max_level);   // objective themes only
+bool request_change(int track_count);           // exploration themes only
+```
+
+and all three demos call `music.start(level, level)` and
+`music.set_level(level + 1, level + 1)`. So the renderer above, which calls
+`elias_theme_start(..., level, greatest, ...)`, was never rendering "at
+level 1": it asked for anything from 1 to 19, and elias was free to pick
+trigger 16. That is the first of the three gaps recorded above, and the
+second is very likely the same thing seen from the top -- `(19, 19)` is a
+range of one, where every lower "level" was a range of many. Not
+re-rendered here; the next render should pass `(level, level)`.
+
+**A theme has a MODE, and it decides which call drives it.** `mode=
+"objective"` themes take `set_level`; `mode="exploration"` themes take
+`request_change`, whose argument is a track count rather than a level. All
+five of The Gate's themes are objective, which is why its
+`set_theme_level` is the only path that game uses. A trigger in an
+objective theme is the level at which that variation enters -- the
+objective demo's Choir track has triggers 1, 3, 8, 11, 14, 17 and 19 -- and
+`DUMMY.ogg`, two samples long, is how the composer makes a track go quiet
+at one level.
+
+**The whole script interface is 26 members**, which closes "at least 25":
+ten methods -- `load`, `start`, `pause`, `resume`, `set_level`,
+`request_change`, `silence`, `play_stinger`, `get_keys`, `close` -- and nine
+properties, which are sixteen accessors: `transitioning` and
+`greatest_level` read-only, and `immediately`, `rendezvous`, `urgency`,
+`stinger`, `key`, `volume` and `pan` read-write.
+
+**"VGStorm's fork" is Philip's elias build.** The `bgt.exe` in that folder
+is PE-dated 2016-06-29 and registers **453 names** -- and its registered
+interface is **identical to The Gate's runtime, name for name and signature
+for signature**, which is the figure this file records for Psycho Strike
+and The Gate as one developer's fork. It is BGT 1.3 plus the elias binding
+and the twenty-odd additions recorded there, built by BGT's own author.
+Manamon 1 (469) and Manamon 2 (509) are later builds of the same line.
+
+**And it is the one installed here.** `C:\Program Files (x86)\BGT\bgt.exe`
+and `exec.bin` are byte-identical to that folder's, so every "BGT 1.3"
+compile in this file since the swap was made against this build. It is a
+superset of stock 1.3 for the names a 1.3 game uses, so those verdicts
+stand; what it changes is the one this file kept writing down as
+unavoidable:
+
+| title | before | with Philip's build |
+|---|---|---|
+| The Gate | "no -- `elias`, which no stock BGT registers" | **compiles cleanly**: 33,975 lines, 0 gotos, a verified split, 8,680 calls read back |
+| the three demos | -- | recovered against their own source: identical but for names, and `bool paused` read as an `int` |
+
+The Gate has not been driven or played with it yet; that needs its
+`sounds.dat` and `elias.dll` beside the project.
+
 ##### elias never opens a file, and that is the whole design
 
 The surprise, and the thing that makes the 19-of-92 import list make sense:
