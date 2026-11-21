@@ -4368,6 +4368,34 @@ Elias Software's SDK header is not public -- it was licensee-only, and this is
 a 2015 build -- so the authority is the game's own calls, which is this file's
 first rule applied one layer out: read the caller.
 
+**The header is still not public, and one caller written against it is.**
+Searched for rather than assumed: no code on GitHub contains `elias.h`, and
+the Wayback Machine has Elias Software's July 2015 download page -- which
+offered an "Elias 1.5 SDK - Win version" behind an account checkout -- but not
+the file. What it does have is [Banbury/UE4Elias](https://github.com/Banbury/UE4Elias),
+a 2015 Unreal plugin whose README tells the user to copy `elias.h` in from the
+SDK, and whose source calls the API with the header's own parameter names:
+
+| function | parameters, as UE4Elias names them |
+|---|---|
+| `elias_theme_get_basic_info` | `theme, &bpm, &timesig_numerator, &timesig_denominator, &bars, &sample_rate, &channels` |
+| `elias_theme_set_level` | `theme, minimum_level, maximum_level, urgency, stinger, immediately, rendezvous` |
+| `elias_theme_request_change` | `theme, track_count, urgency, stinger, immediately, rendezvous` |
+| `elias_theme_silence` | `theme, urgency, stinger, immediately, rendezvous` |
+| `elias_theme_change_key` | `theme, key, immediately` |
+| `elias_theme_start` | `theme, data_cb, user_data, -1, 1, 1, 100, 0, 0` -- slots 4 and 7 unnamed |
+| `elias_theme_create_from_xml` | `&theme, xml, error, 1024, 0` |
+| the data callback | `int (int action, const elias_source*, elias_sample* buffer, size_t count, void* user_data)` |
+| the enumerate callback | `int (const elias_source*, void** source_user_data, void* user_data)` |
+
+Every arity agrees with what `gate.exe`'s call sites gave, independently,
+which is the cross-check. Two things it corrects: the data callback takes
+**five** arguments, not four (cdecl hid the fifth), and its second argument
+is Elias's own source struct, whose `source_user_data` at +0x1c is where the
+host's handle lives -- the reading this file had, now with a name. It also
+names the struct's `filename` and `dummy` fields, which are the +0x14 and
++0x20 the game reads, and gives the theme modes: objective 1, exploration 2.
+
 cdecl puts every argument on the stack, so the pushes before a call give the
 arity and the `add esp, N` after it corroborates. **Both are needed**, because
 MSVC folds cleanups: `elias_set_memory_allocator` has no `add esp` of its own
@@ -4478,8 +4506,14 @@ rather than implying they are understood.
 ```bash
 csc -platform:x86 -out:render.exe tools/elias/render.cs
 python tools/elias/predecode.py boss          # Ogg stems -> raw 16-bit PCM
-render.exe <game>/elias.dll boss.epro pcm/boss out.wav <level> [seconds]
+render.exe <game>/elias.dll boss.epro pcm/boss out.wav <level> [seconds] [max_level]
 ```
+
+**The table below is the renderer as it first stood, and it asked for the
+wrong thing**: `elias_theme_start(..., level, greatest, ...)`, a range from
+`level` to the top. It passes `(level, level)` now, as the game does -- see
+**...and re-rendered with the range**, which closes the first two gaps
+listed under it.
 
 Measured on The Gate's `boss` theme -- 91 sources, **0 missing**, which is the
 closed-set claim above holding in practice rather than on paper:
@@ -4535,8 +4569,33 @@ and all three demos call `music.start(level, level)` and
 level 1": it asked for anything from 1 to 19, and elias was free to pick
 trigger 16. That is the first of the three gaps recorded above, and the
 second is very likely the same thing seen from the top -- `(19, 19)` is a
-range of one, where every lower "level" was a range of many. Not
-re-rendered here; the next render should pass `(level, level)`.
+range of one, where every lower "level" was a range of many.
+
+#### ...and re-rendered with the range, which closes two of the three gaps
+
+The renderer passes `(level, level)` now, with an optional seventh argument
+for a wider range, and slots 4 and 7 take UE4Elias's `-1` and `100`. Measured
+on Philip's own objective demo (41 stems, 156 bpm, 4/4, 32 bars -- the
+theme's own `tempo`, `time_signature` and `bars`, read back through
+`get_basic_info`):
+
+| asked for | stems that played | non-zero | peak |
+|---|---|---|---|
+| level 1..20, the old call | `1_0_3 2_0_7 3_0_10 4_0_8 7_0_12` | 78% | 8,388 |
+| **1** | `1_0_1 2_0_1 7_0_1` | 99.9% | 4,540 |
+| **3** | `1_0_3 2_0_2 7_0_1` | 99.9% | 5,091 |
+| **7** | `1_0_3 2_0_7 3_0_5 4_0_6 5_0_7 6_0_7 7_0_1` | 99.9% | 8,873 |
+| **12** | `1_0_11 2_0_9 3_0_12 4_0_11 5_0_12 6_0_7 7_0_12` | 99.9% | 11,930 |
+| **20**, the greatest | `1_0_19 2_0_18 3_0_20 4_0_18 5_0_19 6_0_20 7_0_17` | 99.9% | 23,185 |
+
+**Each track plays its greatest trigger at or below the level**, which is
+"trigger is the intensity threshold" after all -- the reading the first gap
+called wrong, wrong only because the call asked for a range. A track with no
+trigger that low stays out (level 1 plays three of seven), and the peak rises
+with every step. **The greatest level renders whole**, so the second gap was
+the same range seen from the top. The third -- what `action 2` carries -- is
+still open, and so are slots 4 and 7: `-1` and `100` render, and so did the
+zeros before them.
 
 **A theme has a MODE, and it decides which call drives it.** `mode=
 "objective"` themes take `set_level`; `mode="exploration"` themes take

@@ -1,19 +1,29 @@
 // Render a real elias theme at a chosen intensity, by driving the game's own
 // elias.dll and streaming the game's own stems into it.
 //
-// Everything the harness does was read out of gate.exe rather than guessed:
+// The arities were read out of gate.exe; the parameter NAMES come from the
+// one public caller of this API, Banbury/UE4Elias (2015), which was written
+// against the real elias.h. The header itself is not public.
 //
-//   elias_theme_start(theme, source_cb, 0, 0, level, max, 0, 0, 0)
-//       nine arguments -- `add esp,0x24` at 0x0046C890 -- of which the five
-//       the game fills from its wrapper object all tolerate zero.
+//   elias_theme_start(theme, data_cb, user_data, -1, min_level, max_level,
+//                     100, 0, 0)
+//       nine arguments -- `add esp,0x24` at 0x0046C890. Levels 5 and 6 are a
+//       RANGE: elias may pick any trigger inside it, so asking for 1..20
+//       does not render "level 1". UE4Elias passes -1 and 100 in slots 4 and
+//       7 and says nothing about what they mean; so does this.
 //
-//   source_cb(op, elias_source, arg3, arg4)
-//       op 3 prepare, op 1 read arg4 samples into arg3, op 2 rewind,
-//       op 4 finish. The host's own handle is at elias_source+0x1c, which is
-//       where gate.exe reads it (`mov esi,[eax+0x1c]`).
+//   int data_cb(int action, const elias_source* source,
+//               elias_sample* buffer, size_t count, void* user_data)
+//       action 3 open, 1 read `count` samples into `buffer`, 2 seek,
+//       4 close. The host's own handle is the source's source_user_data,
+//       at +0x1c, which is where gate.exe reads it (`mov esi,[eax+0x1c]`).
 //
-//   samples are interleaved 16-bit: elias pads a shortfall itself with
-//       `lea edi,[edi+eax*2]`, and arg4 of 22050 is 250 ms of stereo at
+//   int enumerate_cb(const elias_source* source, void** source_user_data,
+//                    void* user_data)
+//       source->filename is at +0x14 and source->dummy at +0x20.
+//
+//   elias_sample is interleaved 16-bit: elias pads a shortfall itself with
+//       `lea edi,[edi+eax*2]`, and a count of 22050 is 250 ms of stereo at
 //       44.1 kHz -- exactly the processing period that was set.
 //
 // Streaming is not an optimisation: 82 stems of 93 seconds is 0.92 GB, which
@@ -34,7 +44,7 @@ static class Render {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate int CreateFromXml(out IntPtr t, byte[] xml, byte[] err, int n, IntPtr z);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    delegate int SourceResolve(IntPtr src, IntPtr outHandle, IntPtr user);
+    delegate int SourceResolve(IntPtr source, IntPtr sourceUserData, IntPtr userData);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate int Enumerate(IntPtr t, IntPtr cb, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -42,16 +52,22 @@ static class Render {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate int GetOut(IntPtr t, out int v);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    delegate int Start9(IntPtr t, IntPtr cb, int a3, int a4, int level,
-                        int max, int a7, int a8, int a9);
+    delegate int Start9(IntPtr t, IntPtr dataCb, IntPtr userData, int a4,
+                        int minLevel, int maxLevel, int a7, int a8, int a9);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    delegate int SetLevel7(IntPtr t, int a, int b, int c, int d, int key, int flag);
+    delegate int SetLevel7(IntPtr t, int minLevel, int maxLevel, int urgency,
+                           int stinger, int immediately, int rendezvous);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    delegate int BasicInfo(IntPtr t, out int bpm, out int timesigNumerator,
+                           out int timesigDenominator, out int bars,
+                           out int sampleRate, out int channels);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate int ReadSamples(IntPtr t, IntPtr buf, ref int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate int Destroy(IntPtr t);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    delegate int SourceOp(int op, IntPtr src, IntPtr arg3, int arg4);
+    delegate int SourceOp(int action, IntPtr source, IntPtr buffer, int count,
+                          IntPtr userData);
 
     [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
     static extern IntPtr LoadLibraryA(string n);
@@ -80,6 +96,7 @@ static class Render {
     static int missing;
 
     static int Resolve(IntPtr src, IntPtr outHandle, IntPtr user) {
+        // outHandle is the source's void** source_user_data
         string name = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(src, 0x14));
         string bare = Path.GetFileNameWithoutExtension(name ?? "");
         Src s = new Src();
@@ -94,7 +111,7 @@ static class Render {
         return 1;                     // every source must resolve or we get 15
     }
 
-    static int Op(int op, IntPtr src, IntPtr arg3, int arg4) {
+    static int Op(int op, IntPtr src, IntPtr arg3, int arg4, IntPtr userData) {
         Src s = null;
         if (src != IntPtr.Zero) {
             IntPtr mine = Marshal.ReadIntPtr(src, 0x1C);
@@ -135,12 +152,14 @@ static class Render {
 
     static int Main(string[] argv) {
         if (argv.Length < 5) {
-            Console.WriteLine("usage: render <elias.dll> <theme.epro> <pcmdir> <out.wav> <level> [seconds]");
+            Console.WriteLine("usage: render <elias.dll> <theme.epro> <pcmdir> <out.wav> <level> [seconds] [max_level]");
+            Console.WriteLine("  the theme renders inside min_level..max_level; max_level defaults to level");
             return 2;
         }
         pcmDir = argv[2];
         int level = int.Parse(argv[4]);
         double seconds = argv.Length > 5 ? double.Parse(argv[5]) : 30.0;
+        int maxLevel = argv.Length > 6 ? int.Parse(argv[6]) : level;
 
         mod = LoadLibraryA(argv[0]);
         keepAlloc = delegate(uint z) { return Marshal.AllocHGlobal((int)z); };
@@ -163,9 +182,12 @@ static class Render {
                               Encoding.ASCII.GetString(err).TrimEnd('\0'));
             return 1;
         }
-        int rate, channels;
-        Fn<GetOut>("elias_theme_get_source_count")(theme, out rate);
-        Console.WriteLine("theme loaded, {0} sources", rate);
+        int sources, bpm, num, den, bars, rate, channels;
+        Fn<GetOut>("elias_theme_get_source_count")(theme, out sources);
+        Fn<BasicInfo>("elias_theme_get_basic_info")(theme, out bpm, out num, out den,
+                                                    out bars, out rate, out channels);
+        Console.WriteLine("theme loaded, {0} sources; {1} bpm, {2}/{3}, {4} bars, {5} Hz, {6} ch",
+                          sources, bpm, num, den, bars, rate, channels);
         int rc2 = Fn<Enumerate>("elias_theme_enumerate_sources")(
             theme, Marshal.GetFunctionPointerForDelegate(keepResolve), IntPtr.Zero);
         Console.WriteLine("enumerate -> {0}; {1} resolved, {2} with no pcm file",
@@ -176,12 +198,12 @@ static class Render {
         Fn<TwoInts>("elias_theme_set_suggested_thread_count")(theme, 2);
         int greatest;
         Fn<GetOut>("elias_theme_get_greatest_trigger")(theme, out greatest);
-        Console.WriteLine("greatest trigger (max intensity): {0}; rendering at {1}",
-                          greatest, level);
+        Console.WriteLine("greatest trigger (max intensity): {0}; rendering at {1}..{2}",
+                          greatest, level, maxLevel);
 
         int rcs = Fn<Start9>("elias_theme_start")(
             theme, Marshal.GetFunctionPointerForDelegate(keepOp),
-            0, 0, level, greatest, 0, 0, 0);
+            IntPtr.Zero, -1, level, maxLevel, 100, 0, 0);
         Console.WriteLine("start -> {0}", rcs);
         if (rcs != 0) { Fn<Destroy>("elias_theme_destroy")(theme); return 1; }
 
