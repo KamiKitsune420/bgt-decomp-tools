@@ -4593,9 +4593,45 @@ theme's own `tempo`, `time_signature` and `bars`, read back through
 called wrong, wrong only because the call asked for a range. A track with no
 trigger that low stays out (level 1 plays three of seven), and the peak rises
 with every step. **The greatest level renders whole**, so the second gap was
-the same range seen from the top. The third -- what `action 2` carries -- is
-still open, and so are slots 4 and 7: `-1` and `100` render, and so did the
-zeros before them.
+the same range seen from the top. Slots 4 and 7 are still open: `-1` and
+`100` render, and so did the zeros before them.
+
+#### ...and the third gap was a BUG: action 2 is a seek, and it carries a position
+
+**Every render longer than one loop was wrong after the loop**, and the
+renderer said nothing. The gap read *"`op 2` arrives with `arg3` and `arg4`
+both zero, immediately before each group of reads, so the renderer treats it
+as rewind"* -- true of the first seconds, which is all anybody had looked at.
+Logged across a loop boundary, on Treasure Troll's `innocence`:
+
+```
+op 3 1_0_2  count=0                         open
+op 2 1_0_2  count=0                         seek to the start
+...one loop of plain reads...
+op 2 1_0_2  count=6372450                   72.25 s -- the old loop's tail
+op 2 1_0_2  count=44100                     0.25 s  -- the new loop's start
+op 2 1_0_2  count=6394500
+op 2 1_0_2  count=66150                     ...and so on, before every read
+```
+
+`count` is an **interleaved sample index**, and once a loop wraps Elias seeks
+before every read, alternating between the tail it is fading out and the
+loop it is starting -- which is how it crossfades two instances of one
+stem through a single source. UE4Elias reads it the same way
+(`sf_seek(sndfile, count, SEEK_SET)`). Treated as a rewind, every read after
+the first loop replayed the stem's first 250 ms: `innocence` at level 2 went
+from a steady peak of 3,000 to almost nothing at 80 s, and a schedule of
+level changes appeared to stall, because every stem was stuck at its own
+start. Seeking to the position, both themes loop cleanly for the length of
+the render.
+
+**And a stinger passed to `set_level` is not a transition sound to take
+lightly.** `set_level(theme, 10, 10, 0, 9, 0, 0)` -- stinger track 9, "Low to
+Hi" -- returned 0 and then held the theme on that level for the rest of a
+four-minute render, with the stinger's stem read 767 times. That was measured
+with the broken seek, so it may be the same bug; it was not re-measured.
+Stinger 0 means none, a loop track's id is refused with error 3, and
+`play_stinger` on its own works.
 
 **A theme has a MODE, and it decides which call drives it.** `mode=
 "objective"` themes take `set_level`; `mode="exploration"` themes take

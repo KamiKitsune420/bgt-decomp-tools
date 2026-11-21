@@ -14,8 +14,11 @@
 //
 //   int data_cb(int action, const elias_source* source,
 //               elias_sample* buffer, size_t count, void* user_data)
-//       action 3 open, 1 read `count` samples into `buffer`, 2 seek,
-//       4 close. The host's own handle is the source's source_user_data,
+//       action 3 open, 1 read `count` samples into `buffer`, 2 seek to
+//       the interleaved sample index in `count`, 4 close. Elias seeks before
+//       every read once a loop wraps, alternating the old loop's tail and the
+//       new loop's start, so a seek that ignores its position replays the
+//       first 250 ms forever. The host's own handle is the source's source_user_data,
 //       at +0x1c, which is where gate.exe reads it (`mov esi,[eax+0x1c]`).
 //
 //   int enumerate_cb(const elias_source* source, void** source_user_data,
@@ -124,8 +127,8 @@ static class Render {
                     s.fs = new FileStream(s.path, FileMode.Open, FileAccess.Read,
                                           FileShare.Read, 1 << 16);
                 return 1;
-            case 2:
-                if (s.fs != null) s.fs.Position = 0;
+            case 2:                                   // seek: arg4 is a sample index
+                if (s.fs != null) s.fs.Position = Math.Min((long)arg4 * 2, s.fs.Length);
                 return 1;
             case 4:
                 if (s.fs != null) { s.fs.Dispose(); s.fs = null; }
