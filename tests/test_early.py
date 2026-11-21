@@ -694,10 +694,14 @@ def test_the_string_factory_is_named_in_one_place():
     assert not decompile._is_string_factory("")
     assert not decompile._is_string_factory("string_factory")
     # The construction pre-pass and the rendering branch both go through
-    # it, which is the whole point of the helper.
+    # it, which is the whole point of the helper -- and so do the two that
+    # read the 2010 to 2011-02 engines' `STOREOBJ` of a factory literal,
+    # the pre-pass that counts it as a construction and the handler that
+    # binds it as one. No spelling of the name appears anywhere else.
     import inspect
     src = inspect.getsource(decompile.FuncDecompiler)
-    assert src.count("_is_string_factory(") == 2
+    assert src.count("_is_string_factory(") == 4
+    assert '"_string_factory_"' not in src
 
 # ---- a property's own byte offset ----------------------------------------
 

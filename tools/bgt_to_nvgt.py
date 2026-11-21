@@ -1323,8 +1323,14 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
     out = os.path.abspath(out)
     if not os.path.isdir(project):
         raise SystemExit("no such project: %s" % project)
-    if os.path.abspath(os.path.join(out, "")) .startswith(
-            os.path.abspath(os.path.join(project, ""))):
+    # `abspath` strips the trailing separator `join(p, "")` adds, so a
+    # prefix test called `D:\ASE_nvgt` inside `D:\ASE`. Compare components.
+    try:
+        inside = (os.path.normcase(os.path.commonpath([out, project]))
+                  == os.path.normcase(project))
+    except ValueError:            # different drives
+        inside = False
+    if inside:
         raise SystemExit("the output folder is inside the project")
 
     report: Dict[str, Any] = {"project": project, "out": out, "files": 0,

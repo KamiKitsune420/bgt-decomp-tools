@@ -50,7 +50,23 @@ def token(t):
     so an identifier (5) stays 5 and anything unmapped renders visibly as
     `tokNN` rather than as a confidently wrong type.
     """
+    if t == QUESTION:
+        return NEWER_QUESTION
     return t + TOKEN_SHIFT if t + TOKEN_SHIFT in _NEWER_TYPE_TOKENS else t
+
+
+#: `ttQuestion`, the `?` of a `?&in` parameter, which is not a type token and
+#: so was never shifted -- and the decompiler recognises a variable-type
+#: argument by the newer reader's 60. Left at 57, every `?&in` argument lost
+#: its meaning: the hidden TYPEID slot was read as a value, so a
+#: `library::call` in AngelScript 2.26's Active Soundscape Engine came out
+#: `dll.call(sig, path, string, 4294967295, int, 4294967295, ...)`. 57 in
+#: every AngelScript from 2.19.0 to 2.28.0, read out of each tag's own
+#: `as_tokendef.h`; 1.3's AngelScript has it at 59 and the IR at 60, so the
+#: two inserts that make up the shift both sit below it -- it moves by three,
+#: not four, which is why it needs naming rather than the general rule.
+QUESTION = 57
+NEWER_QUESTION = 60
 
 
 #: `asEBCType` by number, so an instruction's field layout can come from

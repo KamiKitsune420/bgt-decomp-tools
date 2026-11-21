@@ -244,6 +244,12 @@ class _Splitter(decompile.ModuleDecompiler):
         self._capture("class", c.format_name(),
                       lambda: super(_Splitter, self)._render_class(c), first)
 
+    def _render_late_funcdef(self, f):
+        # Its own section, so it stays where the base class put it -- after
+        # the classes -- instead of being swept into the leading remainder.
+        self._capture("funcdef", f.name,
+                      lambda: super(_Splitter, self)._render_late_funcdef(f))
+
     def _render_globals(self):
         self._capture("globals", "globals",
                       lambda: super(_Splitter, self)._render_globals())
@@ -373,8 +379,12 @@ def engine_gap(exe_path: str, used: Sequence[str],
         return []
     names = [name for name in dict.fromkeys(used)
              if len(name) >= 3 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-             # The engine's own placeholders are not types anyone is missing.
-             and not name.startswith("$") and name != "_builtin_function_"]
+             # The engine's own placeholders are not types anyone is missing,
+             # and `_builtin_array_` is the 2010 beta's name for the array
+             # template, which is written `T[]` -- reported as missing it
+             # read "built with a newer BGT", about the oldest one there is.
+             and not name.startswith("$")
+             and name not in ("_builtin_function_", "_builtin_array_")]
 
     # The engine's own documentation is a list of what it has, where searching
     # its binary for a name is a guess. Fall back to the guess only when the
@@ -1570,6 +1580,10 @@ def assign_paths(sections: List[Section], origins: Dict[str, str],
             section.path = "includes/types.bgt"
         elif section.kind == "globals":
             section.path = "includes/globals.bgt"
+        elif section.kind == "funcdef":
+            # Only an engine that resolves no type forward has one of
+            # these: a funcdef that has to follow the classes it names.
+            section.path = "includes/funcdefs.bgt"
         elif place:
             section.path = "includes/" + place
         elif section.kind == "class":

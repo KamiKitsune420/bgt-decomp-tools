@@ -692,6 +692,85 @@ class Atom:
     ternary: tuple[str, Atom, Atom] | None = None
 
 
+def _alloc_arity_from_stack(stack: list) -> int:
+    """How many arguments an `ALLOC` takes when its callee cannot be read.
+
+    The destination is a slot ADDRESS, pushed before the arguments. Values
+    that are not addresses, sitting above the nearest address, are the
+    arguments -- a string literal arrives that way (the factory's
+    `const string&` pushed by `PshRPtr`), and so does a constant. When the
+    top is itself an address it is ONE argument: an object built in a temp
+    slot and passed by reference, which for a registered type is the copy
+    constructor. See `FuncDecompiler._alloc` for the builds this is for.
+
+    **A global's address on top IS the destination**, with nothing above it:
+    a global initialiser pushes what it will assign afterwards, then the
+    global's address, then default-constructs it and calls `opAssign` --
+
+        STR "X-Wheel" ; _string_factory_ ; PshRPtr
+        PGA product ; ALLOC string ; PshGPtr product ; opAssign
+
+    Counted as an argument, the global was popped as one and the literal
+    became the destination: `"X-Wheel" = product; product = <?>;`.
+    """
+    if stack and stack[-1].kind == "global":
+        return 0
+    above = 0
+    for atom in reversed(stack):
+        if atom.is_ptr:
+            break
+        above += 1
+    if above and above < len(stack):
+        return above
+    return 1 if len(stack) >= 2 else 0
+
+
+def _null_if_zero(value: "Atom") -> "Atom":
+    """A handle copied from the constant 0 is `null`.
+
+    The 2010-2012 engines have no `ClrVPtr`, so `cb@ h = null;` is
+    `PshC4 0 ; PSF 1 ; REFCPY` -- and a copy of a handle can only be a
+    handle, so the one constant it can hold is the null one. Rendered as
+    `@local_1 = 0;` it is "Can't implicitly convert from 'const uint' to
+    'menu_callback@'", in BGT's own `dynamic_menu` as Ljudfarmen ships it.
+    """
+    if value.kind == "const" and value.text in ("0", "0u", "0.0"):
+        return Atom("null", "null", value.dw_size)
+    return value
+
+
+def _alloc_destination_on_top(stack: list, instrs: list, k: int) -> bool:
+    """Is the address on top of the stack this `ALLOC`'s DESTINATION?
+
+    The 2010 engines copy a string by default-constructing it and then
+    assigning: `PshRPtr ; PSF 6 ; ALLOC string ; PshV4 6 ; opAssign`. The
+    sign is that the very next instruction pushes the slot the top address
+    names, making the new object a receiver rather than passing it on.
+
+    The SOURCE may also be pushed after the `ALLOC` rather than before it,
+    which is how Maestro Monster's BGT 1.0 `form.bgt` copies a parameter:
+    `PSF 6 ; ALLOC string ; PshV4 -1 ; PshV4 6 ; string::opAssign`. Then the
+    destination is the second push, and the `opAssign` that follows is what
+    says so -- a constructor argument is never immediately assigned into.
+    """
+    top = stack[-1] if stack else None
+    if top is None or not top.is_ptr or top.offset is None:
+        return False
+    after = [instrs[j] for j in range(k + 1, min(k + 6, len(instrs)))
+             if instrs[j].name != "SUSPEND"]
+    pushes = ("PshV4", "PshVPtr")
+    if after and after[0].name in pushes and _s16(after[0].w_arg) == top.offset:
+        return True
+    if (len(after) >= 3 and after[0].name in pushes
+            and after[1].name in pushes
+            and _s16(after[1].w_arg) == top.offset
+            and _s16(after[0].w_arg) != top.offset
+            and after[2].name.startswith("CALL")
+            and getattr(after[2].func_ref, "name", None) == "opAssign"):
+        return True
+    return False
+
+
 #: the object a call is made on, and the method: `this.terrain.getTailleX()`
 #: has receiver `this.terrain`, not `this`. Taking the leading identifier
 #: instead made `this` the receiver of every method call on a member, and
@@ -1151,7 +1230,7 @@ def _mask_strings(line: str) -> str:
     return "".join(out)
 
 
-def _written_arguments(code, call_at: int, count: int):
+def _written_arguments(code, call_at: int, count: int, params=None):
     """The `count` arguments pushed before a call, in SOURCE order, when
     every one of them is something source can be written as.
 
@@ -1172,10 +1251,30 @@ def _written_arguments(code, call_at: int, count: int):
     args = []
     at = call_at - 1
     for _ in range(count):
+        # `GETOBJ`/`GETREF` move an argument already pushed; they push
+        # nothing themselves.
+        while at >= 0 and code[at].name in ("GETOBJ", "GETOBJREF", "GETREF"):
+            at -= 1
         if at < 0:
             return None
         ins = code[at]
-        if ins.name == "PshC4":
+        literal = None
+        if ins.name == "VAR":
+            found = (_string_literal_in_slot(code, at, ins.w_arg)
+                     or _parameter_in_slot(code, at, ins.w_arg, params))
+            if found is not None:
+                # Resume BEFORE the slot's own construction, which sits
+                # between this argument and the one pushed ahead of it.
+                literal, start = found
+                args.append(literal)
+                at = start - 1
+                continue
+        elif params and ins.name in ("PshV4", "PshV8", "PshVPtr"):
+            # A constructor parameter passed as it stands.
+            literal = params.get(_s16(ins.w_arg))
+        if literal is not None:
+            args.append(literal)
+        elif ins.name == "PshC4":
             args.append(str(_s32(ins.dw_arg)))
         elif ins.name == "PshG4" and getattr(ins, "global_name", None):
             args.append(ins.global_name)
@@ -1186,6 +1285,155 @@ def _written_arguments(code, call_at: int, count: int):
             args.append(read)
         at -= 1
     return args
+
+
+_RET_HOLDER = re.compile(r"__nvgt_ret_\d+")
+
+
+def _drop_unread_returns(body: list[str]) -> list[str]:
+    """A call's held result that nothing reads goes back to a bare call.
+
+    `_order_out_arguments` holds a call's result in `__nvgt_ret_N` so a
+    later read of its out argument cannot come before it -- and it has to
+    decide when the out argument is first READ, before it can know whether
+    the result is used at all. Where it is not, every save loader in the
+    corpus came out with an unused `bool __nvgt_ret_178;` and
+    `__nvgt_ret_178 = savedValues.get(...)`. The program is the same; the
+    holder is noise, and this removes exactly that: a holder whose name
+    appears only in its declaration and in one `name = call;` statement.
+    """
+    text = "\n".join(body)
+    counts: dict[str, int] = {}
+    for m in _RET_HOLDER.finditer(text):
+        counts[m.group(0)] = counts.get(m.group(0), 0) + 1
+    candidates = {n for n, c in counts.items() if c == 2}
+    if not candidates:
+        return body
+    # Exactly one bare declaration and one `name = ...;`, so a declaration
+    # paired with a READ is never mistaken for an unread holder.
+    declared, assigned = set(), set()
+    for line in body:
+        stripped = line.strip()
+        parts = stripped.split()
+        if len(parts) == 2 and stripped.endswith(";") \
+                and parts[1][:-1] in candidates:
+            declared.add(parts[1][:-1])
+        for n in candidates:
+            if stripped.startswith(n + " = "):
+                assigned.add(n)
+    unread = declared & assigned
+    if not unread:
+        return body
+    out = []
+    for line in body:
+        stripped = line.strip()
+        parts = stripped.split()
+        if len(parts) == 2 and parts[1].rstrip(";") in unread \
+                and stripped.endswith(";") and "=" not in stripped:
+            continue                       # the declaration
+        for n in unread:
+            prefix = n + " = "
+            if stripped.startswith(prefix):
+                line = line[:len(line) - len(stripped)] + stripped[len(prefix):]
+                break
+        out.append(line)
+    return out
+
+
+#: How far back a string literal's construction into a temp slot may sit
+#: from the `VAR` that passes it: `PSF 3 ; STR "" ; _string_factory_ ;
+#: PshRPtr ; PSF 1 ; $beh0 ; PSF 1 ; ALLOC string ; PSF 1 ; $beh2 ; VAR 3`
+#: is ten.
+_LITERAL_SLOT_WINDOW = 12
+
+
+def _string_literal_in_slot(code, at: int, slot: int):
+    """The literal a temp string slot was just built from, and where that
+    construction starts -- or None.
+
+    A by-value member constructed with a STRING argument does not push the
+    literal: it builds a string in a temp slot and passes that by `VAR`.
+    Sable's `droppable_items` is the shape --
+
+        PSF 3 ; STR "" ; CALLSYS _string_factory_ ; PshRPtr
+        PSF 1 ; CALLSYS string::$beh0 ; PSF 1 ; ALLOC string
+        PSF 1 ; CALLSYS string::$beh2
+        VAR 3 ; GETOBJ 0 ; CALL menu_items
+        STOREOBJ 4 ; PshVPtr 4 ; PshVPtr 0 ; ADDSi droppable_menu_item ; REFCPY
+
+    -- and refusing it left `menu_items droppable_menu_item;`, which is "No
+    default constructor for object of type 'menu_items'" because its only
+    constructor takes a string. Six of Sable's errors.
+
+    Narrow by construction: the slot must be a frame temp (positive), the
+    nearest earlier write naming it must be the `PSF` that opens an
+    `ALLOC string` within the window, and exactly one `STR` must sit between
+    that `PSF` and the `ALLOC`. Anything else is None, and the caller keeps
+    refusing.
+    """
+    if slot is None or slot <= 0:
+        return None
+    lo = max(0, at - _LITERAL_SLOT_WINDOW)
+    alloc = None
+    for k in range(at - 1, lo - 1, -1):
+        ins = code[k]
+        if ins.name == "ALLOC":
+            alloc = k
+            break
+        if ins.name in ("CALL", "CALLINTF", "CALLBND", "Thiscall1"):
+            return None
+    if alloc is None or code[alloc].type_ref is None \
+            or code[alloc].type_ref.format_name() != "string":
+        return None
+    opener = None
+    for k in range(alloc - 1, lo - 1, -1):
+        ins = code[k]
+        if ins.name == "PSF" and ins.w_arg == slot:
+            opener = k
+            break
+    if opener is None:
+        return None
+    strs = [code[k] for k in range(opener + 1, alloc)
+            if code[k].name == "STR"]
+    if len(strs) != 1 or strs[0].string_const is None:
+        return None
+    return f'"{_esc(strs[0].string_const)}"', opener
+
+
+def _parameter_in_slot(code, at: int, slot: int, params):
+    """The constructor parameter a temp string slot was just copied from.
+
+    Sable's `class_type` builds its by-value `player new_class` from its own
+    constructor's first parameter --
+
+        PSF 13 ; PshVPtr -1 ; ALLOC string ; VAR 13 ; ... ; CALL player
+
+    -- and a member's initialiser is compiled INSIDE the constructor, so the
+    declaration may name that parameter. BGT was asked rather than assumed:
+    `needs2 n(x, 5);` beside `holder2(int x)` compiles cleanly and runs to
+    `n.v == 35` for `x == 3`. `params` is None unless the class has exactly
+    one constructor, because the name is resolved in every constructor and
+    another one need not have it.
+    """
+    if not params or slot is None or slot <= 0:
+        return None
+    lo = max(0, at - _LITERAL_SLOT_WINDOW)
+    alloc = None
+    for k in range(at - 1, lo - 1, -1):
+        if code[k].name == "ALLOC":
+            alloc = k
+            break
+        if code[k].name in ("CALL", "CALLINTF", "CALLBND", "Thiscall1"):
+            return None
+    if alloc is None or code[alloc].type_ref is None \
+            or code[alloc].type_ref.format_name() != "string":
+        return None
+    if alloc < 2 or code[alloc - 2].name != "PSF" \
+            or code[alloc - 2].w_arg != slot \
+            or code[alloc - 1].name != "PshVPtr":
+        return None
+    name = params.get(_s16(code[alloc - 1].w_arg))
+    return None if name is None else (name, alloc - 2)
 
 
 def _global_accessor_before(code, at: int):
@@ -1329,7 +1577,14 @@ def _member_array_sizes(c: TypeInfo) -> dict:
             # standing alone: "No default constructor for object of type
             # 'key_hold'", once per member, which is a class that cannot
             # compile at all.
-            args = _written_arguments(code, k, len(params))
+            #
+            # A member initialiser is compiled inside EACH constructor, so it
+            # may name a parameter only when there is one constructor to
+            # resolve it in.
+            names = (dict(_parameter_layout(f))
+                     if len(c.constructors) == 1 and f in c.constructors
+                     else None)
+            args = _written_arguments(code, k, len(params), names)
             if args is None:
                 continue              # not all of them are writable
             out[name] = ", ".join(args)
@@ -1543,6 +1798,14 @@ def _constructor_type(dt: DataType) -> str:
     if (dt.obj_type is not None and dt.obj_type.template_syntax == "suffix"
             and dt.template_subtypes):
         inner = ", ".join(sub.format() for sub in dt.template_subtypes)
+        #: The 2010 beta names its array template `_builtin_array_`, which
+        #: that engine accepts in an expression and every later one does
+        #: not. The suffix form is the one both take -- `string[]()` was put
+        #: to the beta and to BGT 1.3 and compiles in each -- so it is used
+        #: wherever it parses, which is whenever no subtype is a handle.
+        if (dt.obj_type.name != "array"
+                and not any(sub.is_object_handle for sub in dt.template_subtypes)):
+            return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
         return "%s<%s>" % (dt.obj_type.name, inner)
     return dt.format().removeprefix("const ").rstrip("&").rstrip("@")
 
@@ -1663,6 +1926,57 @@ def _drop_redundant_construction(dt: DataType, name: str, stmts, namespace=""):
             break              # the next statement READS it: not a dead store
         out.pop(0)
     return out
+
+
+_LIST_LITERAL = re.compile(
+    r'^(?:"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?[fu]?|true|false)$')
+
+
+def _fold_element_list(stmts, name: str) -> str | None:
+    """An initialiser list the 2010-2012 engines compiled element by element.
+
+    Those engines have no initialisation-list protocol: Ljudfarmen's
+    `string[] bull_objects = {"coffee", "hen_house", ...};` compiles to a
+    sized array and one store per element, so it came back as
+
+        string[] bull_objects = __nvgt_global_init_47();
+        string[] __nvgt_global_init_47() {
+            string[] bull_objects;
+            bull_objects = array<string>(6);
+            bull_objects[0] = "coffee";
+            ...
+
+    -- which BGT 1.3 accepts and Ljudfarmen's own engine refuses outright:
+    "Function calls are not allowed in global expressions", and every use
+    of the global after it "Use of uninitialized global variable". The
+    engine was asked, by building a probe with that game's own runtime:
+    `string[] w = {"coffee", "mud"};` compiles to exactly that shape, and
+    both engines accept the list form.
+
+    Only the exact shape: the size, then every index from 0 to N-1 once and
+    in order, each a literal. Anything else is real work and keeps its
+    helper.
+    """
+    if len(stmts) < 2:
+        return None
+    head = stmts[0].strip()
+    m = re.match(r"^" + re.escape(name) + r" = array<[^>]+>\((\d+)\);$", head)
+    if not m:
+        return None
+    count = int(m.group(1))
+    if count == 0 or count != len(stmts) - 1:
+        return None
+    values = []
+    for i, stmt in enumerate(stmts[1:]):
+        prefix = "%s[%d] = " % (name, i)
+        text = stmt.strip()
+        if not (text.startswith(prefix) and text.endswith(";")):
+            return None
+        value = text[len(prefix):-1].strip()
+        if not _LIST_LITERAL.match(value):
+            return None
+        values.append(value)
+    return "{" + ", ".join(values) + "}"
 
 
 def _fold_to_construction(dt: DataType, stmts, name: str) -> str | None:
@@ -1901,6 +2215,31 @@ class FuncDecompiler:
         for index, op in enumerate(self.instrs):
             if op.name in _SLOT_WRITE_OPS:
                 self.slot_writes.setdefault(_s16(op.w_arg), []).append(op.pos)
+                continue
+            #: **...and the 2010 to 2011-02 engines' string factory hands its
+            #: string back in the OBJECT REGISTER**, so a literal reaches its
+            #: slot by `STOREOBJ` rather than through a pushed address:
+            #:
+            #:     STR "music" ; CALLSYS _string_factory_ ; STOREOBJ 1
+            #:     VAR 1 ; GETOBJREF 0 ; CALLSYS directory_exists ; FREE 1
+            #:
+            #: That is a construction of slot 1 as much as the later
+            #: engines' `PSF 1 ; _string_factory_` is, and unseen here the
+            #: slot looked declared once -- so every literal in BGT 1.0's
+            #: Power Player, Palace Punch-up and Ljudfarmen came out routed
+            #: through a named local. Only the factory: a script function
+            #: returning a class by value is `STOREOBJ` too, and that is a
+            #: real value rather than a scratch literal.
+            if op.name == "STOREOBJ":
+                prev = next((self.instrs[j] for j in range(index - 1,
+                                                           max(index - 3, -1), -1)
+                             if self.instrs[j].name != "SUSPEND"), None)
+                callee = getattr(getattr(prev, "func_ref", None), "name", "") or ""
+                if _is_string_factory(callee):
+                    self.construct_sites.setdefault(
+                        _s16(op.w_arg), []).append(op.pos)
+                    self.behaviour_writes.setdefault(
+                        _s16(op.w_arg), []).append(op.pos)
                 continue
             #: **An object slot is written by a BEHAVIOUR, not by an opcode
             #: that names it**, and this set was built from opcodes alone --
@@ -2279,6 +2618,20 @@ class FuncDecompiler:
         #: once. Promoted on sight here, which is the only way to get the
         #: assignment in before the first read rather than after it.
         self.duplicate_binds: set[tuple[int, int]] = set()
+        #: (slot, bind position) pairs PROMOTED after a read had already
+        #: folded them. The promotion puts the assignment back at the bind,
+        #: and the read before it has already written the call -- so the
+        #: call runs twice. The Gate's `main_menu` is the shape:
+        #:
+        #:     local_10 = menu.run_extended("...welcome_to_gate.wav", ...);
+        #:     if (menu.run_extended("...welcome_to_gate.wav", ...) == -1)
+        #:
+        #: The `CMPIi` folded the result (one read, so never "folded more
+        #: than once"), and the next read found it stale -- `menu_error` may
+        #: have run -- and promoted it. Every menu in that game had to be
+        #: answered TWICE. Carried into the next pass like a duplicate, so
+        #: the value is promoted before its first read.
+        self.promoted_after_fold: set[tuple[int, int]] = set()
         #: [(bind position, call text)] for every call parked in a slot.
         #: A call is not a value, it is something the program did, so one
         #: whose text reaches no statement was not simplified away -- it was
@@ -2291,6 +2644,9 @@ class FuncDecompiler:
         #: census counts these against the output, because a call bound three
         #: times is still one call -- see `_lost_calls`.
         self.invocation_sites: dict[str, set[int]] = {}
+        #: Where an impure call with no result was written out as a
+        #: statement. See `_reorders_side_effects`.
+        self.effect_sites: set[int] = set()
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -2420,6 +2776,25 @@ class FuncDecompiler:
         before returning them; indexing `instrs` with one is out of range.
         """
         return len([pos for pos in web if pos not in self.sc_defs]) >= 2
+
+    def _value_pushed_temp(self) -> Optional[int]:
+        """The unnamed slot whose VALUE was pushed just before this call.
+
+        A receiver pushed with `PshV4 n` / `PshVPtr n` reaches the call as
+        whatever atom the slot held, so the slot itself is lost. Only an
+        unnamed temp qualifies: a named slot is a variable, and an assignment
+        to it is a statement.
+        """
+        for j in range(self.k - 1, max(self.k - 4, -1), -1):
+            ins = self.instrs[j]
+            if ins.name == "SUSPEND":
+                continue
+            if ins.name in ("PshV4", "PshVPtr"):
+                off = _s16(ins.w_arg)
+                if off > 0 and not self.is_named_here(off):
+                    return off
+            return None
+        return None
 
     def is_named_here(self, off: int) -> bool:
         """Is the value in this slot AT THIS POSITION a named variable?
@@ -2649,6 +3024,49 @@ class FuncDecompiler:
         #: per pass and a list would count each call once per pass.
         self.invocation_sites.setdefault(calltxt, set()).add(self._pos())
 
+    def _reorders_side_effects(self, value: Atom, ran) -> bool:
+        """Would folding this call past what has run since swap two effects?
+
+        The receiver tests ask whether something since has changed what the
+        value READS. A value that is itself an impure call has a second
+        question, and nothing asked it: folding it moves the CALL, so every
+        impure call written out in between now runs before it instead of
+        after. ASE's compiler is the shape:
+
+            bool ok = compilation.add_file(manifest, "manifest.bin");
+            file_delete(manifest);
+            if (!ok) ...
+
+        `file_delete` touches no receiver of `compilation.add_file(...)`, so
+        the fold went ahead and the recovery deleted the manifest BEFORE
+        adding it to the pack -- a compiler that could never compile.
+
+        Only calls already WRITTEN OUT count: a flushed call, or one inside a
+        statement emitted since the value was bound. A call still on the
+        stack is part of the expression being built, so a loop condition
+        such as `f() < g()` is untouched by construction -- that is the
+        guard this file records two broad attempts breaking.
+        """
+        all_sites = getattr(self, "invocation_sites", {})
+        sites = all_sites.get(value.text)
+        # `ran` is where the value was first BOUND, just past the call.
+        if not sites or not any(p <= ran[0] for p in sites):
+            return False
+        now = self._pos()
+        written = [text for pos, text in getattr(self, "flushed_calls", ())
+                   if ran[0] < pos <= now and text != value.text
+                   and any(pos in s for s in all_sites.values())]
+        if written:
+            return True
+        if any(ran[0] < p <= now for p in getattr(self, "effect_sites", ())):
+            return True
+        if ran[1] == self.stmt_count:
+            return False
+        between = [t for t, ps in all_sites.items()
+                   if t != value.text and any(ran[0] < p <= now for p in ps)]
+        return any(t in stmt for stmt in self.stmt_texts[ran[1]:]
+                   for t in between)
+
     def _discarded_call(self, off: int) -> None:
         """A call whose result nothing reads still ran: emit it where it ran.
 
@@ -2718,6 +3136,19 @@ class FuncDecompiler:
         are handled where they happen.
         """
         a = self._deref(a) if a.is_ptr else a
+        #: **Reading an out argument means its call has run.** A copy-back
+        #: is bound here straight after the call, while the call is still
+        #: pending -- and if the slot is later PROMOTED, `_promote_temp`
+        #: writes the assignment at this position without asking
+        #: `_order_out_arguments`, so the call, folded into a later `if`,
+        #: came out after the copies that read what it fills:
+        #:
+        #:     local_33 = __nvgt_out_2_3372;
+        #:     if (!map_dimensions(__nvgt_out_3_3372, ..., true)) {
+        #:
+        #: -- "'__nvgt_out_2_3372' is not initialized", three times in
+        #: Sable's `edit_menu`, and the map size taken from nothing.
+        self._order_out_arguments(a.text)
         if (a.kind == "const" and off in self.var_types
                 # ...unless this constant was typed from where it is stored
                 # rather than from the slot it passes through. Re-normalising
@@ -3412,6 +3843,24 @@ class FuncDecompiler:
         if name in ("CMPi", "CMPi64", "CMPu", "CMPu64", "CMPf", "CMPd"):
             self._flush_pending_call()
             dt = _numeric_type(name)
+            #: **Two handles compared as integers are compared as handles.**
+            #: The 2010-2012 engines have no `CmpPtr`, so BGT's own
+            #: `@handle == null` is `SetV4 5, 0 ; CMPi 4, 5` -- and the null
+            #: in slot 5 folds into the comparison, where normalising it to
+            #: `int` turned it back into `0`: `local_4 == 0`, "No conversion
+            #: from 'sound@&' to 'uint'", in Ljudfarmen's `sound_pool`.
+            a_dt = self.var_types.get(_s16(ins.w_arg))
+            b_dt = self.var_types.get(_s16(ins.w_arg2))
+            if name == "CMPi" and any(t is not None and t.is_object_handle
+                                      for t in (a_dt, b_dt)):
+                def handle_side(atom):
+                    return (Atom("null", "null", atom.dw_size)
+                            if atom.kind == "const" and atom.text == "0"
+                            else atom)
+                self.cmp_pair = (handle_side(self._compared(_s16(ins.w_arg))),
+                                 handle_side(self._compared(_s16(ins.w_arg2))))
+                self.cmp_is_handle = True
+                return
             self.cmp_pair = (self._normalize_arg(self._compared(_s16(ins.w_arg)), dt),
                              self._normalize_arg(self._compared(_s16(ins.w_arg2)), dt))
             return
@@ -3432,6 +3881,16 @@ class FuncDecompiler:
             left = self._compared(off)
             if name in ("CMPIi", "CMPIi64") and _s32(ins.dw_arg) < 0:
                 left = self._as_signed(left, off, name)
+            #: A handle compared with the immediate 0 is compared with
+            #: `null`: the 2011 engine writes BGT's own
+            #: `if (!looping && @handle == null)` as `CMPIi 4, 0` on a
+            #: `sound@` slot, and typed as a number it came out
+            #: `local_4 == 0` -- "No conversion from 'sound@&' to 'uint'".
+            slot_dt = self.var_types.get(off)
+            if (name == "CMPIi" and not ins.dw_arg and slot_dt is not None
+                    and slot_dt.is_object_handle):
+                self.cmp_pair = (left, self._typed_constant(0, slot_dt))
+                return
             self.cmp_pair = (left,
                              self._typed_constant(_s32(ins.dw_arg), _numeric_type(name)))
             return
@@ -3665,7 +4124,16 @@ class FuncDecompiler:
         if name == "STOREOBJ":
             src = self.obj_reg or (self.value_reg
                                    if not self.value_reg.is_ptr else None)
-            self._bind(_s16(ins.w_arg), src or Atom("raw", "<?objreg>"))
+            #: The pre-pass counts a factory literal stored this way as a
+            #: construction of the slot; the bind has to say so too, or
+            #: `_reused_object_slot` is never asked about it.
+            prev = next((self.instrs[j] for j in range(self.k - 1,
+                                                       max(self.k - 3, -1), -1)
+                         if self.instrs[j].name != "SUSPEND"), None)
+            from_factory = _is_string_factory(
+                getattr(getattr(prev, "func_ref", None), "name", "") or "")
+            self._bind(_s16(ins.w_arg), src or Atom("raw", "<?objreg>"),
+                       constructed=from_factory)
             self.obj_reg = None
             self.value_reg = Atom("raw", "<?reg>")
             self.pending_value_call = None
@@ -4283,6 +4751,8 @@ class FuncDecompiler:
         #: POSITION, between where this value ran and where it is read.
         pending += [text for pos, text in self.flushed_calls
                     if ran[0] < pos <= self._pos()]
+        if self._reorders_side_effects(value, ran):
+            return declarable
         if ran[1] == self.stmt_count and not any(
                 _mutates(text, receiver)
                 for text in pending for receiver in receivers):
@@ -4523,6 +4993,9 @@ class FuncDecompiler:
         """
         value = self.temps[off]
         pos, _ = self.temp_bound[off]
+        if (getattr(self, "fold_reads", {}).get((off, pos))
+                and value.text in getattr(self, "invocations", {})):
+            self.promoted_after_fold.add((off, pos))
         name = self.var_names.setdefault(off, f"local_{off}")
         #: **Already promoted.** This method ends by putting the slot's own
         #: name into `temps[off]`, so a second promotion of the same offset
@@ -4807,6 +5280,15 @@ class FuncDecompiler:
             # constant `null` settles the operator too, because
             # `_handle_comparison` answers that a `null` operand is a handle
             # comparison whatever opcode produced it.
+            #: ...and a slot DECLARED as a handle holds no other constant at
+            #: all, whatever its type: a funcdef handle is not a reference
+            #: type `_is_reference_type` knows, and neither is a registered
+            #: type nothing returned through the object register. The 2011
+            #: engine's `cb@ g = null;` and `sound@ s; ... s is null` both
+            #: store a `SetV4 v, 0`, and came out `@local_5 = 0;` -- "Can't
+            #: implicitly convert from 'const uint' to 'menu_callback@'".
+            if value == 0 and dt.is_object_handle:
+                return Atom("const", "null", data_type=dt, constant_bits=bits)
             if (value == 0 and dt.obj_type is not None
                     and self._is_reference_type(dt)):
                 return Atom("const", "null", data_type=dt, constant_bits=bits)
@@ -5192,6 +5674,50 @@ class FuncDecompiler:
 
 
 
+    def _borrowed_for_a_null_test(self, off: int) -> bool:
+        """Is this `RefCpyV` the compiler's copy for one `x !is null`?
+
+        `expr !is null` copies the handle into a slot, compares it with a
+        slot `ClrVPtr` just nulled, and releases it:
+
+            RefCpyV 6 ; PopPtr ; ClrVPtr 7 ; CmpPtr 6 7 ; TNZ ;
+            CpyRtoV4 5 ; FREE 6
+
+        The slot's whole life is that one comparison. Read as a variable,
+        the copy became a statement -- and inside a short-circuit arm a
+        statement sorts ahead of the whole condition, so The Gate's
+        `character::find_target`, whose source is
+
+            if (last_attacker !is null && last_attacker.state != 1
+                && last_attacker.state != 0
+                && last_attacker.current_weapon !is null)
+
+        came out reading `last_attacker.current_weapon` BEFORE the null test
+        that guards it: "Null pointer access" as soon as a fighter with no
+        attacker looked for a target, which is every fighter at the start
+        of a stage.
+
+        Exactly one `CmpPtr` may read the slot, no jump may fall between,
+        and the `FREE` closes it -- so the value is read once, where it was
+        computed, and folding it changes nothing but where it is written.
+        """
+        compared = False
+        for ins in self.instrs[self.k + 1:self.k + 9]:
+            if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
+                return False
+            if ins.name == "FREE" and _s16(ins.w_arg) == off:
+                return compared
+            if ins.name == "CmpPtr" and off in (_s16(ins.w_arg),
+                                                _s16(ins.w_arg2)):
+                if compared:
+                    return False
+                compared = True
+                continue
+            if _s16(getattr(ins, "w_arg", 0)) == off \
+                    or _s16(getattr(ins, "w_arg2", 0)) == off:
+                return False
+        return False
+
     def _borrowed_handle(self, off: int) -> bool:
         """Is this `RefCpyV` only keeping an object alive for one expression?
 
@@ -5244,12 +5770,50 @@ class FuncDecompiler:
         """
         if off not in self.read_slots and off in self.freed_slots:
             return True
+        if self._borrowed_for_a_null_test(off):
+            return True
+        if self._borrowed_for_one_address(off):
+            return True
         for ins in self.instrs[self.k + 1:self.k + 1 + self.BORROW_WINDOW]:
             if ins.name == "FREE" and _s16(ins.w_arg) == off:
                 return True
             if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
                 return False
             if _s16(getattr(ins, "w_arg", 0)) == off and ins.name != "RefCpyV":
+                return False
+        return False
+
+    def _borrowed_for_one_address(self, off: int) -> bool:
+        """Is this handle copy read ONCE, by address, and then released?
+
+        `@loader.handle = temp;` -- a handle taken to a local held by value
+        -- is compiled by the 2012-03 engine as a handle copy into a slot of
+        its own, passed on by address and freed:
+
+            PshVPtr 4 ; PSF 7 ; REFCPY ; PopPtr     ; slot 7 = @temp
+            VAR 7 ; ... ADDSi preload::handle ; GETOBJREF 1 ; REFCPY
+            FREE 7
+
+        `objVariableTypes` does not even record slot 7, so emitted as a
+        statement it was `tmp7 = temp;` with no declaration at all -- the
+        one error left in the recovered Metronome. The `VAR` is the copy's
+        whole life, exactly as a `CmpPtr` is in
+        `_borrowed_for_a_null_test`, so it folds into the one expression
+        that reads it.
+        """
+        read = False
+        for ins in self.instrs[self.k + 1:self.k + 13]:
+            if ins.name in JUMP_OPS or ins.name in ("JMP", "RET"):
+                return False
+            if ins.name == "FREE" and _s16(ins.w_arg) == off:
+                return read
+            if ins.name == "VAR" and _s16(ins.w_arg) == off:
+                if read:
+                    return False
+                read = True
+                continue
+            if (_s16(getattr(ins, "w_arg", 0)) == off
+                    or _s16(getattr(ins, "w_arg2", 0)) == off):
                 return False
         return False
 
@@ -5288,11 +5852,11 @@ class FuncDecompiler:
                 self.temp_bound[off] = (self._pos(), self.stmt_count)
                 self.consumed_temps.add(off)
                 return
-            self._bind(off, self._deref(src))
+            self._bind(off, _null_if_zero(self._deref(src)))
         else:  # REFCPY
             dest = self.stack.pop() if self.stack else Atom("raw", "<?>")
             src = self.stack[-1] if self.stack else Atom("raw", "<?>")
-            value = self._deref(src)
+            value = _null_if_zero(self._deref(src))
             if dest.kind == "list_elem":
                 self.list_values.setdefault(dest.offset, {})[dest.list_index] = value
             elif dest.kind == "global":
@@ -5848,6 +6412,16 @@ class FuncDecompiler:
                     self.list_values.setdefault(pop_this.offset, {})[pop_this.list_index] = args[0]
                 elif pop_this.is_ptr and pop_this.offset is not None:
                     self._bind(pop_this.offset, args[0])
+                elif (unnamed := self._value_pushed_temp()) is not None:
+                    #: The 2010 engines copy a string into a fresh temp by
+                    #: constructing it and then assigning, with the receiver
+                    #: pushed BY VALUE: `PSF 1 ; ALLOC string ; PshV4 1 ;
+                    #: opAssign ; LOADOBJ 1` is `return arg0;`. The receiver
+                    #: is then the temp's atom, `string()`, and writing an
+                    #: assignment to it gave Maestro Monster's
+                    #: `string() = arg0; return string();` -- "Reference is
+                    #: temporary". The temp simply takes the value.
+                    self._bind(unnamed, args[0])
                 else:
                     self._stmt(f"{obj.text} = {args[0].text};")
                 self.value_reg = receiver
@@ -5971,6 +6545,14 @@ class FuncDecompiler:
             #: name" did nothing at all.
             self._record_call(ins, calltxt, fr, ret)
             self._bind(pop_out.offset, Atom("call", calltxt))
+            #: A value-type return goes into its slot rather than the
+            #: register, and the out arguments still need ordering: Sable's
+            #: `use_affect` wrote `arg7 = __nvgt_out_3_64;` ahead of the
+            #: `local_1 += affects[i].use(..., __nvgt_out_3_64)` that fills
+            #: it. Registered AFTER the bind, so the bind's own text does
+            #: not trigger it.
+            if out_locals:
+                self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         elif ret is not None and ret.format() != "void":
             self.value_reg = Atom("call", calltxt, is_ptr=ret.is_reference, data_type=ret)
             self.pending_value_call = calltxt
@@ -5979,6 +6561,13 @@ class FuncDecompiler:
             if out_locals:
                 self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         else:
+            #: A call with no result is written straight out, and nothing
+            #: else records that it ran -- `invocation_sites` is kept for
+            #: calls whose VALUE can be folded. `_reorders_side_effects`
+            #: needs it all the same: `second_effect();` between a kept
+            #: result and its test is the whole oracle shape.
+            if not self.purity.is_pure_call(ins):
+                self.effect_sites.add(self._pos())
             self._stmt(f"{calltxt};")
 
     def _alloc_callee_is_readable(self, ins: Instr) -> bool:
@@ -6034,13 +6623,52 @@ class FuncDecompiler:
         # owner is not the allocated type is not this type's constructor.
         # The arity then comes from the stack, where the destination is the
         # DEEPEST pushed value: everything above it is an argument.
-        if fr is not None and nparams and not self._alloc_callee_is_readable(ins):
-            ptrs = 0
-            for atom in reversed(self.stack):
-                if not atom.is_ptr:
-                    break
-                ptrs += 1
-            nparams = max(0, ptrs - 1)
+        #
+        # **Whatever the bogus callee's arity happens to be.** This was gated
+        # on `nparams`, which held for Screaming Strike only because its
+        # constant resolves to a two-parameter function. AngelScript 2.25 and
+        # 2.26 builds write `ALLOC 4, 33` and `ALLOC 0, 11`, which resolve to
+        # zero-parameter getters, so the rule never fired, the string literal
+        # above the destination was popped AS the destination, and every
+        # literal came out `"LWorks" = string();` with a `null` where it was
+        # passed. An unreadable operand says nothing at all, including that
+        # there are no arguments -- so `fr` is dropped with it.
+        if not self._alloc_callee_is_readable(ins):
+            fr = None
+            # The destination is a slot ADDRESS. Values that are not
+            # addresses, sitting above the nearest one, are arguments --
+            # a string literal arrives that way, as the factory's
+            # `const string&` pushed by `PshRPtr`, and so does a constant.
+            #
+            # When the top is itself an address it is ONE argument -- an
+            # object built in a temp slot and passed by reference, which for
+            # a registered type is the copy constructor. This used to take
+            # the whole run of addresses minus one, which held for Screaming
+            # Strike's `[local_7, tmp6]` and miscounts as soon as the
+            # enclosing call has already pushed an address of its own:
+            # zompocalypse's menu builds `add_item_tts(id, text)` as
+            # `[VAR 4, PSF 7, PSF 1]`, and the run took two arguments, made
+            # the first item's id the destination and passed `<?>`.
+            nparams = _alloc_arity_from_stack(self.stack)
+            #: **...unless what follows reads the slot the top address
+            #: names.** The 2010 engines -- the 2010-07 beta and BGT 1.0
+            #: itself -- copy a string by DEFAULT-constructing a heap object
+            #: and then assigning into it:
+            #:
+            #:     PshRPtr                    ; the source, for opAssign
+            #:     PSF 6 ; ALLOC string       ; the destination, on TOP
+            #:     PshV4 6 ; string::opAssign
+            #:
+            #: so the address on top is the destination and the value below
+            #: it belongs to the `opAssign`, not to the constructor. Read as
+            #: a copy constructor it took the destination as its argument
+            #: and the source as the destination, and Power Player's
+            #: `"music\\" + list[0]` came out `list[0] = null; local_6 = <?>;`
+            #: The next instruction pushing that very slot is the test: an
+            #: argument built in a temp slot is passed on and destroyed, not
+            #: immediately made the receiver of a call.
+            if _alloc_destination_on_top(self.stack, self.instrs, self.k):
+                nparams = 0
         # VM layout: [dest pushed first] [args reversed] (obj pushed by VM);
         # pops yield args in forward order, then the destination slot.
         args = [self._deref(self.stack.pop() if self.stack else Atom("raw", "<?>"))
@@ -6542,6 +7170,37 @@ class FuncDecompiler:
             selector = _s16(previous.w_arg2)
             delta = _s32(previous.dw_arg)
             offset = delta if previous.name == "SUBIi" else -delta
+
+        # **The table is as long as its range, not as long as the run of
+        # jumps.** The arms follow the table directly, and an arm that is
+        # only a `break` is a `JMP` too -- so The Gate's
+        # `character::set_state`, a `switch` over 0..12 whose case 8 arm is
+        # exactly that, read as FOURTEEN entries. Case 8 then pointed back
+        # into its own table, the backward-entry guard refused, and the
+        # whole body was given up on: no character ever changed state, so
+        # enemies never died and movement went through the wrong state.
+        # The upper bound is in the guard -- `CMPIi sel, 12 ; JP` -- and the
+        # nearest (smallest) one is this table's own; a longer run is cut
+        # to it, and a shorter one is left exactly as it was.
+        selector_slot = _s16(jmpp.w_arg)
+        normaliser = self.instrs[index - 1] if index else None
+        if (normaliser is not None and normaliser.name in ("SUBIi", "ADDIi")
+                and _s16(normaliser.w_arg) == selector_slot):
+            switched = _s16(normaliser.w_arg2)
+            low = (_s32(normaliser.dw_arg) if normaliser.name == "SUBIi"
+                   else -_s32(normaliser.dw_arg))
+            uppers = []
+            window = self.instrs[max(0, index - 8):index]
+            for prev, op in zip(window, window[1:]):
+                if (op.name in ("JP", "JNP") and prev.name in ("CMPIi", "CMPIu")
+                        and _s16(prev.w_arg) == switched):
+                    uppers.append(_s32(prev.dw_arg) if prev.name == "CMPIi"
+                                  else prev.dw_arg)
+            if uppers:
+                length = min(uppers) - low + 1
+                if 2 <= length < len(targets):
+                    targets = targets[:length]
+                    cursor = index + 1 + length
 
         # The guards before it: the last one skips this table's own range, the
         # ones before it bound the switch as a whole.
@@ -8177,10 +8836,21 @@ class ModuleDecompiler:
             self._wrap_namespace(start, t.namespace_)
             self.emit()
 
-        for f in m.funcdefs:
+        # A funcdef that names one of the module's own classes goes after
+        # the classes in an engine that resolves no type forward (the 2010
+        # beta); everywhere else it stays here, ahead of them.
+        late_funcdefs = []
+        if getattr(m, "declare_before_use", False):
+            class_names = {c.name for c in m.classes}
+            late_funcdefs = [f for f in m.funcdefs if f.parent_class is None
+                             and any(re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])",
+                                               funcdef_declaration(f))
+                                     for n in class_names)]
+        early_funcdefs = [f for f in m.funcdefs if f not in late_funcdefs]
+        for f in early_funcdefs:
             if f.parent_class is None:
                 self.emit(namespace_block(funcdef_declaration(f), f.namespace_))
-        if m.funcdefs:
+        if early_funcdefs:
             self.emit()
 
         for imported in m.imported_functions:
@@ -8192,6 +8862,8 @@ class ModuleDecompiler:
             self.emit()
         for c in m.classes:
             self._render_class(c)
+        for f in late_funcdefs:
+            self._render_late_funcdef(f)
         self._member_funcs = {id(f) for c in m.classes
                               for f in (c.methods + c.constructors + c.factories
                                         + ([c.destructor] if c.destructor else []))}
@@ -8212,6 +8884,11 @@ class ModuleDecompiler:
             self._render_function(f)
             self.emit()
         return "\n".join(self.lines).rstrip() + "\n"
+
+    def _render_late_funcdef(self, f) -> None:
+        """A funcdef emitted after the classes it names (the 2010 beta)."""
+        self.emit(namespace_block(funcdef_declaration(f), f.namespace_))
+        self.emit()
 
     def _render_class(self, c: TypeInfo) -> None:
         start = len(self.lines)
@@ -8340,7 +9017,7 @@ class ModuleDecompiler:
             # and compared the result three ways; the menu came back after
             # every selection.
             duplicates = {key for key, n in fd.fold_reads.items()
-                          if n >= _fold_limit(fd, key)}
+                          if n >= _fold_limit(fd, key)} | fd.promoted_after_fold
             # An `ALLOC`'s destination is on the stack, so only a pass that
             # has RUN knows which slots it constructs -- and a slot
             # constructed more than once is the compiler's scratch rather
@@ -8391,7 +9068,8 @@ class ModuleDecompiler:
                 # counted, and re-adding it would loop.
                 duplicates = {key for key, n in fd.fold_reads.items()
                               if n >= _fold_limit(fd, key)
-                              and key not in carried}
+                              and key not in carried} | (
+                    fd.promoted_after_fold - carried)
             lost = _lost_calls(fd, ev)
             if lost:
                 # Put each one back where the bytecode ran it. Events are
@@ -8488,6 +9166,7 @@ class ModuleDecompiler:
             body = _declare_read_before_written(body, fd, indent)
             body = _hoist_escaping_declarations(body, indent)
             body = _drop_unreachable(body)
+            body = _drop_unread_returns(body)
             return _drop_redundant_parens(_reconstruct_for_loops(body))
         except Exception as ex:               # decompilation must not crash
             return [f"{'    ' * indent}// [decompiler error: {ex!r}]"]
@@ -8574,6 +9253,11 @@ class ModuleDecompiler:
             # anything else, because it subsumes the single-statement fold
             # below for exactly the cases that fold cannot express.
             qualified_name = (namespace + "::" if namespace else "") + g.name
+            listed = (_fold_element_list(stmts, qualified_name)
+                      or _fold_element_list(stmts, g.name))
+            if listed is not None:
+                self.emit(f"{g.type.format()} {g.name} = {listed};")
+                continue
             built = _fold_to_construction(g.type, stmts, qualified_name) \
                 or _fold_to_construction(g.type, stmts, g.name)
             if built is not None:

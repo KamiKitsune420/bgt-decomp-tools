@@ -360,3 +360,53 @@ class RewriteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MemberInitialiserTests(unittest.TestCase):
+    """A constructor's parameter named in a member initialiser.
+
+    The recovery writes `player new_class(arg0, "", 0);` at class scope when
+    the class has one constructor, and renaming the parameter only in the
+    signature and body left "'arg0' is not declared" -- the one error in
+    Sable's recovery after `bgt rename`.
+    """
+
+    SRC = (
+        "class player { player(string a, string b, int c) {} }\n"
+        "class class_type {\n"
+        "    string name;\n"
+        "    player new_class(arg0, \"\", 0);\n"
+        "    class_type(string arg0) {\n"
+        "        name = arg0;\n"
+        "    }\n"
+        "    void other(string arg0) { name = arg0; }\n"
+        "}\n")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _renamed(self, src):
+        write(self.root, "a.bgt", src)
+        report = R.rename_project(self.root, check=True)
+        with open(os.path.join(self.root, "a.bgt"), encoding="utf-8") as fh:
+            return report, fh.read()
+
+    def test_the_member_initialiser_follows_the_constructors_parameter(self):
+        report, text = self._renamed(self.SRC)
+        self.assertEqual(report.problems, [])
+        self.assertNotIn("arg0", text)
+        decl = [l for l in text.splitlines() if "new_class(" in l][0]
+        ctor = [l for l in text.splitlines() if "class_type(string" in l][0]
+        name = ctor.split("string", 1)[1].split(")")[0].strip()
+        self.assertIn("new_class(%s," % name, decl)
+
+    def test_two_constructors_leave_the_declaration_alone(self):
+        src = self.SRC.replace(
+            "    void other",
+            "    class_type() {}\n    void other")
+        _, text = self._renamed(src)
+        decl = [l for l in text.splitlines() if "new_class(" in l][0]
+        self.assertIn("new_class(arg0,", decl)

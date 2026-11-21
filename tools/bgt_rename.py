@@ -1782,6 +1782,7 @@ class Renamer:
                 new = mapping.get(m.group(0))
                 if new:
                     spans.append((m.start(), m.end(), new))
+            spans.extend(self._member_initialiser_spans(fn, mapping))
         for rel, spans in edits.items():
             text = self.p.files[rel]
             # Assemble once.  Splicing the file per edit is quadratic in the
@@ -1799,6 +1800,53 @@ class Renamer:
             text = "".join(pieces)
             self.p.files[rel] = text
             self.p.masked[rel] = mask(text)
+
+    def _member_initialiser_spans(self, fn, mapping):
+        """A constructor's parameter, named in a member's initialiser.
+
+        A member initialiser is compiled inside every constructor, so it may
+        name a constructor's parameter -- and the recovery writes one there,
+        `player new_class(arg0, "", 0, ...)`, where the class has exactly one
+        constructor. Renaming the parameter in the signature and the body
+        alone left that declaration naming `arg0`, which no longer exists:
+        "'arg0' is not declared", the one error in Sable's recovery.
+
+        So the parameters are renamed at class scope too -- outside every
+        function body of the class, and only for the class's only
+        constructor, which is the one case the recovery writes.
+        """
+        if not fn.is_ctor:
+            return []
+        ctors = [f for f in self.p.funcs
+                 if f.is_ctor and f.owner == fn.owner and f.path == fn.path]
+        if len(ctors) != 1:
+            return []
+        params = {prm.name: mapping[prm.name] for prm in fn.params
+                  if prm.name in mapping}
+        if not params:
+            return []
+        masked = self.p.masked[fn.path]
+        span = None
+        for a, b in self.p._class_spans(masked):
+            if a <= fn.body_start <= b:
+                span = (a, b)
+        if span is None:
+            return []
+        bodies = [(f.body_start, f.body_end) for f in self.p.funcs
+                  if f.path == fn.path and span[0] <= f.body_start <= span[1]]
+        out = []
+        for m in PLACEHOLDER.finditer(masked, span[0], span[1]):
+            new = params.get(m.group(0))
+            if not new or any(a <= m.start() <= b for a, b in bodies):
+                continue
+            # A declaration ends in `;`; a method's SIGNATURE ends in `{`,
+            # and its parameters are that method's own, not this one's.
+            end = m.end()
+            while end < span[1] and masked[end] not in ";{":
+                end += 1
+            if end < span[1] and masked[end] == ";":
+                out.append((m.start(), m.end(), new))
+        return out
 
     def run(self):
         self.analyse()
