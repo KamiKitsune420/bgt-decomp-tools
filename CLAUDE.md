@@ -14939,6 +14939,88 @@ It reaches far more than Metronome, because BGT's own `dynamic_menu` and
 The suite is 1,198 passing and `bgt oracle` is 55/55. Every diff line was
 checked to be a dead alias going away; no call count moved anywhere.
 
+## A kept call must not be folded past the next call
+
+Found by porting ASE to NVGT, where its soundscape compiler could never
+compile. The source keeps a call's result, makes another call, and only
+then tests the result:
+
+    bool ok = compilation.add_file(dir + "/manifest.bin", "manifest.bin");
+    file_delete(dir + "/manifest.bin");
+    if (!ok) ...
+
+The bytecode says so plainly -- `add_file` at 296, its result copied into
+slot 13 at 305, `file_delete` at 327, slot 13 tested at 332 -- and the
+recovery read
+
+    file_delete((dir + "/manifest.bin"));
+    if (!compilation.add_file((dir + "/manifest.bin"), "manifest.bin")) {
+
+which deletes the manifest before adding it to the pack. **That was in the
+source recovered for ASE's own author.**
+
+Every staleness rule here asks whether something since has changed what the
+value READS. `file_delete` touches no receiver of `compilation.add_file`, so
+they all said fold. A value that is itself an impure call has a second
+question nothing asked: folding it moves the CALL, so every impure call
+written out in between now runs before it instead of after.
+`_reorders_side_effects` asks it.
+
+**Only calls already WRITTEN OUT count**: a flushed call, an impure call with
+no result emitted as its own statement, or an impure call inside a statement
+emitted since the bind. A call still on the stack belongs to the expression
+being built, so `f() < g()` in a loop condition is untouched by construction
+-- the guard this file records two broad attempts breaking. Calls with no
+result were recorded nowhere, so `effect_sites` holds them, kept apart from
+`invocation_sites` so the lost-call census is unchanged.
+
+`bgt oracle` has the shape now, `kept_result_then_another_call`: **55/56
+without the fix, 56/56 with it**. Both effects append to a string, so the
+answer says which ran first.
+
+#### What it reached, and the defect it closed that this file had left open
+
+| title | what moved | compiler |
+|---|---|---|
+| ASE | the manifest is added before it is deleted | compiled cleanly |
+| Super Egg Hunt, X-Wheel, The Gate, Sable | `sound_pool_item::update` | compiled cleanly |
+| Sable | its to-hit roll, `random(1, 20)`, two menu answers, three loop tests | compiled cleanly |
+| The Gate | `serialize` before `write`, `get_characters` before the next read | compiled cleanly |
+| X-Wheel | `random` before `generate_puzzle_key`, a menu answer before the click sound | compiled cleanly |
+| Perilous Hearts | `analyse_square` before the surface checks after it | compiled cleanly |
+| Power Player, Ljudfarmen, Palace, Antony, Grodan Gun, Survive, Metronome, Maestro Monster, two more | -- | byte-identical |
+| Manamon 1 | 14 files: the debug panel asks for X before Y, `get_skill_index` before the store, `url_get` before the gift is read; 81,162 -> 81,191 lines, 26,471 -> 26,476 calls | 0 gotos, split verified |
+| Crazy Party | 25 files, mostly `random(...)` rolls kept where they were rolled; 173,412 -> 173,467 lines, 90,166 calls unchanged | 0 gotos, split verified |
+
+`sound_pool_item::update` is the one this file records as open under **...and
+that declined class HAS an instance, in BGT's own library**: the recovery read
+the storage snapshot AFTER `set_sound_storage(packname)`, so the restore was a
+no-op and the pool left the engine pointed at one item's pack. It now reads
+
+    local_7 = get_sound_storage();
+    set_sound_storage(packname);
+    handle.load(filename);
+    set_sound_storage(local_7);
+
+which is BGT's own source -- reached by the general rule rather than by the
+`get_X`/`set_X` pairing that section proposed.
+
+**Manamon 1's teleport was wrong the other way before.** It folded to
+`teleport(int(stn(input_box("X"))), int(stn(input_box("Y"))), ...)`, and
+AngelScript evaluates arguments right to left, so the recovery asked for Y
+first; the bytecode asks for X at 459 and Y at 492.
+
+**A stopped comparison kept writing.** The first measurement was stopped
+mid-run and its Python child went on writing into Manamon 1's output, leaving
+four orphan class files that no `#include` named -- and `bgt apicheck` counted
+their calls, so the title briefly read +227 calls. A clean re-run has none.
+Measure into a folder nothing else can be writing to.
+
+Every changed line was read and each is a call now evaluated where the
+original evaluates it; X-Wheel's `random` against `generate_puzzle_key` was
+checked against the bytecode (198 before 204). No residual `goto` appears in
+any title, no call count moves, and every changed title compiles.
+
 ## A game's own runtime is a COMPILER, and four of these titles now pass theirs
 
 A BGT game is the runtime with the module appended, and the runtime carries

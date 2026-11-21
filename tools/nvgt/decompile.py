@@ -2644,6 +2644,9 @@ class FuncDecompiler:
         #: census counts these against the output, because a call bound three
         #: times is still one call -- see `_lost_calls`.
         self.invocation_sites: dict[str, set[int]] = {}
+        #: Where an impure call with no result was written out as a
+        #: statement. See `_reorders_side_effects`.
+        self.effect_sites: set[int] = set()
         self.list_values: dict[int, dict[int, Atom]] = {}
         self.list_sizes: dict[int, int] = {}
         self.list_types: dict[int, dict[int, DataType]] = {}
@@ -3020,6 +3023,49 @@ class FuncDecompiler:
         #: call from two. A SET, because `_body` re-simulates a function once
         #: per pass and a list would count each call once per pass.
         self.invocation_sites.setdefault(calltxt, set()).add(self._pos())
+
+    def _reorders_side_effects(self, value: Atom, ran) -> bool:
+        """Would folding this call past what has run since swap two effects?
+
+        The receiver tests ask whether something since has changed what the
+        value READS. A value that is itself an impure call has a second
+        question, and nothing asked it: folding it moves the CALL, so every
+        impure call written out in between now runs before it instead of
+        after. ASE's compiler is the shape:
+
+            bool ok = compilation.add_file(manifest, "manifest.bin");
+            file_delete(manifest);
+            if (!ok) ...
+
+        `file_delete` touches no receiver of `compilation.add_file(...)`, so
+        the fold went ahead and the recovery deleted the manifest BEFORE
+        adding it to the pack -- a compiler that could never compile.
+
+        Only calls already WRITTEN OUT count: a flushed call, or one inside a
+        statement emitted since the value was bound. A call still on the
+        stack is part of the expression being built, so a loop condition
+        such as `f() < g()` is untouched by construction -- that is the
+        guard this file records two broad attempts breaking.
+        """
+        all_sites = getattr(self, "invocation_sites", {})
+        sites = all_sites.get(value.text)
+        # `ran` is where the value was first BOUND, just past the call.
+        if not sites or not any(p <= ran[0] for p in sites):
+            return False
+        now = self._pos()
+        written = [text for pos, text in getattr(self, "flushed_calls", ())
+                   if ran[0] < pos <= now and text != value.text
+                   and any(pos in s for s in all_sites.values())]
+        if written:
+            return True
+        if any(ran[0] < p <= now for p in getattr(self, "effect_sites", ())):
+            return True
+        if ran[1] == self.stmt_count:
+            return False
+        between = [t for t, ps in all_sites.items()
+                   if t != value.text and any(ran[0] < p <= now for p in ps)]
+        return any(t in stmt for stmt in self.stmt_texts[ran[1]:]
+                   for t in between)
 
     def _discarded_call(self, off: int) -> None:
         """A call whose result nothing reads still ran: emit it where it ran.
@@ -4705,6 +4751,8 @@ class FuncDecompiler:
         #: POSITION, between where this value ran and where it is read.
         pending += [text for pos, text in self.flushed_calls
                     if ran[0] < pos <= self._pos()]
+        if self._reorders_side_effects(value, ran):
+            return declarable
         if ran[1] == self.stmt_count and not any(
                 _mutates(text, receiver)
                 for text in pending for receiver in receivers):
@@ -6513,6 +6561,13 @@ class FuncDecompiler:
             if out_locals:
                 self.deferred_out_calls[calltxt] = (ret, out_locals, self._pos())
         else:
+            #: A call with no result is written straight out, and nothing
+            #: else records that it ran -- `invocation_sites` is kept for
+            #: calls whose VALUE can be folded. `_reorders_side_effects`
+            #: needs it all the same: `second_effect();` between a kept
+            #: result and its test is the whole oracle shape.
+            if not self.purity.is_pure_call(ins):
+                self.effect_sites.add(self._pos())
             self._stmt(f"{calltxt};")
 
     def _alloc_callee_is_readable(self, ins: Instr) -> bool:
