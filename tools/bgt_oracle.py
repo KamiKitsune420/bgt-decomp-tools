@@ -678,6 +678,35 @@ int list_of_expressions(int seed)
 // Global initialisation ORDER: a global initialised from another global. A
 // split that moves a declaration compiles perfectly and changes this, which
 // is the whole reason `verify` exists.
+// ASE's compiler: a call's result is KEPT, another call runs, and only
+// then is the result tested. The second call touches nothing the first one
+// reads, so no receiver test sees it -- and folding the kept result into the
+// `if` runs the two calls in the wrong order. ASE deleted its manifest before
+// adding it to the pack that way. The answer says which ran first.
+string effect_order = "";
+
+bool first_effect()
+{
+    effect_order += "a";
+    return true;
+}
+
+void second_effect()
+{
+    effect_order += "b";
+}
+
+int kept_result_then_another_call()
+{
+    effect_order = "";
+    bool kept = first_effect();
+    second_effect();
+    if (!kept) {
+        return 0;
+    }
+    return effect_order == "ab" ? 1 : 2;
+}
+
 int first_global = 3;
 int second_global = first_global * 5;
 
@@ -749,6 +778,7 @@ void main()
     call_into_a_dead_local_per_arm(true);
     call_into_a_dead_local_per_arm(false);
     call_returning_a_value_type_into_a_dead_local();
+    report += "kept_result_then_another_call=" + kept_result_then_another_call() + "|";
     report += "dead_local_other=" + other_counter + "|";
     report += "dead_local_value_type=" + string_counter + "|";
     report += "counter=" + counter + "|";

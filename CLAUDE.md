@@ -2735,6 +2735,9 @@ for the `for` headers it now writes.
 | Screaming Strike (2012-07 engine, **debug**) | 951 | 0 | 0 | yes | 346 | **yes** |
 | Antony (2012-02) | 2,856 | 0 | 0 | yes | 521 | not asked -- see **the five old games** |
 | Aliens attack (2012-03) | 5,766 | 0 | 0 | yes | 1,662 | not asked -- a fifth engine, see **A FIFTH generation** |
+| zompocalypse (2012-12, AngelScript 2.25) | 2,828 | 0 | 0 | yes | 707 | compiles cleanly; not driven -- see **AngelScript 2.25 and 2.26** |
+| Active Soundscape Engine (2013-04, AngelScript 2.26) | 3,733 | 0 | 0 | yes | 968 | compiles cleanly; not driven |
+| X-Wheel (2013-04, AngelScript 2.26) | 9,118 | 0 | 0 | yes | 2,103 | compiles cleanly; not driven |
 | Ljudfarmen (2011-02) | 3,304 | 0 | 0 | yes | 704 | not asked |
 | Grodan Gun (2011-09) | 3,194 | 0 | 0 | yes | 734 | not asked |
 | Palace Punch-up (2010 beta) | 3,200 -> **3,147** | 0 | 0 | yes | 823 | not asked |
@@ -2752,7 +2755,7 @@ for the `for` headers it now writes.
 | Perilous Hearts (2011-11) | 14,876 | 0 | 0 | yes | 3,314 | not asked |
 | Paladin of the Sky | 23,106 | 0 | 0 | yes | 6,975 | not asked -- see **the compiler is the judge** |
 | Psycho Strike | 23,935 | 0 | 0 | yes | 6,421 | no -- **`elias`**, which no stock BGT registers |
-| The Gate | 34,031 | 0 | 0 | yes | 8,681 | no -- **`elias`**, which no stock BGT registers |
+| The Gate | 33,536 | 0 | 0 | yes | 8,691 | **yes** -- PLAYED before the two fixes below, which it found; with Philip's elias build of BGT, music and all; see **Philip's own elias build** |
 | Manamon 1 | 82,157 | 0 | 0 | yes | 26,509 | not asked -- **wrong engine**, see below |
 | Manamon 2 | 160,305 | 0 | 0 | yes | 51,016 | not asked -- **wrong engine**, see below |
 | Crazy Party | 174,139 | **0** | 0 | yes | 90,194 | not asked -- a 174k-line compile is a deliberate spend |
@@ -4091,12 +4094,11 @@ Egg Hunt's runtime was built **three minutes before** the `bgt.exe` that
 embeds it, which is one compile session: that title is stock 1.3 and the
 timestamps say so without being asked.
 
-**Three of those rows are new, and two of them are not supported.** Aliens
+**Three of those rows are new, and all three are supported now.** Aliens
 Attack's 2012-03 engine reads end to end -- see **A FIFTH generation**
-below -- and the 2012-12 and 2013-04 builds do not: a product of every
-record field this reader has, 16,384 walks, gets 5% through River Raiders
-and no further, so that generation needs a field that is not here yet. See
-**The 2012-12 and 2013-04 engines are open**. `adventure at c` is a 190 MB
+below -- and the 2012-12 and 2013-04 builds are AngelScript 2.25 and 2.26,
+read from that library's own published reader: see **The 2012-12 and
+2013-04 engines are AngelScript 2.25 and 2.26, and they open**. `adventure at c` is a 190 MB
 stock-1.3 title whose runtime registers two names more than `bgt.exe`
 does, which is not looked into.
 
@@ -4463,6 +4465,199 @@ Three honest gaps, recorded rather than smoothed over:
   zero, immediately before each group of reads, so the renderer treats it as
   rewind and that is consistent with every observation -- but a seek that
   carries a position would look the same until a title needed one.
+
+#### Philip's own elias build, and the API note that came with it
+
+A folder BGT's author gave a tester (`elias_bgt_api.txt`, three demo scripts
+with their built executables and themes, `elias.dll`, and a `bgt.exe` with
+its `exec.bin`) settles most of what the sections above could only infer.
+
+**The two ints are a RANGE.** Philip's note gives the binding verbatim as
+
+```
+bool start(int min_level, int max_level);
+bool set_level(int min_level, int max_level);   // objective themes only
+bool request_change(int track_count);           // exploration themes only
+```
+
+and all three demos call `music.start(level, level)` and
+`music.set_level(level + 1, level + 1)`. So the renderer above, which calls
+`elias_theme_start(..., level, greatest, ...)`, was never rendering "at
+level 1": it asked for anything from 1 to 19, and elias was free to pick
+trigger 16. That is the first of the three gaps recorded above, and the
+second is very likely the same thing seen from the top -- `(19, 19)` is a
+range of one, where every lower "level" was a range of many. Not
+re-rendered here; the next render should pass `(level, level)`.
+
+**A theme has a MODE, and it decides which call drives it.** `mode=
+"objective"` themes take `set_level`; `mode="exploration"` themes take
+`request_change`, whose argument is a track count rather than a level. All
+five of The Gate's themes are objective, which is why its
+`set_theme_level` is the only path that game uses. A trigger in an
+objective theme is the level at which that variation enters -- the
+objective demo's Choir track has triggers 1, 3, 8, 11, 14, 17 and 19 -- and
+`DUMMY.ogg`, two samples long, is how the composer makes a track go quiet
+at one level.
+
+**The whole script interface is 26 members**, which closes "at least 25":
+ten methods -- `load`, `start`, `pause`, `resume`, `set_level`,
+`request_change`, `silence`, `play_stinger`, `get_keys`, `close` -- and nine
+properties, which are sixteen accessors: `transitioning` and
+`greatest_level` read-only, and `immediately`, `rendezvous`, `urgency`,
+`stinger`, `key`, `volume` and `pan` read-write.
+
+**"VGStorm's fork" is Philip's elias build.** The `bgt.exe` in that folder
+is PE-dated 2016-06-29 and registers **453 names** -- and its registered
+interface is **identical to The Gate's runtime, name for name and signature
+for signature**, which is the figure this file records for Psycho Strike
+and The Gate as one developer's fork. It is BGT 1.3 plus the elias binding
+and the twenty-odd additions recorded there, built by BGT's own author.
+Manamon 1 (469) and Manamon 2 (509) are later builds of the same line.
+
+**And it is the one installed here.** `C:\Program Files (x86)\BGT\bgt.exe`
+and `exec.bin` are byte-identical to that folder's, so every "BGT 1.3"
+compile in this file since the swap was made against this build. It is a
+superset of stock 1.3 for the names a 1.3 game uses, so those verdicts
+stand; what it changes is the one this file kept writing down as
+unavoidable:
+
+| title | before | with Philip's build |
+|---|---|---|
+| The Gate | "no -- `elias`, which no stock BGT registers" | **compiles cleanly**: 33,975 lines, 0 gotos, a verified split, 8,680 calls read back |
+| the three demos | -- | recovered against their own source: identical but for names, and `bool paused` read as an `int` |
+
+**And it RUNS, music and all.** Recovered with its pack (323.9 MB) and
+`elias.dll` beside it, built release with Philip's engine and driven with
+`bgt drive`, the game's own code answers:
+
+```bash
+bgt drive gate/ --build release \
+    --setup 'retreave.open("sounds.dat"); prepare_audio();' \
+    --watch 'play_theme("boss/boss.epro", "boss", 1, -1)' \
+    --watch 'theme.get_playing()' --watch 'theme.get_greatest_level()'
+```
+
+| watched | answer |
+|---|---|
+| `play_theme(...)` | **1**, then 0 -- the game's own "already loaded" guard |
+| `theme.get_playing()` | **1** |
+| `theme.get_greatest_level()` | **19**, the figure the DLL gave the renderer |
+| `set_theme_level(7)` | **1**, and `get_transitioning()` goes 0 -> 1: elias waits for the bar |
+
+So the recovered pack key, the pack read through `retreave.get_file`, the
+`.epro` XML, the binding and the DLL all work end to end. And the game's own
+code is the third witness to the range: `play_theme(..., 1, -1)` turns the
+-1 into the minimum and calls `start(1, 1)`, and `set_theme_level(level, -1)`
+does the same -- The Gate always asks elias for exactly one level. Not
+PLAYED: `bgt drive` mutes the master volume and opens no window.
+
+#### ...and PLAYED, which found two defects no check here could
+
+The first person to play the recovered The Gate reported two things, and
+neither is visible to any count in this file: every menu choice had to be
+made twice, and the first stage died with
+
+```
+Null pointer access
+In function: character@ character::find_target()
+```
+
+**The menu ran twice.** `main_menu` came out
+
+```
+local_10 = menu.run_extended("sounds/speech/menu/welcome_to_gate.wav", ...);
+if (menu.run_extended("sounds/speech/menu/welcome_to_gate.wav", ...) == -1)
+```
+
+-- the `file_menu` defect this file records from Paladin, reached a new way.
+The result's slot is not named at the `CMPIi`, so that read folds the call
+in; the next read finds the value stale (`menu_error` may have run between)
+and PROMOTES it, which puts `local_10 = ...` back at the bind -- after the
+first read had already written the call. A value folded once is never
+"folded more than once", so `duplicate_binds` could not see it. A call
+promoted after a read folded it is now carried into the next pass as if it
+were a duplicate (`promoted_after_fold`), so it is promoted before its
+first read. The Gate loses 14 such calls, among them every menu, and Sable
+26 -- its `yes_no` asked its question twice, `active_enemy.find` and
+`check_class` ran twice per condition.
+
+**A member read before the null test guarding it.** The source is
+
+```
+if (last_attacker !is null && last_attacker.state != 1
+    && last_attacker.state != 0 && last_attacker.current_weapon !is null)
+```
+
+and `expr !is null` compiles to a handle copy whose whole life is one
+comparison:
+
+```
+RefCpyV 6 ; PopPtr ; ClrVPtr 7 ; CmpPtr 6 7 ; TNZ ; CpyRtoV4 5 ; FREE 6
+```
+
+`objVariableTypes` names slot 6, so the copy was a statement -- and a
+statement inside a short-circuit arm sorts ahead of the whole condition,
+which is the `find_walls` shape this file already records. So
+`last_attacker.current_weapon` was read first, on a fighter with no
+attacker. `_borrowed_for_a_null_test` treats that window -- one `CmpPtr`,
+no jump, then the `FREE` -- as a borrow, which folds the copy into the
+comparison where the source wrote it.
+
+It reaches every title that tests an expression against null, and it was
+hiding a third defect: Sable's menu dispatch read
+
+```
+if (((local_2 !is local_3) && (local_2 !is local_3)) && (local_2 !is local_3))
+```
+
+-- one slot compared with itself three times, where the source compares
+with three different menus. It now reads `(local_2 !is terrain_menu) &&
+(local_2 !is projects) && (local_2 !is saved_maps)`, and five more
+conditions like it. `collapsed_chain` cannot see that shape, because it
+looks for `!= 0` and `== 0` tests rather than `is`.
+
+| title | lines | calls read back | files differing |
+|---|---|---|---|
+| The Gate | 33,975 -> **33,451** | 8,680 -> **8,666** | -- |
+| Sable | 55,965 -> **55,592** | 14,398 -> **14,372** | 29 |
+| X-Wheel | 9,117 -> 9,094 | 2,103 | 4 |
+| Antony | 2,514 -> 2,500 | 484 | 3 |
+| Survive | 2,332 -> 2,318 | 567 | 3 |
+| Power Player, Palace Punch-up, Ljudfarmen, Grodan Gun | unchanged | unchanged | **0** |
+
+Every call that went is a duplicate, every line that went is a dead handle
+alias, the suite is 1,190 passing and `bgt oracle` is 55/55.
+
+**And then: "he walks at half speed, and enemies never die."** Both were
+one body -- the one this file had always listed as given up on for The
+Gate, `character::set_state`, "a jump table neither matcher claimed". It
+rendered as an empty function, so no character ever changed state:
+
+- `prepare_for_use` calls `set_state(5)` for the player, who is constructed
+  in state 4, and `walk` doubles the step interval in state 4 -- **half
+  speed**, which is exactly what was reported;
+- `handle_death` kills through `set_state(0)` and `set_state(1)` --
+  **nobody died**, and nothing dropped its weapon, item or money.
+
+The table is a `switch` over 0..12 whose case 8 arm is only a `break`, and
+an arm follows its table directly. So `_dense_table`, which took the whole
+run of consecutive `JMP`s as the table, read **fourteen** entries; case 8
+then pointed back into its own table and the backward-entry guard refused,
+correctly, a table that was never that long. The upper bound is in the
+guard -- `CMPIi sel, 12 ; JP` -- and the smallest such bound is the table's
+own, so the run is cut to `upper - low + 1` entries. Only ever cut: a
+shorter run is left exactly as it was.
+
+The body comes back whole, with all 25 calls the audit said were missing.
+`bgt audit` on The Gate is now down to base-constructor rows and one
+member construction. All eight other titles are byte-identical.
+
+**What this shows about the instruments.** The Gate had passed every check
+in this file -- 0 gotos, a verified split, compiled cleanly, ran its music
+under `bgt drive` -- with a body counted as given up on, in its standings
+row. A counted failure is still a failure, and this one was the game's
+whole state machine. The audit said so outright -- 25 values missing from
+one body -- and nothing acted on it until somebody played the game.
 
 ##### elias never opens a file, and that is the whole design
 
@@ -14287,33 +14482,648 @@ field names the reader actually looks up and requires each to be declared;
 it finds ten, and it fails if one is removed. A baseline that is itself
 wrong is not a baseline, for the umpteenth time in this file.
 
-## The 2012-12 and 2013-04 engines are open
+## The 2012-12 and 2013-04 engines are AngelScript 2.25 and 2.26, and they open
 
-Two more releases turn up in the same batch of executables, and neither
-opens: **zompocalypse** (2012-12-28, 420 registered names) and **River
-Raiders** and **casino** (2013-04-24, 427 names, the same build as the 2013
-BGT this file already dates from somebody's pack tool). All three carry
-**189 opcodes**, contiguous from 0 and in 1.3's numbering with not one name
-disagreeing -- so the renumbering happened between 2012-03 and 2012-12 and
-the count went 202, 189, 200 as AngelScript reorganised.
+This section said those two releases were open, with a bound: a product of
+every record field this reader had -- 16,384 walks over River Raiders --
+reached about 5% and landed nowhere, so the generation needed a field that
+was not here. It needed **five**, and the way to get them was the one this
+file opens with, from a direction it had not tried for BGT: **AngelScript's
+own published `as_restore.cpp`**, fetched for every tag from 2.19.0 to
+2.28.0. The runtime does not name its AngelScript, so the version is pinned
+by the format rather than by a string.
 
-What is established, and it is a bound rather than a reading: a product of
-**every** record field this reader has -- 16,384 walks over River Raiders,
-both body shapes and both legacy-body answers included -- gets to 0x1167 of
-0x12929, about 5%, and no combination lands. So this generation needs at
-least one field that is not here, and the way to get it is the one this
-file opens with: read that build's own `asCReader`.
+| engine | registered names | AngelScript | profile |
+|---|---|---|---|
+| zompocalypse (2012-12-28) | 420 | 2.25.1 to 2.26.0 | `"2.25"`, `RECORDS_2012_12` |
+| X-Wheel, Active Soundscape Engine, River Raiders (2013-04-24) | 427 | **2.26.1 or 2.26.2** | `"2.26"`, `RECORDS_2013` |
 
-Two things that were read and are worth keeping for whoever does:
+**2.26.1 and 2.26.2 are one format.** The only difference between the two
+tags' `as_restore.cpp` is an internal mask -- `funcId & 0xFFFF` against
+`funcId & ~FUNC_IMPORTED` -- and not one byte of what is written. The
+2.26.0 -> 2.26.1 change is the one that matters: `templateSubType` became an
+array and a template type-info gained a subtype count. That is the whole
+difference between the two profiles, plus the debug block's section list
+(absent in 2.25; plain indices with no strings in 2.26.0, which no profile
+reads, so a DEBUG 2.26.0 build would not land and a release one does).
 
-- **Its funcdef parses** under `datatype_early` with 1.3's trailing
-  namespace, so `sig_namespace_first` is off and the signature is 1.3's.
-- **Its `you` constructor ends exactly where the factory's `f` tag begins**
-  when the body is read as 1.3's -- stackNeeded, `{typeinfo, eu, eu}` per
-  object variable, `objVariablesOnHeap`, `objVariableInfo`, then the traits
-  byte -- which is what the unconditional-traits correction above was found
-  from. The factory after it does not, so something between the two is
-  still unread.
+What 2.26 writes that no earlier profile had, every one read from the source
+and every one confirmed by a module landing:
+
+| record | 2.26 | the nearest earlier profile |
+|---|---|---|
+| `noDebugInfo` byte | **present** | 2012-07: absent |
+| an interface in a class block | the type-info and **nothing else** | 1.3 tagged: an encoded vtable offset after it |
+| the body's closing bytes | lineNumbers, sectionIdxs, **isShared**, variables, **dontCleanUpOnException** | 2012-07: one byte, after the line numbers |
+| the per-record script section | **only `if( !noDebugInfo )`** | 2012-07: always |
+| the script-object flag | **0x80000** | tagged default 0x100000 |
+
+and the rest is the 2012-07 engine's: data types token-first with split flag
+bytes, a gated global initialiser, the four-below token numbering, the
+early behaviour numbering, the signature's namespace last.
+
+**Measured on the three modules on this machine:**
+
+| title | module | tail | parse errors | `bgt validate` |
+|---|---|---|---|---|
+| X-Wheel | 167,434 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+| Active Soundscape Engine | 83,180 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+| zompocalypse | 49,993 B | lands exactly on EOF | 0 | every stage, byte-exact rewrite |
+
+The earlier releases are untouched by construction -- both profiles are
+tried after every verified one -- and by measurement: Battle Zone, TubeSim,
+Treasure Troll and Perilous Hearts recover byte-identical to the commit
+before.
+
+**`trace_module` re-read every module under 1.3's records**, whichever
+profile `summarize` had landed under, which is a third reading of one format
+and would have refused the rewrite of every non-1.3 title. It passes the
+release now.
+
+### `ALLOC`'s callee changed meaning at 2.26.1, and I read it wrong once
+
+The writer says it, and the modules agree once they are asked properly:
+
+| AngelScript | what `ALLOC`'s second operand holds | measured |
+|---|---|---|
+| 2.25 to 2.26.0 | a script class: a **plain** `usedFunctions` index; a registered type: the engine's raw function id, untranslated | zompocalypse: 18 of 18 script-class sites name their own constructor read plain, 6 read one-based; `ALLOC 4, 33` 105 times for `string` |
+| 2.26.1 and later | `1 + FindFunctionIndex(...)` for **every** type, 0 for none | X-Wheel 636 of 636, Active Soundscape Engine 364 of 364 name their own constructor |
+
+So 2.26 reads its callee like 1.3, and 2.25 takes `alloc_callee_script_only`
+plus a new `alloc_callee_plain`, which `bgt_asir.normalise` turns into the
+one-based convention the translator reads by adding one to a script class's
+operand. Unshifted, zompocalypse's `enemy` was built by
+`sound_pool::clean_unused`.
+
+**This section first said both releases were unreadable**, from checking
+`usedFunctions[32]` for both titles when X-Wheel's operand is 11 -- which is
+`string`'s copy constructor at index 10. That was caught by compiling: a
+global initialiser is the one shape where the destination is pushed LAST,
+
+```
+STR "X-Wheel" ; _string_factory_ ; PshRPtr
+PGA product ; ALLOC string ; PshGPtr product ; opAssign
+```
+
+so read with no callee the global was popped as an argument and the literal
+became the destination -- `"X-Wheel" = product; product = <?>;`, six times,
+and 12 of X-Wheel's 27 compiler errors. The bytecode audit could not see it,
+because an initialiser is not a body it pairs. A global's address on top of
+the stack is now the destination with no arguments, for the builds that do
+still need the stack rule.
+
+**The stack rule had two more holes**, both closed in
+`_alloc_arity_from_stack`:
+
+- **It only fired when the bogus callee HAD parameters.** Screaming Strike's
+  constant resolves to the two-parameter `random`; these resolve to
+  zero-parameter getters, so the rule never ran, the string literal above the
+  destination was popped AS the destination, and every literal in all three
+  titles came out `"LWorks" = string();` with `null` where it was passed.
+- **It took the whole run of addresses minus one.** That held for Screaming
+  Strike's `[local_7, tmp6]` and miscounts as soon as the enclosing call has
+  already pushed an address: zompocalypse's menu builds
+  `add_item_tts(text, id)` as `[VAR 4, PSF 7, PSF 1]`, and the run took two
+  arguments, made the first item's id the destination and passed `<?>`.
+
+Values that are not addresses, above the nearest address, are the arguments;
+an address on top is one argument, the copy constructor's. Before and after:
+
+```
+before:  "Zompocalypse Concept Demo" = string();
+         game_data.setup(null, null, null);
+         local_3.add_item_tts(null, <?>);
+after:   local_5 = "Zompocalypse Concept Demo";
+         game_data.setup("LWorks", local_5, false);
+         local_3.add_item_tts("Play Zompocalypse", "play");
+```
+
+**Screaming Strike is the one title already on that path, and it is not on
+this machine**, so its row in the standings is owed a re-measurement. The
+second hole is the only one that can reach it, and only where an enclosing
+call had already pushed an address below an `ALLOC`'s destination.
+
+### A funcdef slot was retyped through someone else's call
+
+The other 15 of X-Wheel's 27 errors were one pass. `retype_funcdef_slots`
+corrects a guessed funcdef slot from the one-parameter call it is passed to,
+scanning back eight instructions for the argument -- and it did not stop at
+an earlier call. `reset_menu(callback)` is followed by `string`'s copy
+constructor, one `string` parameter, whose scan reached past `reset_menu`'s
+own `CALL` to `VAR 6` and declared the menu callback `string@`: "Object
+handle is not supported for this type" and "No matching signatures to
+`reset_menu(string)`", five functions over. A call in between has consumed
+what was pushed before it, so the scan stops there. Perilous Hearts, the
+title the pass exists for, is byte-identical.
+
+### `?` is 57 in this numbering, and it was never mapped
+
+The four-below token numbering shifts only the type tokens, and `?` -- the
+`?&in` parameter -- is not one, so it stayed 57 where the decompiler looks
+for the IR's 60. Every `?&in` argument then lost its meaning: the hidden
+TYPEID slot read as a value, and Active Soundscape Engine's `library::call`
+came out `dll.call(sig, path, string, 4294967295, int, ...)`.
+
+57 in **every** AngelScript from 2.19.0 to 2.28.0, read out of each tag's
+own `as_tokendef.h` -- so it reaches the 2010-2012 titles too, and Perilous
+Hearts is byte-identical with it, having no `?&in` argument. It moves by
+three rather than four because both inserts that make up the shift sit
+below it, which is why it is named in `as_early.token` rather than left to
+the general rule.
+
+### What they recover to
+
+| title | lines | goto | split | calls read back | `bgt audit` calls / literals / constants |
+|---|---|---|---|---|---|
+| zompocalypse | 2,828 | 0 | verified | 707 | **0 / 0 / 0** |
+| Active Soundscape Engine | 3,733 | 0 | verified | 968 | 2 / **0** / 2 |
+| X-Wheel | 9,118 | 0 | verified | 2,103 | 2 / 1 / 1 |
+
+0 unmodelled opcodes, 0 bodies given up on, 0 dangling gotos and 0 `<?>`
+on all three. The call rows are a constructor's generated member
+construction, the benign kind this file lists; X-Wheel's literal is an empty
+string; ASE's two constants are dead initialisers (`disk_free_space`'s
+`-1.0` stores, each overwritten by a `dictionary::get` before any read).
+`bgt signatures`: 2 `empty_arm` on X-Wheel, 1 `double_assign` on ASE, 6
+`empty_arm` on zompocalypse, none read down yet.
+
+**All three compile cleanly** under BGT 1.3 -- X-Wheel went from 27 errors
+to none with the two fixes above. None has been driven, which is the
+stronger claim the standings ask for.
+
+## Sable: three shapes a stock 1.3 game would not compile with
+
+`Sable proof of concept - Beta version 1.9` is stock BGT 1.3 (runtime
+2014-06-01, 432 names) and a big one: 72 classes, 1,774 bodies, 56,000
+lines. It recovered with every structural check clean and the compiler said
+**6 errors and 4 warnings**, all three causes this decompiler's own.
+
+**A by-value member built with a string argument.** Five members, e.g.
+`menus reward_items("Please select")`. The member-initialiser rule
+(`sound_pool piano_pool(500)`, `key_hold back(KEY_BACK, 500, 40)`) read a
+literal or a named global pushed straight before the call; a STRING is not
+pushed, it is built in a temp slot and passed by `VAR`:
+
+```
+PSF 3 ; STR "Please select" ; _string_factory_ ; PshRPtr
+PSF 1 ; $beh0 ; PSF 1 ; ALLOC string ; PSF 1 ; $beh2
+VAR 3 ; GETOBJ 0 ; CALL menus
+```
+
+Refused, the declaration stood alone and "No default constructor for object
+of type 'menus'" followed. `_string_literal_in_slot` reads that shape, and
+`_written_arguments` skips `GETOBJ`/`GETREF`, which move an argument and
+push nothing.
+
+**...or with the constructor's own PARAMETER.** `class_type` builds
+`player new_class` from its first parameter, which no declaration can name
+-- unless a member initialiser is compiled inside the constructor, and it
+is. Asked of BGT 1.3: `needs2 n(x, 5);` beside `holder2(int x)` compiles
+cleanly and runs to `35` for `x == 3`. So it is emitted as
+`player new_class(arg0, "", 0, 0, ...)`, **and only where the class has
+exactly one constructor**, because the name is resolved in every one of
+them. The arguments are not adjacent -- each temp slot's construction sits
+between its `VAR` and the argument pushed ahead of it -- so the walk resumes
+before each construction.
+
+**An out argument copied before the call that fills it.** The four
+warnings, `'__nvgt_out_2_3372' is not initialized`:
+
+```
+local_33 = __nvgt_out_2_3372;
+if (!map_dimensions(__nvgt_out_3_3372, __nvgt_out_1_3372, __nvgt_out_2_3372, true)) {
+```
+
+The copy is a temp PROMOTED later, and `_promote_temp` writes its
+assignment at the bind without asking `_order_out_arguments` -- so the call,
+folded into the `if`, came out after the copies. Asking at `_bind` instead,
+the moment a slot takes a value that reads an out local, catches it while
+the call is still pending. And a call returning a value type through the
+hidden return slot (`use_affect`, a `string`) never registered its out
+locals at all.
+
+Ordering at the bind has to commit before it knows whether the call's
+result is used, so where it is not, a save loader came out with an unused
+`bool __nvgt_ret_178 = savedValues.get(...)`. `_drop_unread_returns` turns a
+holder mentioned only in its declaration and one assignment back into a bare
+call -- including the ones the old path already left, which is TubeSim's
+whole diff.
+
+**It also removed five duplicated calls**, which this file counts as the
+result rather than a side effect: `damage_calculation`, `check_immunity`,
+`check_reflect`, `game_deletables` and `map_dimensions` were each called
+twice -- once into the holder and once again in the expression that should
+have read it -- so Sable computed an attack's damage twice.
+
+| | before | after |
+|---|---|---|
+| Sable, BGT 1.3 compiler | 6 errors, 4 warnings | **compiles cleanly** |
+| calls read back | 14,403 | 14,398 -- the five duplicates |
+| Battle Zone, Treasure Troll, Perilous Hearts | -- | byte-identical |
+| TubeSim | -- | 12 lines: four unused `__nvgt_ret` holders dropped |
+| X-Wheel, Active Soundscape Engine, zompocalypse | compile cleanly | still compile cleanly |
+
+Sable has not been driven; it asks for an embedded pack (`"*"`) that the
+executable on this machine does not carry.
+
+**And `bgt rename` broke the parameter one again.** It renames a
+parameter in the signature and the body, and the member declaration that
+names it sits at class scope, outside both -- so after a rename the class
+read `player new_class(arg0, ...)` beside `class_type(string nameInitial)`,
+and the compiler said "'arg0' is not declared", the one error left. The
+rename now follows the parameter into a member declaration, for the class's
+only constructor and only in a statement ending in `;` -- a method's
+signature ends in `{` and its parameters are its own. Recovered and renamed
+afresh, Sable compiles cleanly.
+
+## Survive: the 2011 and 2012 engines lost every string they COPIED
+
+`Survive` (2012-02, Antony's engine, a debug build) recovered with 0 gotos,
+a verified split and 567 calls read back, and the compiler said well over
+**a hundred** things, nearly all of one shape:
+
+```
+loopsound = string();
+loopslot = pool.play_2d(null, null, y, x, oy, (ox != 0));
+```
+
+The bytecode is a member copied into an argument:
+
+```
+PSF 6 ; PshVPtr 0 ; ADDSi object::loopsound ; RDSPtr
+ALLOC string 33 ; VAR 6 ; ... ; CALLINTF sound_pool::play_2d
+```
+
+This file already records that the 2010-2012 builds translate an `ALLOC`'s
+callee **only for a script class**, and `bgt_asir` carried that rule for the
+2012-03, 2012-07 and 2.25 profiles -- through `as_module`. The `as_early`
+path never set it, so 33 resolved to a callee with no parameters, the member
+became the destination, and `play_2d` got two `null`s and its arguments
+shifted by one.
+
+**It was in every 2011 and 2012 title, and the audit had been saying so.**
+Measured against the commit before, on the four carved from their
+installers:
+
+| title | null arguments | `bgt audit` literals lost | lines |
+|---|---|---|---|
+| Antony (2012-02) | 101 -> **0** | 70 in 19 bodies -> **0** | 2,572 -> 2,514 |
+| Grodan Gun (2011-09) | 77 -> **0** | 51 in 22 bodies -> **0** | 2,970 -> 2,925 |
+| Ljudfarmen (2011-02) | 14 -> **0** | 0 -> 0 | 3,029 -> 3,045 |
+| Palace Punch-up (2010-07) | 0 -> 0 | **byte-identical** | 3,200 |
+
+`show_game_window(null)` in Antony's `main` is `show_game_window("Antony")`
+again, and its creatures play `"ant_hurt.wav"` rather than nothing.
+
+**The beta is the exception, and it was measured rather than assumed.**
+Applied to Palace Punch-up the stack rule put 18 `null`s and `<?>`s INTO a
+recovery that had none, because that build's operand really does name the
+copy constructor. So the release decides: every `as_early` profile but
+2010-07.
+
+**And one more handle shape, in BGT's own `dynamic_menu`.** The unfused
+`PSF v ; REFCPY` witness that a slot is a handle required the two to be
+adjacent, and `run_extended` writes
+
+```
+VAR 8 ; PSF 6 ; GETOBJREF 1 ; REFCPY        @menu_sound = temp
+```
+
+`GETOBJREF` converts the value BELOW and leaves the destination where it is,
+so it is skipped like `SUSPEND`. Missed, the slot was declared `sound
+local_6;` and assigned by value -- "No appropriate opAssign method found in
+'sound'", the last four errors. With both, **Survive compiles cleanly**.
+
+## Power Player: BGT 1.0 itself, and a string that comes back in a REGISTER
+
+`powerplayer.exe` (SDJNick) is the first title in the corpus built by the
+released **BGT 1.0** -- its runtime is dated 2010-12-30 03:16, which is
+`bgt.exe` 1.0's own timestamp to the minute, and it registers the same 240
+names. The module reads under the 2011-02 profile and lands exactly on EOF;
+it is a debug build, so the three files come out under their real names. The
+recovery passed every structural check, and BGT said **22 errors**.
+
+All of them were one thing seen from two sides. **These engines -- the
+2010-07 beta, 1.0 and Ljudfarmen's 2011-02 -- hand a `string` back in the
+OBJECT REGISTER**, where 2011-09 and later build it in a hidden return
+address:
+
+```
+2010 to 2011-02:   STR "music" ; CALLSYS _string_factory_ ; STOREOBJ 1
+                   VAR 1 ; GETOBJREF 0 ; CALLSYS directory_exists ; FREE 1
+2011-09 onward:    STR "music" ; PSF 1 ; CALLSYS _string_factory_
+```
+
+Counted per module, the factory is followed by `STOREOBJ` 183 times in
+Palace Punch-up and 214 in Ljudfarmen, and by `PSF ; ALLOC` in Antony. So:
+
+- **A `STOREOBJ` of a call returning an object BY VALUE is not a handle.**
+  `HANDLE_SLOT_OPS` holds `STOREOBJ` because it is the plainest handle
+  witness there is, and in these builds every string temp went through it --
+  declared `string@`, which is "Object handle is not supported for this
+  type" in every engine. The same goes for `string::opAdd`, which returns a
+  `string` the same way, and for `LOADOBJ` in a function returning one.
+- **...and it is a CONSTRUCTION of the slot.** The construction pre-pass
+  read only `PSF v ; <factory>`, so a slot rebuilt at four sites looked
+  declared once, and every literal was routed through a named local --
+  `@local_1 = "music"; directory_exists(local_1)`. Counted as a construction
+  it goes through `_reused_object_slot` like the later engines' literals do,
+  and comes out `directory_exists("music")`.
+
+**Both are gated on the early reader**, and that was measured, not assumed:
+ungated, the by-value rule turned Sable's `string[]@ x = find_sounds(...)`
+into `string[] x = ...` in four files. An array is a reference type, and
+whether its source held it by handle is not this rule's to change; from
+2011-09 a value type never takes this path at all.
+
+**And a 2010 copy constructs first and assigns after.** `"music\\" +
+list[0]` copies the element like this:
+
+```
+PshRPtr                      ; list[0], for the opAssign
+PSF 6 ; ALLOC string         ; the destination, on TOP
+PshV4 6 ; string::opAssign
+```
+
+The stack rule for an unreadable `ALLOC` callee takes an address on top as
+the copy constructor's one argument, which is Screaming Strike's shape --
+and here it made the destination the argument and the source the
+destination: `list[0] = null; local_6 = <?>;`, six times.
+`_alloc_destination_on_top` is the test: the next instruction pushes the
+slot the top address names, so the new object is a receiver rather than an
+argument passed on and destroyed.
+
+| title | lines | `string@` | `<?>` | differing files | the compiler |
+|---|---|---|---|---|---|
+| Power Player (2010-12, BGT 1.0) | 365 -> **344** | 11 -> **0** | 6 -> **0** | 1 | 22 errors -> **compiles cleanly** |
+| Palace Punch-up (2010-07) | 3,200 -> **3,015** | 57 -> **0** | 0 | 3 | 300 errors, below |
+| Ljudfarmen (2011-02) | 3,045 -> **2,880** | 73 -> **0** | 0 | 7 | **2 errors** |
+| Antony, Grodan Gun, Survive, X-Wheel, Sable | unchanged | 0 | 0 | **0** | unchanged |
+
+Calls read back are unchanged on all eight. The suite is 1,178 passing.
+
+**Both are fixed now -- see the next section, which compiled them with their own engines.** Ljudfarmen's two were the shapes this file already names for Perilous
+Hearts: `Can't implicitly convert from 'const int' to 'menu_callback@'` and
+a handle compared with a number. **Palace Punch-up's 300 are its own**, and
+they start at the class declarations -- `'crumbling_speed' is not a member
+of 'square'`, every member of `player` and `sound_pool_item` -- so they are a
+cascade from the beta's class records rather than from anything here. Not
+run down.
+
+`while (true)` comes out of these builds as `while (true) { if (false)
+break; ...` -- `SetV1 5 1 ; CpyVtoR4 5 ; JZ` tests a literal. Ugly and
+correct, and left alone.
+
+## Maestro Monster: BGT 1.0's `form.bgt`, and two more ways to copy a string
+
+`Maestro monster.exe` (VT Studios) is a second BGT 1.0 title: runtime
+2010-12-30, 240 names, the 2011-02 profile, landing exactly on EOF. It
+recovered with every free check clean, and its own runtime stub said **127
+errors**. Nearly all of them were in the copy of BGT 1.0's `form.bgt` it
+includes, and they were three shapes:
+
+- **A METHOD returning a string by value.** The rule that stops a `STOREOBJ`
+  of a by-value return being read as a handle only looked at a preceding
+  `CALL` or `CALLSYS`. `control::type_to_name()` is a `CALLINTF`, so every
+  slot it filled was declared `string@` -- 116 of the 127 errors.
+- **A copy with the SOURCE pushed after the `ALLOC`.** Power Player copies
+  as `PshRPtr ; PSF 6 ; ALLOC ; PshV4 6 ; opAssign`. This build also writes
+  `PSF 6 ; ALLOC ; PshV4 -1 ; PshV4 6 ; opAssign`, so the destination is the
+  SECOND push. `_alloc_destination_on_top` accepts that only when the third
+  instruction is an `opAssign`. Missed, `string_replace(caption, "&", "",
+  true)` came out `string_replace(null, "", string(1), <?>)`.
+- **A receiver pushed BY VALUE.** `return arg0;` is
+  `PSF 1 ; ALLOC ; PshV4 1 ; opAssign ; LOADOBJ 1`. The receiver reaches the
+  call as the temp's atom, `string()`, so it came out
+  `string() = arg0; return string();` ("Reference is temporary"). An
+  unnamed temp pushed that way now takes the assigned value.
+
+| | before | after |
+|---|---|---|
+| Maestro Monster, its own engine | 127 errors | **compiled cleanly** |
+| Maestro Monster, BGT 1.3 | -- | **compiled cleanly** |
+| Power Player, Ljudfarmen, Antony, Survive, X-Wheel, Sable, The Gate | -- | byte-identical |
+| Palace Punch-up | -- | one copy folded (`sound_error(tmp3, arg0)`); still compiles and runs with its own engine |
+| Grodan Gun | -- | `event local_5 = objects[i].serialize();` where it read `@local_5 = @...` of a by-value `event serialize()`; still compiles with its own engine |
+
+The suite is 1,196 passing and `bgt oracle` is 55/55. Not played.
+
+## Metronome: a handle copy read once by ADDRESS is borrowed too
+
+`metronome.exe` is a 2012-03 build (322 names, Aliens Attack's engine), and
+its recovery had one error: `tmp7 = temp; @loader.handle = tmp7;` with
+`tmp7` declared nowhere. The source is `@loader.handle = temp;`, and the
+compiler writes it as a handle copy into a slot of its own that is passed
+on by address and freed:
+
+    PshVPtr 4 ; PSF 7 ; REFCPY ; PopPtr     ; slot 7 = @temp
+    VAR 7 ; ... ADDSi preload::handle ; GETOBJREF 1 ; REFCPY
+    FREE 7
+
+`objVariableTypes` does not record slot 7, which is why nothing declared
+it. `_borrowed_handle` already folds a copy whose whole life is one
+`CmpPtr`; `_borrowed_for_one_address` is the same rule for one `VAR`.
+Exactly one, no jump, and nothing else naming the slot before its `FREE`.
+
+It reaches far more than Metronome, because BGT's own `dynamic_menu` and
+`form.bgt` write `@tts_handle = handle;` the same way in every engine:
+
+| title | what moved | and the compiler |
+|---|---|---|
+| Metronome | the one error | **compiled cleanly** |
+| Sable (1.3) | 29 files: `@x = y` aliases gone, `find(@temp_status)` folded | compiled cleanly, 14,372 calls unchanged |
+| The Gate (1.3) | 24 files, 33,536 -> 33,449 lines | compiled cleanly, 8,691 calls unchanged |
+| Perilous Hearts, Palace, Ljudfarmen, Grodan Gun, Antony, Survive, Maestro Monster | the `dynamic_menu`/`form.bgt` aliases only | each still compiles, with its own engine where it has one |
+| Power Player, X-Wheel | -- | byte-identical |
+
+The suite is 1,198 passing and `bgt oracle` is 55/55. Every diff line was
+checked to be a dead alias going away; no call count moved anywhere.
+
+## A kept call must not be folded past the next call
+
+Found by porting ASE to NVGT, where its soundscape compiler could never
+compile. The source keeps a call's result, makes another call, and only
+then tests the result:
+
+    bool ok = compilation.add_file(dir + "/manifest.bin", "manifest.bin");
+    file_delete(dir + "/manifest.bin");
+    if (!ok) ...
+
+The bytecode says so plainly -- `add_file` at 296, its result copied into
+slot 13 at 305, `file_delete` at 327, slot 13 tested at 332 -- and the
+recovery read
+
+    file_delete((dir + "/manifest.bin"));
+    if (!compilation.add_file((dir + "/manifest.bin"), "manifest.bin")) {
+
+which deletes the manifest before adding it to the pack. **That was in the
+source recovered for ASE's own author.**
+
+Every staleness rule here asks whether something since has changed what the
+value READS. `file_delete` touches no receiver of `compilation.add_file`, so
+they all said fold. A value that is itself an impure call has a second
+question nothing asked: folding it moves the CALL, so every impure call
+written out in between now runs before it instead of after.
+`_reorders_side_effects` asks it.
+
+**Only calls already WRITTEN OUT count**: a flushed call, an impure call with
+no result emitted as its own statement, or an impure call inside a statement
+emitted since the bind. A call still on the stack belongs to the expression
+being built, so `f() < g()` in a loop condition is untouched by construction
+-- the guard this file records two broad attempts breaking. Calls with no
+result were recorded nowhere, so `effect_sites` holds them, kept apart from
+`invocation_sites` so the lost-call census is unchanged.
+
+`bgt oracle` has the shape now, `kept_result_then_another_call`: **55/56
+without the fix, 56/56 with it**. Both effects append to a string, so the
+answer says which ran first.
+
+#### What it reached, and the defect it closed that this file had left open
+
+| title | what moved | compiler |
+|---|---|---|
+| ASE | the manifest is added before it is deleted | compiled cleanly |
+| Super Egg Hunt, X-Wheel, The Gate, Sable | `sound_pool_item::update` | compiled cleanly |
+| Sable | its to-hit roll, `random(1, 20)`, two menu answers, three loop tests | compiled cleanly |
+| The Gate | `serialize` before `write`, `get_characters` before the next read | compiled cleanly |
+| X-Wheel | `random` before `generate_puzzle_key`, a menu answer before the click sound | compiled cleanly |
+| Perilous Hearts | `analyse_square` before the surface checks after it | compiled cleanly |
+| Power Player, Ljudfarmen, Palace, Antony, Grodan Gun, Survive, Metronome, Maestro Monster, two more | -- | byte-identical |
+| Manamon 1 | 14 files: the debug panel asks for X before Y, `get_skill_index` before the store, `url_get` before the gift is read; 81,162 -> 81,191 lines, 26,471 -> 26,476 calls | 0 gotos, split verified |
+| Crazy Party | 25 files, mostly `random(...)` rolls kept where they were rolled; 173,412 -> 173,467 lines, 90,166 calls unchanged | 0 gotos, split verified |
+
+`sound_pool_item::update` is the one this file records as open under **...and
+that declined class HAS an instance, in BGT's own library**: the recovery read
+the storage snapshot AFTER `set_sound_storage(packname)`, so the restore was a
+no-op and the pool left the engine pointed at one item's pack. It now reads
+
+    local_7 = get_sound_storage();
+    set_sound_storage(packname);
+    handle.load(filename);
+    set_sound_storage(local_7);
+
+which is BGT's own source -- reached by the general rule rather than by the
+`get_X`/`set_X` pairing that section proposed.
+
+**Manamon 1's teleport was wrong the other way before.** It folded to
+`teleport(int(stn(input_box("X"))), int(stn(input_box("Y"))), ...)`, and
+AngelScript evaluates arguments right to left, so the recovery asked for Y
+first; the bytecode asks for X at 459 and Y at 492.
+
+**A stopped comparison kept writing.** The first measurement was stopped
+mid-run and its Python child went on writing into Manamon 1's output, leaving
+four orphan class files that no `#include` named -- and `bgt apicheck` counted
+their calls, so the title briefly read +227 calls. A clean re-run has none.
+Measure into a folder nothing else can be writing to.
+
+Every changed line was read and each is a call now evaluated where the
+original evaluates it; X-Wheel's `random` against `generate_puzzle_key` was
+checked against the bytecode (198 before 204). No residual `goto` appears in
+any title, no call count moves, and every changed title compiles.
+
+## A game's own runtime is a COMPILER, and four of these titles now pass theirs
+
+A BGT game is the runtime with the module appended, and the runtime carries
+the compiler -- the same `bgtgame` window, the same "Compilation Result"
+report. Cut at the overlay offset `bgtlib.read_trailer` gives, the stub is
+an engine of exactly the game's version, which is the one compiler this
+project never had for the 2010-2012 titles:
+
+```bash
+python -c "import bgtlib; d=open('game.exe','rb').read(); open('stub.exe','wb').write(d[:bgtlib.read_trailer(d)])"
+bgt compile recovered/game.bgt --compiler stub.exe          # -c, as for bgt.exe
+bgt compile recovered/game.bgt --compiler stub.exe --run    # the 2010 beta
+```
+
+| stub | `-c` | run, no switch |
+|---|---|---|
+| Ljudfarmen (2011-02), Grodan Gun (2011-09), Power Player (BGT 1.0) | **compiles** | -- |
+| Palace Punch-up (2010-07 beta) | "The compiler is not available in the demonstration version" | **compiles**, then runs `main` |
+| Antony (2012-02) | builds nothing, reports nothing | exits silently -- **a script with an error "compiles cleanly"** |
+
+So Antony's stub is no instrument at all, and the probe with a deliberate
+error is what says so: check a compiler on a known-bad script before
+believing it about a recovery.
+
+**Why, from the person who knows BGT's history:** Antony's runtime comes
+from a short window in which the AngelScript compiler was still linked in
+but Philip had already made it not work. The file agrees as far as it can
+be asked. The **parser** is there -- "Expected identifier", "Expected
+expression value", `_builtin_function_` -- which AngelScript needs anyway
+to register the engine's own declarations. The **compiler's** diagnostics
+are not: "Can't implicitly convert", "Illegal operation", "Unexpected
+token" and "Failed while compiling default arg" are absent, and so is BGT's
+whole compile front end ("Compiling %s", "Compilation Result", "Select a
+BGT Script to compile"). Grodan Gun's stub, nine weeks older, has every one
+of those, and is 1.64 MB against Antony's 968 KB. So the stub cannot
+compile, and the instrument that would have said "is this stub a compiler?"
+in one second is that string search, before any probe is run.
+
+The beta talks in its own words, too -- a
+"Beta Release" notice before anything, which the driver now answers and
+waits past (read as the script's own window, every beta run "compiled
+cleanly, and ran"), and `Line: 3 (13)` where later engines write
+`On line: 3 (13)`, which `LINE_RE` now reads.
+
+**A probe built BY the 2011 engine is a known answer for the format**, which
+is the step past asking a compiler what it accepts:
+
+```
+funcdef int cb(int);
+string[] words = {"coffee", "mud"};
+cb@ h = null;            sound@ s;    if (s is null) { }
+```
+
+recovered as `__nvgt_global_init_0()`, `@local_1 = 0;` and
+`sound local_4; ... if (local_4 == local_5)` -- every one wrong, in a
+module whose source is three lines above. What it took:
+
+- **An initialiser list is compiled element by element** -- `array<T>(N)`
+  and a store per index -- because these engines have no list protocol. The
+  helper it came back as is "Function calls are not allowed in global
+  expressions" to Ljudfarmen's own engine, and every use after it "Use of
+  uninitialized global variable". `_fold_element_list` puts the `{...}`
+  back, for the exact shape only: indices 0 to N-1 in order, each a literal.
+- **A handle holds no constant but null.** `PshC4 0 ; PSF 1 ; REFCPY`,
+  `SetV4 v, 0` into a slot declared `T@`, and `CMPi` of two slots where one
+  is a handle all render `null` and `is` now; as numbers they were "Can't
+  implicitly convert from 'const uint' to 'menu_callback@'" and "No
+  conversion from 'sound@&' to 'uint'", in BGT's own `dynamic_menu` and
+  `sound_pool` as these games ship them.
+- **Two object slots compared as integers are handles.** A value object is
+  compared through `opEquals`; `CMPi` compares pointers. `sound@ s;` is
+  never written, so the comparison is the only witness it has.
+
+**The 2010 beta needed three of its own**, each found by its compiler:
+
+- **Its property byte is an OFFSET, not flags.** `property_offsets` already
+  proved that and nothing used the proof the other way, so 17 for
+  `allow_escape` set the private bit -- `private`, a keyword the beta has
+  never heard of -- and offsets carrying the inherited bit left members
+  undeclared: the 300 errors this file recorded for Palace Punch-up under
+  BGT 1.3 were that, plus one cascade. Proven offsets are not flags now.
+- **It resolves no type forward.** `funcdef int menu_callback(dynamic_menu@,
+  string);` ahead of the class is "Identifier 'dynamic_menu' is not a data
+  type", which is why BGT's own `dynamic_menu.bgt` declares it at the END of
+  the file. For that release only (`declare_before_use`), a funcdef naming a
+  module class is rendered after the classes, into `includes/funcdefs.bgt`.
+- **Its array template is `_builtin_array_`**, which the beta takes in an
+  expression and nothing later does. `string[]()` compiles in both, so that
+  form is used wherever no subtype is a handle; and `_builtin_array_` is no
+  longer reported as a type "built with a newer BGT".
+
+| title | own engine | BGT 1.3 |
+|---|---|---|
+| Power Player (BGT 1.0) | **compiles cleanly** | **compiles cleanly** |
+| Palace Punch-up (2010-07) | **compiles cleanly, and runs** | 1 error: `network::setup_server` takes four arguments in the beta and three in 1.3 -- an API difference, not a recovery defect |
+| Ljudfarmen (2011-02) | **compiles cleanly** | **compiles cleanly** |
+| Grodan Gun (2011-09) | **compiles cleanly** | **compiles cleanly** |
+| Antony (2012-02) | its stub has no working compiler | **compiles cleanly** |
+
+Survive, X-Wheel, Sable, Antony and Power Player recover byte-identical to
+the commit before; Palace Punch-up, Ljudfarmen and Grodan Gun move by the
+shapes above and nothing else. Calls read back are unchanged on all eight.
+The suite is 1,186 passing. None of these has been PLAYED.
 
 ## Build to Survive is three DEBUG builds, and every free check passed
 

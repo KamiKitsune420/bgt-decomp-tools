@@ -532,8 +532,27 @@ class Builder:
         #: ...and whether an `ALLOC`'s callee operand is worth reading at
         #: all for a type the module does not declare. Carried on the
         #: module, because the decompiler is where the arity is used.
+        #: The 2011 and 2012 engines read by `as_early` are such builds too,
+        #: and leaving them out cost every one of them the strings it copied
+        #: into an argument: `PSF 6 ; <member> ; ALLOC string 33` resolved 33
+        #: to a callee with no parameters, so the member became the
+        #: destination and the call got `null` -- 101 such arguments in
+        #: Antony, 77 in Grodan Gun, 12 in Ljudfarmen, and Survive would not
+        #: compile. **The 2010 beta is not one**: its operand names the copy
+        #: constructor, and taking the stack rule there instead puts 18
+        #: `null`s INTO Palace Punch-up. So it is the release, measured both
+        #: ways, that decides.
         self.m.alloc_callee_script_only = bool(
-            info.get("alloc_callee_script_only"))
+            info.get("alloc_callee_script_only")
+            or (info.get("early") and info.get("release") != "2010-07"))
+        #: The 2010 beta resolves a type only once it has been declared: its
+        #: own compiler says "Identifier 'dynamic_menu' is not a data type"
+        #: for `funcdef int menu_callback(dynamic_menu@, string);` ahead of
+        #: the class -- which is why BGT's own `dynamic_menu.bgt` declares
+        #: that funcdef at the END of the file. Every later engine resolves
+        #: forward, so only this release changes where a funcdef goes.
+        self.m.declare_before_use = bool(
+            info.get("early") and info.get("release") == "2010-07")
         self._types: Dict[int, TypeInfo] = {}      # id(type_info dict) -> TypeInfo
         self._named: Dict[Tuple[str, str], TypeInfo] = {}
         self._dts: Dict[int, DataType] = {}
@@ -905,18 +924,84 @@ class Builder:
         object_slots = {ov[-1] for ov in rec.get("objVars", [])}
         for index, ins in enumerate(f.bytecode):
             if ins.name == "PSF":
+                # `GETOBJREF n` between them converts a value further down
+                # the stack and leaves the destination where it is:
+                # `VAR 8 ; PSF 6 ; GETOBJREF 1 ; REFCPY` is `@slot6 = slot8`
+                # in BGT's own `dynamic_menu::run_extended`, and missed it
+                # declared `sound local_6;` and assigned it by value.
                 nxt = next((f.bytecode[j] for j in
-                            range(index + 1, min(index + 3, len(f.bytecode)))
-                            if f.bytecode[j].name != "SUSPEND"), None)
+                            range(index + 1, min(index + 4, len(f.bytecode)))
+                            if f.bytecode[j].name not in
+                            ("SUSPEND", "GETOBJREF", "GETREF")), None)
                 if nxt is not None and nxt.name == "REFCPY":
                     handles.add(_s16(ins.w_arg))
             elif (ins.name in ("SetV4", "SetV8") and not ins.dw_arg
                   and _s16(ins.w_arg) in object_slots):
                 handles.add(_s16(ins.w_arg))
+            #: ...and a slot COMPARED as an integer is a handle. An object
+            #: held by value is compared through its `opEquals`; `CMPi` on
+            #: two object slots compares the pointers, which is `is`. The
+            #: 2011 engine writes `sound@ s; if (s is null)` as
+            #: `SetV4 5, 0 ; CMPi 4, 5`, and slot 4 is never written at all,
+            #: so nothing else says it is a handle -- it came out
+            #: `sound local_4;` compared with `==`, which is no program.
+            elif (ins.name == "CMPi"
+                  and _s16(ins.w_arg) in object_slots
+                  and _s16(ins.w_arg2) in object_slots):
+                handles.add(_s16(ins.w_arg))
+                handles.add(_s16(ins.w_arg2))
+
+        #: **A `STOREOBJ` of the string factory's result is not a handle.**
+        #: The 2010 to 2011-02 engines hand a literal back in the object
+        #: register, so it reaches its slot by `STOREOBJ` -- the opcode that
+        #: is otherwise the plainest handle witness there is. Counted as one,
+        #: every string temp was declared `string@`, which is "Object handle
+        #: is not supported for this type" in every engine: 22 errors in BGT
+        #: 1.0's Power Player, and the 281 this file records for Palace
+        #: Punch-up, with Ljudfarmen's 73 declarations beside them.
+        used = ((getattr(self, "info", None) or {}).get("tail")
+                or {}).get("used_functions") or []
+        factory_stores = set()
+        #: Only the early generation hands a VALUE type back this way. From
+        #: 2011-09 a string comes back through a hidden return address, so
+        #: a `STOREOBJ` of a non-handle return there is a reference type --
+        #: Sable's `find_sounds` returns a `string[]` -- and whether the
+        #: source held it by handle is not this rule's to change.
+        early = bool(getattr(self, "early", False))
+        ret = (rec or {}).get("returns") or {}
+        returns_by_value = bool(ret.get("token") == 5 and ret.get("type")
+                                and not ret.get("handle"))
+        prev = None
+        for ins in f.bytecode:
+            if ins.name == "SUSPEND":
+                continue
+            #: ...and the same is true of ANY call whose declared return is
+            #: an object by value rather than a handle: `string::opAdd`
+            #: returns a `string` the same way, so `"music\\" + list[0]`
+            #: landed in a `string@` too. The record says it outright --
+            #: a return type with no handle flag cannot be a handle. A
+            #: METHOD is no different: Maestro Monster's `form.bgt` stores
+            #: `control::type_to_name()`, a `CALLINTF`, the same way.
+            returns = ((used[prev.dw_arg] or {}).get("returns")
+                       if prev is not None
+                       and prev.name in ("CALLSYS", "CALL", "CALLINTF")
+                       and 0 <= prev.dw_arg < len(used) else None)
+            if (early and ins.name == "STOREOBJ" and returns
+                    and returns.get("token") == 5 and returns.get("type")
+                    and not returns.get("handle")):
+                factory_stores.add(id(ins))
+            #: ...and `LOADOBJ` returning a slot from a function that
+            #: returns an object BY VALUE is the same thing at the other end:
+            #: the 2010 engines hand a returned `string` back in the object
+            #: register, so Palace Punch-up's `serialize_player` declared its
+            #: result `string@`.
+            if early and ins.name == "LOADOBJ" and returns_by_value:
+                factory_stores.add(id(ins))
+            prev = ins
 
         for ins in f.bytecode:
             slots = SLOT_FIELDS.get(ins.bc_type, ())
-            if ins.name in HANDLE_SLOT_OPS:
+            if ins.name in HANDLE_SLOT_OPS and id(ins) not in factory_stores:
                 handles.add(_s16(ins.w_arg))
             typed = TYPED_SLOT_OPS.get(ins.name)
             if typed is not None:
@@ -1291,6 +1376,16 @@ class Builder:
             ti.properties = [(p["name"], self.dt(p["type"]), p["flags"])
                              for p in block.get("properties", [])]
             ti.property_offsets = self.property_offsets(ti)
+            #: ...and where that field is proven to be an offset it is not
+            #: flags as well. Read as flags, the beta's offsets set the
+            #: private bit and the inherited bit at random: `allow_escape`,
+            #: at offset 17, came out `private` -- a keyword that engine has
+            #: never heard of, "Expected method or property" -- and every
+            #: member whose offset happened to carry the inherited bit was
+            #: left undeclared, so Palace Punch-up reported 300 errors of
+            #: the form "'crumbling_speed' is not a member of 'square'".
+            if ti.property_offsets:
+                ti.properties = [(n, dt, 0) for n, dt, _o in ti.properties]
             for f in ti.constructors + ti.factories + ti.methods + ti.vft:
                 if f.object_type is None:
                     f.object_type = ti
@@ -1531,6 +1626,19 @@ class Builder:
                     # operand is still left unhandled rather than guessed
                     # at: `POP 3` would really pop three.
                     ins.name = "PopPtr"
+                elif (ins.name == "ALLOC" and self.info.get("alloc_callee_plain")
+                        and 0 <= ins.qw_arg < len(m.used_types)
+                        and any(m.used_types[ins.qw_arg] is c
+                                for c in (m.classes or ()))):
+                    # AngelScript 2.25 to 2.26.0 store a script class's
+                    # constructor as a PLAIN usedFunctions index, where
+                    # TranslateFunction reads `index + 1` with 0 meaning none.
+                    # Read unshifted, every script class was built by the
+                    # function one place lower in the table: zompocalypse's
+                    # `enemy` by `sound_pool::clean_unused`. A registered
+                    # type's operand is the engine's raw id and is left for
+                    # the decompiler's stack rule.
+                    ins.dw_arg += 1
                 elif ins.name == "STR":
                     # STR's string index is a word operand here and a dword one
                     # there. Left in the word field it resolves to whichever
@@ -1648,6 +1756,15 @@ def retype_funcdef_slots(m: Module) -> int:
             if want.obj_type is None or want.obj_type.name in guessed:
                 continue
             for back in body[max(0, k - _FUNCDEF_ARG_WINDOW):k][::-1]:
+                # **A call in between has consumed what was pushed before
+                # it.** Without this the window reached past one call to the
+                # argument of another: X-Wheel's `reset_menu(callback)` is
+                # followed by `string`'s copy constructor, one `string`
+                # parameter, whose scan found `reset_menu`'s `VAR 6` and
+                # retyped the menu callback `string@` -- "Object handle is
+                # not supported for this type", ten times over.
+                if back.name in _CALL_OPS:
+                    break
                 if back.name not in ("VAR", "PshVPtr"):
                     continue
                 var = slots.get(_s16(back.w_arg))
@@ -1667,6 +1784,10 @@ def retype_funcdef_slots(m: Module) -> int:
 #: between -- `VAR 16 ; PGA 77 ; ChkRefS ; RDSPtr ; GETOBJ 1 ; CALLSYS` is the
 #: site this exists for, which is five.
 _FUNCDEF_ARG_WINDOW = 8
+
+#: Every instruction that calls something and so pops its own arguments.
+_CALL_OPS = frozenset(("CALL", "CALLSYS", "CALLINTF", "CALLBND", "Thiscall1",
+                       "CallPtr", "ALLOC"))
 
 
 if __name__ == "__main__":
