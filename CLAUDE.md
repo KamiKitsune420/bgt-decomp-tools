@@ -164,8 +164,10 @@ installers without running anything:
 
 All five open through `bgtlib.unpack` with the stock seed 0x11, and the
 module's declared length is its real length in every case. **Four of the five
-are DEBUG builds** (`noDebugInfo = 0`) — all but Palace Punch-up — which is a
-separate windfall; see **A debug build keeps the names**.
+carry debug information** — all but Palace Punch-up — which is a separate
+windfall; see **A debug build keeps the names**. That is not a choice their
+author made: release builds did not exist until BGT 1.2, so every build of
+that era kept it. See **What BGT's author said about its history**.
 
 **Perilous Hearts narrows the break to nine weeks.** It multiplies, compresses
 and writes a pack field on **2011-11-25**, where Grodan Gun does none of those
@@ -745,9 +747,10 @@ one for most of this project's life.
 | `-c`, debug (`noDebugInfo = 0`) | **all of it, and the recovery uses it** |
 
 BGT's installer registers both, as `compile_release` and `compile_debug`, and
-**ten shipped titles here are debug builds** -- see **A debug build keeps the
-names** below, which also explains what had to change in this reader before
-any of it could be used.
+**ten shipped titles here carry debug information** -- see **A debug build
+keeps the names** below, which also explains what had to change in this
+reader before any of it could be used. Five of the ten predate the switch:
+before BGT 1.2 there was no release build to choose.
 
 So for a release build a faithful re-implementation is achievable and a
 byte-identical one is not: locals read as `local_4` and parameters as `arg0`,
@@ -4107,6 +4110,52 @@ agree and only the types moved, which is `registered_types` having been
 corrected three times since -- the array return, the handle marker against
 either side, and a return type needing a separator -- so the earlier figure
 was taken before those refusals existed. Re-derived, not reinterpreted.)
+
+### What BGT's author said about its history
+
+A long private chat with Philip Bennefall, from 2010 to 2015, settles several
+things this file had only from the binaries. It is a source of claims, not
+measurements, so each item says whether the files agree.
+
+| what Philip said | the files |
+|---|---|
+| exec.bin is the game runtime, **LZ77**-compressed on disk, decompressed in memory and hash-checked on every compile | agree, exactly |
+| exec.bin arrived in **1.1 revision 5**; before that the compiler copied `bgt.exe` itself and appended the data | not yet checked against a pre-r5 stub |
+| storing a pack inside the executable came in revision 5 and needed "the BGT executable header to allow for an arbitrarily sized data chunk"; he tested it on Perilous Hearts | agree: that is the `"<n> "` field, which Grodan Gun (2011-09) lacks and Perilous Hearts (2011-11) has |
+| a compiled game carries "only the key, and then in an encrypted form"; only he can map it to a buyer, through his sales records | agree: the 32 hex characters are a licence mark under a second key |
+| **release builds** did not exist yet when he said it ("this is going to be used when I add debug and release builds"); they arrived around **1.2** | agree: the 2012-07 engine has no `noDebugInfo` byte and the 2013-04 ones do, so every earlier build kept its debug information by necessity rather than by choice |
+| Q9 and Kringle Crash are C++ (MinGW); the sound farm, the frog game and Antony are BGT; Palace Punch-up was compiled with "a really old" beta | agree with every one |
+| Elias needs a new engine build, because BGT itself streams its audio and handles packing and encryption | agree: the binding is compiled in, and elias.dll never opens a file |
+| 1.3 was a 1.2 build renamed, "it has so much new stuff" | -- |
+
+**The version names**, which this file had only as build dates: 1.0, then
+**1.1 revision 1 to 5**, then 1.2 and its revisions, then 1.3. Revision 5
+existed as a development build around the turn of 2011-12 and reached the
+public around March 2012.
+
+**And the early titles were built with unreleased engines.** Philip compiled
+his own games with snapshots of whatever he was working on, and 1.1 took
+nearly a year to reach the public, at the end of 2011. So Ljudfarmen
+(2011-02), Grodan Gun (2011-09) and Antony (2012-02) run engines nobody else
+had, which is why their registration counts sit between the public releases.
+
+**The one place he and the files disagree is dated by that.** In the 1.0 era
+he described the byte-code protection as "several steps including encryption
+and compression", and Ljudfarmen's and Grodan Gun's modules are not
+compressed -- the container's declared length is the module's own. The
+compression was in development for 1.1 and arrived in its snapshots between
+September and November 2011, with the key generator and the pack field. What
+he described was the release he was building, not the one those games were
+compiled with.
+
+**The licence field is not the registration key as typed.** Two builds of one
+developer's game, from February and July 2012, decode to `1c2155df` at edition
+4 and `1df39b5` at edition 2, and neither is the eight-character key that
+developer was issued -- which is what "in an encrypted form" predicts, though
+a key reissued for 1.1 means it is not proof. Edition 4 against a developer
+known to hold **pro single**, and 3 on Philip's own games, fits a numbering of
+demo, lite, pro unlimited, pro single as 1 to 4. That is a reading, not a
+measurement.
 
 ### Three engines between 1.0 and 1.3, and they date the format break
 
@@ -13037,9 +13086,17 @@ of `-c`**, and the installer registers both: `compile_release` passes
 `-C` and `compile_debug` passes `-c`.
 
 **And it is not a quirk of one title.** Screaming Strike was the first found;
-Antony, Grodan Gun and Ljudfarmen are all `noDebugInfo = 0` as well, which is
-BGT's own author shipping his own games from the debug build, and **Air Puck
-2PE ships both its client and its server that way**. **Build to Survive adds
+Antony, Grodan Gun and Ljudfarmen carry debug information as well, and **Air
+Puck 2PE ships both its client and its server that way**.
+
+**This said the early ones were BGT's author "shipping his own games from the
+debug build", and that was wrong.** There was nothing to choose: release
+builds arrived with BGT 1.2, in the second half of 2012, so every build before
+that kept its debug information, and the format had no `noDebugInfo` byte to
+say otherwise. Screaming Strike, Antony, Grodan Gun, Ljudfarmen and Perilous
+Hearts are that case. Air Puck and Build to Survive, on stock 1.3, are the
+ones whose author really did pick `-c`. See **What BGT's author said about
+its history**. **Build to Survive adds
 three more** -- its client, its server and its `admin_maker`, all stock BGT
 1.3 and all `-c`, by the same author as Air Puck.
 
@@ -13071,7 +13128,8 @@ byte is `noDebugInfo`, and a `-c` build writes 0 there. So the question
 was never whether BGT can keep debug information; it is which switch the
 author used.
 
-**`screamingStrike_en.exe` (Nyanchan, 2013) was shipped `-c`.** A 790 KB
+**`screamingStrike_en.exe` (Nyanchan, 2013) carries its debug information**,
+because its engine (2012-07-24) predates release builds. A 790 KB
 executable, stock seed, 394 registered names -- a BGT between 1.0's 240
 and 1.3's 432, so a new version for this corpus as well. Its module
 holds:
