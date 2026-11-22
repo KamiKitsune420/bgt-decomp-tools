@@ -252,6 +252,141 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(out["rows"], [])
 
 
+class CodePageTests(unittest.TestCase):
+    """BGT reads a script's bytes as they are and shows them through the
+    system's ANSI code page, so everything the driver writes or reads back
+    has to go through that code page -- not through UTF-8.
+
+    Measured on BGT 1.3 under code page 1250 before this was fixed: a watched
+    function returning the byte 0xE4 came back as U+FFFD, and `--watch
+    'kod("ä")'` answered 195 (the UTF-8 lead byte) where the engine's own
+    answer is 228. The code page is pinned per test, because the machine
+    running the suite may have any.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.root = project(self.tmp)
+        self.main = os.path.join(self.root, "includes", "functions",
+                                 "part_0.bgt")
+        self.saved_check = bgt_drive.bgt_compile.check
+        self.saved_codec = bgt_drive.bgt_compile.ansi_codec
+
+    def tearDown(self):
+        import shutil
+        bgt_drive.bgt_compile.check = self.saved_check
+        bgt_drive.bgt_compile.ansi_codec = self.saved_codec
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def code_page(self, name):
+        bgt_drive.bgt_compile.ansi_codec = lambda: name
+
+    def test_a_script_survives_a_rewrite_byte_for_byte(self):
+        """Every byte, including the ones a code page leaves undefined (0x81
+        in cp1252), and CRLF line ends as they were."""
+        data = bytes(range(256)) + b"\r\nvoid main()\r\n"
+        path = os.path.join(self.tmp, "all.bgt")
+        for name in ("cp1250", "cp1252", "latin-1"):
+            self.code_page(name)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            text = bgt_drive.bgt_compile.read_script(path)
+            bgt_drive.bgt_compile.write_script(path, text)
+            with open(path, "rb") as fh:
+                self.assertEqual(fh.read(), data, name)
+
+    def test_main_keeps_its_non_ascii_literals_during_the_run(self):
+        """The file holding `main` is the one the driver rewrites, and the
+        UTF-8 round trip turned each byte above 0x7F into EF BF BD for the
+        run -- so the run compiled a different literal from the project's."""
+        self.code_page("cp1252")
+        with open(self.main, "wb") as fh:
+            fh.write(b'string s = "\xe4";\r\nvoid main()\r\n{\r\n}\r\n')
+        seen = {}
+
+        def fake(script, **kw):
+            with open(self.main, "rb") as fh:
+                seen["main"] = fh.read()
+            return _ok()
+
+        bgt_drive.bgt_compile.check = fake
+        bgt_drive.drive(self.root, ["s"], duration=10)
+        self.assertIn(b'"\xe4"', seen["main"])
+        self.assertNotIn(b"\xef\xbf\xbd", seen["main"])
+
+    def test_a_non_ascii_watch_reaches_the_engine_as_one_byte(self):
+        seen = {}
+
+        def fake(script, **kw):
+            with open(script, "rb") as fh:
+                seen["probe"] = fh.read()
+            return _ok()
+
+        self.code_page("cp1252")
+        bgt_drive.bgt_compile.check = fake
+        bgt_drive.drive(self.root, ['kod("ä")'], duration=10)
+        self.assertIn(b'kod("\xe4")', seen["probe"])
+        self.assertNotIn(b"\xc3\xa4", seen["probe"])
+
+    def test_a_watch_the_code_page_cannot_hold_is_refused_untouched(self):
+        """cp1252 has no `ł`. Written anyway it would be a different question
+        with a plausible answer, so the run is refused -- before the project
+        is touched."""
+        with open(self.main, "rb") as fh:
+            before = fh.read()
+        self.code_page("cp1252")
+        bgt_drive.bgt_compile.check = lambda script, **kw: self.fail("ran")
+        with self.assertRaises(SystemExit) as raised:
+            bgt_drive.drive(self.root, ['kod("ł")'], duration=10)
+        self.assertIn("cp1252", str(raised.exception))
+        with open(self.main, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertEqual([f for _r, _d, files in os.walk(self.root)
+                          for f in files if bgt_drive.PREFIX in f], [])
+
+    def test_the_table_is_read_in_the_code_page_the_engine_wrote_it_in(self):
+        """0xE5 is the same byte and two different letters, which is why the
+        code page has to be the system's and not a fixed one."""
+        path = os.path.join(self.tmp, "t.tsv")
+        with open(path, "wb") as fh:
+            fh.write(b"ms\tlitera()\n0\t\xe5\n")
+        self.code_page("cp1252")
+        self.assertEqual(bgt_drive.read_results(path)[0]["litera()"],
+                         "å")
+        self.code_page("cp1250")
+        self.assertEqual(bgt_drive.read_results(path)[0]["litera()"],
+                         "ĺ")
+
+    def test_stage_keeps_the_bytes_too(self):
+        """`bgt compile` stages a copy through the same reader and writer."""
+        self.code_page("cp1250")
+        src = os.path.join(self.tmp, "one.bgt")
+        with open(src, "wb") as fh:
+            fh.write(b'string s = "\xe5\x81";\r\nvoid main()\r\n{\r\n}\r\n')
+        out = bgt_drive.bgt_compile.stage(src, os.path.join(self.tmp, "st"))
+        with open(out, "rb") as fh:
+            staged = fh.read()
+        self.assertIn(b'"\xe5\x81"', staged)
+        self.assertIn(b"void __recovered_main()", staged)
+
+
+@unittest.skipUnless(os.name == "nt", "the ANSI code page is a Windows thing")
+def test_the_code_page_is_the_system_s_even_in_utf8_mode():
+    """`locale.getpreferredencoding()` answers `utf-8` under `PYTHONUTF8=1`
+    whatever the system's code page is, so it cannot be what is asked."""
+    import ctypes
+    import subprocess
+    tools = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tools")
+    out = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import bgt_compile; "
+         "print(bgt_compile.ansi_codec())", tools],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True)
+    assert out.stdout.strip() == "cp%d" % ctypes.windll.kernel32.GetACP()
+
+
 class ScenarioTests(unittest.TestCase):
     def test_every_scenario_says_what_it_expects_and_why(self):
         for name, canned in bgt_drive.SCENARIOS.items():

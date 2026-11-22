@@ -317,6 +317,64 @@ class Report:
 _LOCK = os.path.join(tempfile.gettempdir(), "bgt_compile.lock")
 
 
+def ansi_codec() -> str:
+    """The codec BGT reads a script in: the system's ANSI code page.
+
+    BGT is an ANSI program. A literal's bytes reach the module as they sit in
+    the file, and the engine shows them through the system code page -- 0xE5
+    is `å` under cp1252 and `ĺ` under cp1250, and a UTF-8 `ä` (C3 A4) reaches
+    a screen reader as `Ă¤` on a cp1250 machine. So the encoding is the
+    machine's, never a fixed one.
+
+    **Not `locale.getpreferredencoding()`**: with `PYTHONUTF8=1` that answers
+    `utf-8` whatever the code page is. `GetACP()` does not depend on the
+    interpreter's settings. Off Windows, where there is no BGT to run anyway,
+    latin-1 keeps every byte as it is.
+    """
+    if os.name == "nt":
+        try:
+            import codecs
+            import ctypes
+            name = "cp%d" % ctypes.windll.kernel32.GetACP()
+            codecs.lookup(name)
+            return name
+        except (AttributeError, OSError, LookupError):
+            pass
+    return "latin-1"
+
+
+def read_script(path: str) -> str:
+    """A `.bgt` file's text, every byte kept.
+
+    Decoded in the ANSI code page, with `surrogateescape` so a byte the code
+    page leaves undefined survives a rewrite unchanged instead of becoming
+    U+FFFD -- which is what `encoding="utf-8", errors="replace"` did to every
+    byte above 0x7F that was not part of a UTF-8 sequence.
+    """
+    with open(path, "r", encoding=ansi_codec(), errors="surrogateescape",
+              newline="") as fh:
+        return fh.read()
+
+
+def write_script(path: str, text: str) -> None:
+    """Write `text` as BGT will read it, the inverse of `read_script`.
+
+    A character the code page cannot hold raises: the engine would never see
+    it, so failing here beats a probe that silently asks a different
+    question.
+    """
+    codec = ansi_codec()
+    try:
+        data = text.encode(codec, errors="surrogateescape")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "%r cannot be written in this system's code page (%s), so BGT "
+            "could not read it: %s" % (exc.object[exc.start:exc.end], codec,
+                                       os.path.basename(path))) from None
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
 def find_compiler(explicit: Optional[str] = None) -> Optional[str]:
     for path in ([explicit] if explicit else []) + list(DEFAULT_COMPILERS):
         if path and os.path.isfile(path):
@@ -1051,8 +1109,7 @@ def stage(script: str, out_dir: str, disarm: bool = True,
     The copy exists at all so the executable the compiler writes lands beside
     it and not in the project the caller is reading.
     """
-    with open(script, "r", encoding="utf-8", errors="replace") as fh:
-        source = fh.read()
+    source = read_script(script)
     if disarm:
         source, count = re.subn(r"(?m)^(\s*)void\s+main\s*\(\s*\)",
                                 r"\1void __recovered_main()", source, count=1)
@@ -1063,8 +1120,7 @@ def stage(script: str, out_dir: str, disarm: bool = True,
         source, os.path.dirname(os.path.abspath(script)),
         os.path.abspath(out_dir))
     target = os.path.join(out_dir, as_name or os.path.basename(script))
-    with open(target, "w", encoding="utf-8") as fh:
-        fh.write(source)
+    write_script(target, source)
     return target
 
 

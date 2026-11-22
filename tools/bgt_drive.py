@@ -154,10 +154,8 @@ def find_entry(project: str) -> str:
     names = sorted(n for n in os.listdir(project)
                    if n.endswith(".bgt") and not n.startswith(PREFIX))
     for name in names:
-        with open(os.path.join(project, name), encoding="utf-8",
-                  errors="replace") as fh:
-            if "#include" in fh.read():
-                return os.path.join(project, name)
+        if "#include" in bgt_compile.read_script(os.path.join(project, name)):
+            return os.path.join(project, name)
     if names:
         return os.path.join(project, names[0])
     raise SystemExit("no .bgt entry script in %s" % project)
@@ -177,9 +175,8 @@ def find_main(project: str) -> Optional[str]:
             if not name.endswith(".bgt") or name.startswith(PREFIX):
                 continue
             path = os.path.join(root, name)
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                if MAIN.search(fh.read()):
-                    return path
+            if MAIN.search(bgt_compile.read_script(path)):
+                return path
     return None
 
 
@@ -238,7 +235,10 @@ def read_results(path: str) -> List[Dict[str, str]]:
     """The probe's table, as a row per tick."""
     if not os.path.isfile(path):
         return []
-    with open(path, encoding="utf-8", errors="replace") as fh:
+    #: the engine writes a string's bytes as they are, so the table is in the
+    #: ANSI code page like the script; a byte the code page leaves undefined
+    #: is the only thing `replace` can still hit
+    with open(path, encoding=bgt_compile.ansi_codec(), errors="replace") as fh:
         lines = [l.rstrip("\r\n") for l in fh if l.strip()]
     if not lines:
         return []
@@ -310,6 +310,17 @@ def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
     entry = find_entry(project)
     source = probe_source(entry, watch, call, hold, setup,
                           duration, every, tick)
+    #: refuse before anything in the project is touched: a watch the code
+    #: page cannot hold would reach the engine as different bytes, which is
+    #: a different question with a plausible answer
+    try:
+        source.encode(bgt_compile.ansi_codec())
+    except UnicodeEncodeError as exc:
+        raise SystemExit(
+            "%r cannot be written in this system's code page (%s), so BGT "
+            "would never see it. Spell it as a \\x escape inside a string "
+            "literal instead." % (exc.object[exc.start:exc.end],
+                                  bgt_compile.ansi_codec()))
     probe = os.path.join(project, PREFIX + "probe.bgt")
     produced = os.path.splitext(probe)[0] + ".exe"
     results = os.path.join(project, RESULTS)
@@ -319,19 +330,17 @@ def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
     try:
         if main_file is not None and backup is not None:
             shutil.copy2(main_file, backup)
-            with open(main_file, encoding="utf-8", errors="replace") as fh:
-                body = fh.read()
-            with open(main_file, "w", encoding="utf-8") as fh:
-                fh.write(MAIN.sub(r"\1void %s()" % RENAMED_MAIN, body,
-                                  count=1))
+            body = bgt_compile.read_script(main_file)
+            bgt_compile.write_script(
+                main_file, MAIN.sub(r"\1void %s()" % RENAMED_MAIN, body,
+                                    count=1))
         else:
             #: Not fatal: a project that declares no `main` is drivable, and
             #: saying so beats refusing.
             print("note: no `void main()` in this project -- nothing to "
                   "disarm")
 
-        with open(probe, "w", encoding="utf-8") as fh:
-            fh.write(source)
+        bgt_compile.write_script(probe, source)
         if os.path.isfile(results):
             #: a previous run's table read as this one's is the staleness trap
             #: `bgt oracle` records; delete rather than trust a timestamp
