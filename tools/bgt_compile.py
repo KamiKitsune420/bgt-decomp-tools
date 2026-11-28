@@ -73,6 +73,16 @@ DEFAULT_COMPILERS = (
     r"C:\Program Files\BGT\bgt.exe",
 )
 
+#: BGT is an ANSI program: it takes a script's bytes as they are and shows text
+#: through the system code page, with no fixed encoding of its own. So a staged
+#: copy is read and written as the code page's bytes, not UTF-8 -- otherwise
+#: every byte above 0x7F in a hand-edited literal becomes U+FFFD for the compile
+#: (issue #14). On Windows that codec is the system ANSI code page, which Python
+#: spells `mbcs`; off Windows, latin-1 round-trips all 256 byte values, which is
+#: what the tests need. `surrogateescape` preserves a byte the code page cannot
+#: itself decode, so read-edit-write is byte-exact either way.
+ANSI = "mbcs" if sys.platform == "win32" else "latin-1"
+
 # One PowerShell driver, written beside the script it checks. It launches the
 # compiler, polls for either outcome, prints a JSON record and always kills the
 # process it started -- a GUI left running would hold the next check's window.
@@ -129,6 +139,10 @@ $ran = $false
 # Panes seen on a window that is NOT the compilation report, i.e. whatever the
 # script itself put on screen.
 $said = @()
+# A `BGT Runtime Error` dialog's full message -- file, line, function and
+# Description. Kept apart because it is neither a compile diagnostic nor
+# something the script chose to say: the function under test crashed.
+$runtimeError = ""
 while ((Get-Date) -lt $deadline) {
     if ($proc.HasExited) { $outcome = "exited"; break }
     $window = $null
@@ -147,14 +161,32 @@ while ((Get-Date) -lt $deadline) {
                 $name = $pane.Current.Name
                 # Buttons are furniture, and their labels read exactly like a
                 # one-word message: `-- and said: Continue` is a dialog's own
-                # button, not anything the script reported. The diagnostics
-                # are the long pane.
-                if ($name -ne "" -and
-                    @("Exit","OK","Continue","Cancel","Yes","No","Close") -notcontains $name) {
+                # button, not anything the script reported. An English list
+                # missed them on a localized Windows -- a `Tak`/`Nie` dialog
+                # reported `Tak` ("Yes") as the script's output and lost the
+                # whole message behind it (issue #12). A button label is a
+                # single word in every locale, while every diagnostic and
+                # every runtime-error line carries a space, so keep only the
+                # panes that have one.
+                if ($name -match '\s') {
                     $parts += $name
                 }
             }
             $isReport = ($title -like "Compilation*")
+            $isRuntimeError = ($title -like "*Runtime Error*")
+            if ($isRuntimeError) {
+                # A function under test crashed. Its whole message is worth
+                # keeping; it is terminal, so dismiss the dialog and stop. It
+                # must NOT count as the script's own window ($ran): the run did
+                # not get as far as drawing, it faulted.
+                $runtimeError = $parts -join "`n"
+                $outcome = "runtime_error"
+                $handle = [IntPtr]$window.Current.NativeWindowHandle
+                [BgtKeys]::SetForegroundWindow($handle) | Out-Null
+                [BgtKeys]::PostMessage($handle, 0x0100, [IntPtr]0x0D, [IntPtr]0) | Out-Null
+                [BgtKeys]::PostMessage($handle, 0x0101, [IntPtr]0x0D, [IntPtr]0) | Out-Null
+                break
+            }
             if ($isReport) {
                 # Accumulate, and do not let a later window drop an earlier
                 # one's diagnostics. The same window is read again every
@@ -210,7 +242,7 @@ $exit = -1
 if ($proc.HasExited) { $exit = $proc.ExitCode }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 @{ outcome = $outcome; title = $title; text = $text; exit = $exit; ran = $ran;
-   said = ($said -join "`n") } |
+   said = ($said -join "`n"); runtimeError = $runtimeError } |
     ConvertTo-Json -Compress -Depth 3
 """
 
@@ -241,6 +273,7 @@ class Diagnostic:
 class Report:
     outcome: str                   # compiled | errors | started | timeout
                                    # | nodriver | nobuild | crashed
+                                   # | runtime_error
     diagnostics: List[Diagnostic] = field(default_factory=list)
     title: str = ""
     raw: str = ""
@@ -269,6 +302,12 @@ class Report:
     #: something Crazy Party had said.
     said: str = ""
 
+    #: The full text of a `BGT Runtime Error` dialog, when a function under a
+    #: `bgt drive --build` run (or any run that faults) crashed: file, line,
+    #: function and `Description:`. The dialog's own OK/Yes button is dropped,
+    #: so this is the message rather than a localized `Tak` (issue #12).
+    runtime_error: str = ""
+
     @property
     def runtime_complaints(self) -> List[str]:
         """What the engine said at run time.
@@ -295,6 +334,9 @@ class Report:
                        " titled %r" % self.title if self.title else "",
                        "" if not said else
                        " -- and said: %s" % "; ".join(said[:3])))
+        if self.outcome == "runtime_error":
+            return "a runtime error occurred:\n%s" % (
+                self.runtime_error or self.raw or "(no detail)")
         if self.outcome == "crashed":
             return "the compiler itself died: exit 0x%08X%s" % (
                 self.exit_code & 0xFFFFFFFF,
@@ -951,6 +993,7 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
     title = result.get("title") or ""
     text = result.get("text") or ""
     said = result.get("said") or ""
+    runtime_error = result.get("runtimeError") or ""
     raw_exit = result.get("exit", -1)
     # `or -1` here would turn a clean exit (0, the success case) into -1.
     exit_code = -1 if raw_exit is None else int(raw_exit)
@@ -975,6 +1018,15 @@ def _check(exe: str, script: str, timeout: float, keep_driver: bool,
                           exit_code=exit_code, said=said)
         return Report(outcome="crashed", raw=text, title=title,
                       exit_code=exit_code, said=said)
+    if result.get("outcome") == "runtime_error":
+        # A function under test crashed. The dialog is not a compile result and
+        # not the script's own window: it is the engine faulting, so report it
+        # as its own outcome with the whole message, rather than as `started`
+        # with the advice to "drive a function that does not draw a window"
+        # (issue #12 -- the crash drew nothing; it faulted).
+        return Report(outcome="runtime_error", raw=text, title=title,
+                      exit_code=exit_code, said=said,
+                      runtime_error=runtime_error)
     if result.get("outcome") == "timeout":
         return Report(outcome="timeout", raw=text, title=title,
                       exit_code=exit_code, said=said)
@@ -1051,7 +1103,12 @@ def stage(script: str, out_dir: str, disarm: bool = True,
     The copy exists at all so the executable the compiler writes lands beside
     it and not in the project the caller is reading.
     """
-    with open(script, "r", encoding="utf-8", errors="replace") as fh:
+    # Read and write as the code page's bytes (`surrogateescape` keeps any the
+    # code page cannot decode), so a hand-edited literal above 0x7F compiles as
+    # the byte the author wrote rather than as U+FFFD (issue #14). `void main`
+    # and every `#include` path are ASCII, so disarming and repointing need no
+    # special handling.
+    with open(script, "r", encoding=ANSI, errors="surrogateescape") as fh:
         source = fh.read()
     if disarm:
         source, count = re.subn(r"(?m)^(\s*)void\s+main\s*\(\s*\)",
@@ -1063,7 +1120,7 @@ def stage(script: str, out_dir: str, disarm: bool = True,
         source, os.path.dirname(os.path.abspath(script)),
         os.path.abspath(out_dir))
     target = os.path.join(out_dir, as_name or os.path.basename(script))
-    with open(target, "w", encoding="utf-8") as fh:
+    with open(target, "w", encoding=ANSI, errors="surrogateescape") as fh:
         fh.write(source)
     return target
 

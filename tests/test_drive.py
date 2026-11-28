@@ -176,6 +176,21 @@ class ResultsTests(unittest.TestCase):
         self.write("ms\tk_ctrl(0)\n")
         self.assertEqual(bgt_drive.read_results(self.path), [])
 
+    def test_a_watched_value_above_0x7F_comes_back_as_its_character(self):
+        """The engine writes the table through `file::write` as the code
+        page's bytes, so a byte 0xE4 ('ä') has to read back as that character
+        rather than as U+FFFD -- the information was lost otherwise (issue #14).
+        """
+        with open(self.path, "wb") as fh:
+            fh.write(b"ms\tlitera()\n0\t\xe4\n")
+        rows = bgt_drive.read_results(self.path)
+        self.assertEqual(len(rows), 1)
+        got = rows[0]["litera()"]
+        self.assertEqual(len(got), 1, "one byte is one character, not U+FFFD")
+        self.assertNotEqual(got, "�")
+        self.assertEqual(got.encode(bgt_drive.ANSI, "surrogateescape"),
+                         b"\xe4")
+
 
 class RestoreTests(unittest.TestCase):
     """The project must come back exactly as it was, however the run ends.
@@ -309,9 +324,19 @@ class WatchNamesTests(unittest.TestCase):
         self.assertEqual(bgt_drive.column('f("a\tb")'), 'f("a b")')
 
 
+def test_the_probe_is_encoded_as_the_code_page_not_utf8():
+    """A non-ASCII literal in a watch or setup expression must reach the engine
+    as the byte it means, not as its two UTF-8 bytes (issue #14). `ä` (U+00E4)
+    is 0xE4 under every Western code page and under the latin-1 fallback."""
+    assert bgt_drive._ansi_bytes("Pä") == b"P\xe4"
+    # a plain ASCII probe is unchanged
+    assert bgt_drive._ansi_bytes('string("x")') == b'string("x")'
+
+
 def _ok():
     class R(object):
         outcome, errors, raw, title = "compiled", [], "", None
+        runtime_error = ""   # the field drive() reads for a BGT Runtime Error
     return R()
 
 

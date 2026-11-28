@@ -49,6 +49,21 @@ except ImportError:       # run directly from a checkout
         _os.path.dirname(_os.path.abspath(__file__)), "nvgt"))
     import nvgt_compiler
 
+#: The author's code page, for reading the BGT sources. BGT is an ANSI program
+#: with no fixed encoding: a hand-written `.bgt` holds its text as the bytes of
+#: the authoring system's code page (cp1252 for an English or Finnish game,
+#: cp1251 for Russian), and NVGT is UTF-8. So a raw byte 0xE4 read as that code
+#: page is 'ä', which is then written to the `.nvgt` as its UTF-8 encoding --
+#: the correct conversion (issue #16, shape 2). Reading as `utf-8`/`replace`
+#: instead turned it into U+FFFD. The default is the system's own ANSI code
+#: page; `--source-codepage` overrides it for a game authored elsewhere.
+#:
+#: This does NOT touch a `\xNN` escape that `bgt recover` wrote (shape 1): those
+#: are pure ASCII text, read identically under any code page, so a pack-key
+#: literal built from escapes is never re-encoded. A recovered project, being
+#: all ASCII, converts byte-for-byte the same as before.
+DEFAULT_SOURCE_CODEPAGE = "mbcs" if sys.platform == "win32" else "latin-1"
+
 #: Names the two engines spell differently. Each is read off NVGT's own
 #: registration rather than guessed, and the comment says where.
 RENAMES: Dict[str, str] = {
@@ -1304,7 +1319,8 @@ def convert_text(text: str, renames: Dict[str, str]) -> Tuple[str, List[str]]:
 
 
 def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
-            compile_it: bool = True, fix_names: bool = False) -> Dict[str, Any]:
+            compile_it: bool = True, fix_names: bool = False,
+            source_codepage: str = DEFAULT_SOURCE_CODEPAGE) -> Dict[str, Any]:
     """Convert a recovered BGT project into one NVGT compiles.
 
     Three mechanical steps and one honest report. The steps: every `.bgt`
@@ -1341,12 +1357,22 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
         for name in sorted(files):
             src = os.path.join(root, name)
             if name.endswith(".bgt"):
-                with open(src, encoding="utf-8", errors="replace") as fh:
+                # Read as the game's code page, not UTF-8: a raw high byte then
+                # becomes the character it meant and is written to the `.nvgt`
+                # as proper UTF-8 (issue #16). `surrogateescape` keeps a byte
+                # the code page cannot decode rather than losing it.
+                with open(src, encoding=source_codepage,
+                          errors="surrogateescape") as fh:
                     text = fh.read()
                 text, notes = convert_text(text, RENAMES)
                 report["renames"].extend("%s: %s" % (name, n) for n in notes)
                 dest = os.path.join(dest_dir, name[:-4] + ".nvgt")
-                with open(dest, "w", encoding="utf-8", newline="\n") as fh:
+                # `surrogateescape` on write only matters for a byte the code
+                # page could not decode (a multibyte-code-page edge): it re-emits
+                # that byte rather than crashing the whole conversion. Normal
+                # text, now proper Unicode, encodes to clean UTF-8.
+                with open(dest, "w", encoding="utf-8", newline="\n",
+                          errors="surrogateescape") as fh:
                     fh.write(text)
                 report["files"] += 1
                 scripts.append((dest, text))
@@ -1374,7 +1400,8 @@ def convert(project: str, out: str, nvgt: Optional[Nvgt] = None,
         text, num_notes = apply_stringified_numbers(text, types, members)
         notes += num_notes
         if notes:
-            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            with open(path, "w", encoding="utf-8", newline="\n",
+                      errors="surrogateescape") as fh:
                 fh.write(text)
             report["renames"].extend(
                 "%s: %s" % (os.path.basename(path), n) for n in notes)
@@ -1856,6 +1883,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--no-compile", action="store_true",
                         help="convert without asking the compiler, which is "
                              "the one check this tool can make for free")
+    parser.add_argument("--source-codepage", metavar="ENC",
+                        default=DEFAULT_SOURCE_CODEPAGE,
+                        help="the code page the BGT sources were authored in, "
+                             "so a raw byte above 0x7F converts to the right "
+                             "UTF-8 (default: the system ANSI code page; e.g. "
+                             "cp1251 for a Russian game)")
     parser.add_argument("--json", metavar="FILE", help="write the report")
     args = parser.parse_args(argv)
 
@@ -1867,7 +1900,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "NVGT_COMPILER to get the check this tool is for.")
     report = convert(args.project, args.output, nvgt,
                      compile_it=not args.no_compile,
-                     fix_names=args.fix_conflicts)
+                     fix_names=args.fix_conflicts,
+                     source_codepage=args.source_codepage)
     print(summary(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

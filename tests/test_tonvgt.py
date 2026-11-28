@@ -834,3 +834,54 @@ class UnknownNamesCarryTheirReasonTests(unittest.TestCase):
             self.assertIn(name, bgt_to_nvgt.SEMANTIC)
             self.assertGreater(len(bgt_to_nvgt.SEMANTIC[name]), 80,
                                "a one-line note is not an explanation")
+
+
+class SourceEncodingTests(unittest.TestCase):
+    r"""BGT is ANSI and NVGT is UTF-8, so converting the engines means
+    converting the text encoding too (issue #16). A raw byte above 0x7F in a
+    hand-written `.bgt` is the authoring code page's character, and must reach
+    the `.nvgt` as that character's UTF-8 -- not as U+FFFD, which `utf-8`/
+    `errors='replace'` produced. A `\xNN` escape and plain ASCII are untouched,
+    so a recovered project (all ASCII) converts byte-for-byte as before and a
+    pack-key literal built from escapes is never re-encoded.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.src = tempfile.mkdtemp(prefix="tonvgt_enc_src_")
+        self.out = tempfile.mkdtemp(prefix="tonvgt_enc_out_")
+
+    def tearDown(self):
+        import shutil
+        for d in (self.src, self.out):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _convert_bytes(self, raw, codepage="latin-1"):
+        with open(os.path.join(self.src, "game.bgt"), "wb") as fh:
+            fh.write(raw)
+        bgt_to_nvgt.convert(self.src, self.out, nvgt=None, compile_it=False,
+                            source_codepage=codepage)
+        with open(os.path.join(self.out, "game.nvgt"), "rb") as fh:
+            return fh.read()
+
+    def test_a_raw_code_page_byte_becomes_proper_utf8(self):
+        # 0xE4 is 'ä' under latin-1/cp1252; its UTF-8 is C3 A4.
+        out = self._convert_bytes(b'string s = "P\xe4\xe4st\xe4";\n')
+        self.assertIn(b"P\xc3\xa4\xc3\xa4st\xc3\xa4", out)
+        self.assertNotIn(b"\xef\xbf\xbd", out)        # no U+FFFD
+        self.assertNotIn(b"\xe4", out)                # no stray raw byte
+
+    def test_a_cyrillic_game_converts_under_its_own_code_page(self):
+        # 0xCF is 'П' under cp1251; its UTF-8 is D0 9F.
+        out = self._convert_bytes(b'string s = "\xcf";\n', codepage="cp1251")
+        self.assertIn("П".encode("utf-8"), out)
+
+    def test_an_escape_and_ascii_are_left_exactly_alone(self):
+        # shape 1: a `\xNN` escape bgt recover wrote -- pure ASCII text (a
+        # backslash, an x, two hex digits), a byte string such as a pack key,
+        # must NOT be re-encoded. The bytes below are the six ASCII characters
+        # `\`, `x`, `0`, `0`, ... not the bytes 0x00 and 0xE4.
+        out = self._convert_bytes(b'string key = "\\x00\\xe4ab";\n')
+        self.assertIn(b'"\\x00\\xe4ab"', out)
+
+

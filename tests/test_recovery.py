@@ -2626,6 +2626,69 @@ def test_the_driver_keeps_every_report_window_s_diagnostics():
     assert '{ $text = $parts -join "`n" }' not in driver
 
 
+def test_stage_preserves_a_byte_above_0x7F_rather_than_mangling_it(tmp_path=None):
+    """BGT reads a script's bytes through the system code page, so a staged
+    copy has to keep them byte-for-byte: a hand-edited literal holding 0xE4
+    ('ä' on a Western code page) must compile as that byte, not as the three
+    bytes of U+FFFD that `utf-8`/`errors='replace'` produced (issue #14).
+
+    Portable because the file operations round-trip bytes: on Windows the codec
+    is the system code page, off Windows it is latin-1, and both map 0xE4 back
+    to 0xE4.
+    """
+    import shutil as _sh
+    work = tempfile.mkdtemp()
+    try:
+        src = os.path.join(work, "game.bgt")
+        # a byte above 0x7F inside a string literal, plus a `main` to disarm
+        with open(src, "wb") as fh:
+            fh.write(b'string s = "P\xe4\xe4st\xe4";\nvoid main()\n{\n}\n')
+        out = os.path.join(work, "staged")
+        target = bgt_compile.stage(src, out, disarm=True)
+        with open(target, "rb") as fh:
+            data = fh.read()
+        assert b"P\xe4\xe4st\xe4" in data, (
+            "the 0xE4 bytes must survive staging unchanged")
+        assert b"\xef\xbf\xbd" not in data, "no byte became U+FFFD"
+        assert b"__recovered_main" in data, "main still disarmed"
+    finally:
+        _sh.rmtree(work, ignore_errors=True)
+
+
+def test_the_driver_reports_a_runtime_error_as_its_own_outcome():
+    """A `BGT Runtime Error` dialog is neither a compile result nor the
+    script's own window: a function under test faulted. The driver used to
+    classify it as `started` ("it drew a window") and the CLI then printed the
+    dialog's OK/Yes button as the only line -- on a Polish Windows, `Tak`, with
+    the file, line, function and `Description:` all lost (issue #12).
+
+    Checked on the driver's source and on `Report`, because the behaviour needs
+    the engine: the dialog has to be recognised, and its button pane dropped by
+    shape (every locale's button is one word) rather than by an English list.
+    """
+    driver = bgt_compile.DRIVER
+    assert '$title -like "*Runtime Error*"' in driver, (
+        "a runtime-error dialog has to be told from the script's own window")
+    assert '$outcome = "runtime_error"' in driver
+    assert "runtimeError = $runtimeError" in driver, (
+        "the whole message has to reach Python, not just the button")
+    # Buttons are dropped by having no whitespace, not by an English label
+    # list, or `Tak`/`Nie`/`Ja`/`Oui` pass through as the script's output.
+    assert "$name -match '\\s'" in driver
+    assert '@("Exit","OK","Continue","Cancel","Yes","No","Close")' not in driver
+
+    # The outcome carries its message and is not a success.
+    report = bgt_compile.Report(
+        outcome="runtime_error",
+        runtime_error=("A runtime error occurred.\nFile: game.bgt\n"
+                       "On line: 4\nIn function: int boom()\n"
+                       "Description: Index out of bounds"))
+    assert not report.ok
+    summary = report.summary()
+    assert "Index out of bounds" in summary and "int boom()" in summary
+    assert "Tak" not in summary
+
+
 def test_a_warning_after_an_information_line_is_parsed():
     """The engine's report for a warning-only compile, parsed.
 

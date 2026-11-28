@@ -111,6 +111,20 @@ RENAMED_MAIN = PREFIX + "game_main"
 
 MAIN = re.compile(r"(?m)^(\s*)void\s+main\s*\(\s*\)")
 
+#: The same, on bytes. A `.bgt` is the code page's bytes, so `main` is disarmed
+#: without decoding -- `void main` is ASCII, and a byte above 0x7F in a string
+#: literal stays the byte the module held rather than becoming U+FFFD for the
+#: run (issue #14).
+MAIN_BYTES = re.compile(rb"(?m)^(\s*)void\s+main\s*\(\s*\)")
+
+#: BGT is an ANSI program: it takes a script's bytes as they are and shows text
+#: through the system code page, with no fixed encoding of its own. So the probe
+#: and the result table are the code page's bytes, not UTF-8 -- otherwise every
+#: byte above 0x7F is corrupted, in a watched literal going in and in a watched
+#: value coming back (issue #14). On Windows that codec is `mbcs`; off Windows,
+#: latin-1 round-trips all 256 byte values, which is what the tests need.
+ANSI = "mbcs" if sys.platform == "win32" else "latin-1"
+
 TEMPLATE = '''#include "{entry}"
 
 // ---- written by `bgt drive`, and deleted again ------------------------
@@ -209,6 +223,22 @@ def _literal(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _ansi_bytes(source: str) -> bytes:
+    """The probe as the code page's bytes, so a non-ASCII literal in a watch or
+    setup expression reaches the engine as the byte it means rather than as its
+    UTF-8 encoding (issue #14). A character the code page cannot hold is a clear
+    failure rather than a silent `?`: BGT has no fixed encoding, so there is no
+    right byte to substitute."""
+    try:
+        return source.encode(ANSI)
+    except UnicodeEncodeError as exc:
+        raise SystemExit(
+            "a --watch/--setup expression has a character the system code "
+            "page (%s) cannot represent (%s). BGT reads a script's bytes "
+            "through that code page, so there is no byte to stand in for it."
+            % (ANSI, exc))
+
+
 def probe_source(entry: str, watch: Sequence[str], call: Sequence[str] = (),
                  hold: Sequence[str] = (), setup: Sequence[str] = (),
                  duration: int = 1000, every: int = 100,
@@ -238,7 +268,10 @@ def read_results(path: str) -> List[Dict[str, str]]:
     """The probe's table, as a row per tick."""
     if not os.path.isfile(path):
         return []
-    with open(path, encoding="utf-8", errors="replace") as fh:
+    # The engine wrote this through `file::write`, so it is the code page's
+    # bytes: a watched value above 0x7F comes back as its real character rather
+    # than as U+FFFD (issue #14).
+    with open(path, encoding=ANSI, errors="surrogateescape") as fh:
         lines = [l.rstrip("\r\n") for l in fh if l.strip()]
     if not lines:
         return []
@@ -319,19 +352,22 @@ def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
     try:
         if main_file is not None and backup is not None:
             shutil.copy2(main_file, backup)
-            with open(main_file, encoding="utf-8", errors="replace") as fh:
+            # On bytes, so a non-ASCII literal elsewhere in the file is not
+            # rewritten to U+FFFD for the run (issue #14). `void main` is ASCII.
+            with open(main_file, "rb") as fh:
                 body = fh.read()
-            with open(main_file, "w", encoding="utf-8") as fh:
-                fh.write(MAIN.sub(r"\1void %s()" % RENAMED_MAIN, body,
-                                  count=1))
+            with open(main_file, "wb") as fh:
+                fh.write(MAIN_BYTES.sub(
+                    rb"\1void %s()" % RENAMED_MAIN.encode("ascii"), body,
+                    count=1))
         else:
             #: Not fatal: a project that declares no `main` is drivable, and
             #: saying so beats refusing.
             print("note: no `void main()` in this project -- nothing to "
                   "disarm")
 
-        with open(probe, "w", encoding="utf-8") as fh:
-            fh.write(source)
+        with open(probe, "wb") as fh:
+            fh.write(_ansi_bytes(source))
         if os.path.isfile(results):
             #: a previous run's table read as this one's is the staleness trap
             #: `bgt oracle` records; delete rather than trust a timestamp
@@ -353,7 +389,11 @@ def drive(project: str, watch: Sequence[str], call: Sequence[str] = (),
                 or outcome
         return {"probe": probe, "outcome": outcome,
                 "errors": [d.message for d in report.errors],
-                "raw": (report.raw or "").strip(),
+                # A runtime error's detail lives in `runtime_error`, not `raw`
+                # (which holds what the compiler said about the source, empty
+                # for a crash). Prefer it so the CLI prints the message rather
+                # than nothing (issue #12).
+                "raw": (report.runtime_error or report.raw or "").strip(),
                 "rows": read_results(results),
                 "watch": list(watch), "source": source}
     finally:
@@ -464,7 +504,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for line in out["errors"][:8]:
             print("    %s" % line)
         if not out["errors"] and out["raw"]:
-            print("    %s" % out["raw"].splitlines()[0])
+            # Every line, not only the first. A `BGT Runtime Error` carries its
+            # file, line, function and `Description:` across several lines, and
+            # `splitlines()[0]` kept only the first -- which, with the dialog's
+            # button pane dropped, is `A runtime error occurred.` with no
+            # detail, and before that was the localized button itself, `Tak`
+            # (issue #12). The outcome is `runtime_error`, not `started`, so the
+            # window advice below is correctly not printed: the run faulted, it
+            # did not draw a window.
+            for line in out["raw"].splitlines():
+                print("    %s" % line)
         if out["outcome"] == "started":
             #: the one outcome worth explaining, because it reads as a
             #: failure of the recovery and is a failure of the harness: some
