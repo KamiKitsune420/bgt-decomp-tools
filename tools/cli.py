@@ -474,6 +474,8 @@ def cmd_tonvgt(args: argparse.Namespace) -> int:
         argv += ["--fix-conflicts"]
     if args.no_compile:
         argv.append("--no-compile")
+    if getattr(args, "source_codepage", None):
+        argv += ["--source-codepage", args.source_codepage]
     if args.json:
         argv += ["--json", args.json]
     return _run(bgt_to_nvgt.main, argv, prog="bgt tonvgt")
@@ -1092,6 +1094,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "therefore provably the same program")
     p.add_argument("--no-compile", action="store_true",
                    help="convert without asking the compiler")
+    p.add_argument("--source-codepage", metavar="ENC",
+                   help="the code page the BGT sources were authored in, so "
+                        "a raw byte above 0x7F converts to the right UTF-8 "
+                        "(default: the system ANSI code page; e.g. cp1252 "
+                        "for an English or Finnish game, cp1251 for a "
+                        "Russian one)")
     p.add_argument("--json", metavar="FILE", help="write the report")
     p.set_defaults(func=cmd_tonvgt)
 
