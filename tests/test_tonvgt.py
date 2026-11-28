@@ -884,4 +884,52 @@ class SourceEncodingTests(unittest.TestCase):
         out = self._convert_bytes(b'string key = "\\x00\\xe4ab";\n')
         self.assertIn(b'"\\x00\\xe4ab"', out)
 
+class CliForwardsTheSourceCodepageTests(unittest.TestCase):
+    """`bgt tonvgt` has its own parser in `cli.py` and forwards a fixed argv
+    to `bgt_to_nvgt.main`, so an option added to one is invisible through the
+    other until it is added there too (issue #17: `--source-codepage` was
+    rejected as an unrecognized argument). Driven through `cli.main`, the
+    way a user runs it, with `--no-compile` so no NVGT is needed.
+    """
 
+    def setUp(self):
+        import tempfile
+        self.src = tempfile.mkdtemp(prefix="tonvgt_cli_src_")
+        self.out = tempfile.mkdtemp(prefix="tonvgt_cli_out_")
+
+    def tearDown(self):
+        import shutil
+        for d in (self.src, self.out):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_cli_passes_the_codepage_through(self):
+        import cli
+        # 0xE5 is 'a with ring' in cp1252 and 'l with acute' in cp1250, so
+        # only the forwarded code page gives C3 A5.
+        raw = b'string s = "' + bytes([0xE5]) + b'";' + bytes([10])
+        with open(os.path.join(self.src, "game.bgt"), "wb") as fh:
+            fh.write(raw)
+        rc = cli.main(["tonvgt", self.src, "-o", self.out, "--no-compile",
+                       "--source-codepage", "cp1252"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.out, "game.nvgt"), "rb") as fh:
+            out = fh.read()
+        self.assertIn(bytes([0xC3, 0xA5]), out)
+
+    def test_every_converter_option_is_accepted_by_the_cli(self):
+        import contextlib
+        import io
+        import re
+        import cli
+        def options(run):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    run()
+                except SystemExit:
+                    pass
+            return set(re.findall(r"--[a-z][a-z-]+", buf.getvalue()))
+        own = options(lambda: bgt_to_nvgt.main(["--help"]))
+        exposed = options(lambda: cli.main(["tonvgt", "--help"]))
+        self.assertTrue(own, "no options read from bgt_to_nvgt --help")
+        self.assertEqual(own - exposed, set())
